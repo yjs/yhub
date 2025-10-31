@@ -69,10 +69,10 @@ export const createYWebsocketServer = async ({
   await promise.create((resolve, reject) => {
     app.listen(port, (token) => {
       if (token) {
-        logging.print(logging.GREEN, '[y-redis] Listening to port ', port)
+        logging.print(logging.GREEN, '[y-redis(papermill)] Listening to port ', port)
         resolve()
       } else {
-        const err = error.create('[y-redis] Failed to lisen to port ' + port)
+        const err = error.create('[y-redis(papermill)] Failed to listen to port ' + port)
         reject(err)
         throw err
       }

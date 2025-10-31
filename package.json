@@ -1,6 +1,6 @@
 {
   "name": "@papermillio/y-redis",
-  "version": "0.1.7",
+  "version": "0.1.6",
   "description": "Scalable websocket provider for Yjs using redis",
   "sideEffects": false,
   "type": "module",

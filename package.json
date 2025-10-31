@@ -1,6 +1,6 @@
 {
-  "name": "@y/redis",
-  "version": "0.1.6",
+  "name": "@papermillio/y-redis",
+  "version": "0.1.7",
   "description": "Scalable websocket provider for Yjs using redis",
   "sideEffects": false,
   "type": "module",
@@ -53,7 +53,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yjs/y-redis.git"
+    "url": "https://github.com/papermillio/y-redis.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
   },
   "keywords": [
     "Yjs"

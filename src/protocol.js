@@ -83,6 +83,8 @@ export const mergeMessages = messages => {
       )
     )
   }))
+
+  aw.destroy()
   return result
 }
 

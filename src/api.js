@@ -233,6 +233,7 @@ export class Api {
     let docChanged = false
     ydoc.once('afterTransaction', tr => {
       docChanged = tr.changed.size > 0
+      ydoc.destroy()
     })
     ydoc.transact(() => {
       docMessages?.messages.forEach(m => {

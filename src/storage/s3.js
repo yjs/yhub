@@ -38,7 +38,7 @@ export const createS3Storage = (bucketName) => {
  * @param {boolean} [gc]
  * @param {string} [r]
  */
-export const encodeS3ObjectName = (room, docid, branch = 'main', gc = true, r = random.uuidv4()) => `${encodeURIComponent(room)}/${encodeURIComponent(docid)}/${branch}/${gc}/${r}`
+export const encodeS3ObjectName = (room, docid, branch = 'main', gc = true, r = random.uuidv4()) => `${encodeURIComponent(room)}/${encodeURIComponent(docid)}/${encodeURIComponent(branch)}/${gc}/${r}`
 
 /**
  * @param {string} objectName
@@ -48,7 +48,7 @@ export const decodeS3ObjectName = objectName => {
   if (match == null) {
     throw new Error('Malformed y:room S3 object name')
   }
-  return { room: decodeURIComponent(match[1]), docid: decodeURIComponent(match[2]), branch: match[3], gc: match[4] === 'true', r: match[5] }
+  return { room: decodeURIComponent(match[1]), docid: decodeURIComponent(match[2]), branch: decodeURIComponent(match[3]), gc: match[4] === 'true', r: match[5] }
 }
 
 /**

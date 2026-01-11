@@ -31,7 +31,7 @@ const run = async subscriber => {
 }
 
 /**
- * @param {import('./storage.js').AbstractStorage} store
+ * @param {import('./storage.js').Storage} store
  * @param {string} redisPrefix
  */
 export const createSubscriber = async (store, redisPrefix) => {

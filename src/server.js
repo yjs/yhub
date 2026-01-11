@@ -27,7 +27,7 @@ class YWebsocketServer {
 /**
  * @param {Object} opts
  * @param {number} opts.port
- * @param {import('./storage.js').AbstractStorage} opts.store
+ * @param {import('./storage.js').Storage} opts.store
  * @param {string} [opts.redisPrefix]
  * @param {string} opts.checkPermCallbackUrl
  * @param {(room:string,docname:string,client:import('./api.js').Api)=>void} [opts.initDocCallback] -
@@ -44,7 +44,7 @@ export const createYWebsocketServer = async ({
 }) => {
   checkPermCallbackUrl += checkPermCallbackUrl.slice(-1) !== '/' ? '/' : ''
   const app = uws.App({})
-  await registerYWebsocketServer(app, '/:room', store, async (req) => {
+  await registerYWebsocketServer(app, '/:room', store, redisPrefix, async (req) => {
     const room = /** @type {string} */ (req.getParameter(0))
     const headerWsProtocol = req.getHeader('sec-websocket-protocol')
     const [, , token] = /(^|,)yauth-(((?!,).)*)/.exec(headerWsProtocol) ?? [null, null, req.getQuery('yauth')]
@@ -67,7 +67,7 @@ export const createYWebsocketServer = async ({
       console.error('Failed to pull permissions from', { permUrl })
       throw e
     }
-  }, { redisPrefix, initDocCallback })
+  }, { initDocCallback })
 
   await promise.create((resolve, reject) => {
     app.listen(port, (token) => {

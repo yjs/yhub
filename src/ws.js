@@ -83,18 +83,18 @@ class User {
 /**
  * @param {uws.TemplatedApp} app
  * @param {uws.RecognizedString} pattern
- * @param {import('./storage.js').AbstractStorage} store
+ * @param {import('./storage.js').Storage} storage
+ * @param {string} redisPrefix
  * @param {function(uws.HttpRequest): Promise<{ hasWriteAccess: boolean, room: string, userid: string, gc: boolean, branch: string }>} checkAuth
  * @param {Object} conf
- * @param {string} [conf.redisPrefix]
  * @param {(room:string,docname:string,client:api.Api)=>void} [conf.initDocCallback] - this is called when a doc is
  * accessed, but it doesn't exist. You could populate the doc here. However, this function could be
  * called several times, until some content exists. So you need to handle concurrent calls.
  */
-export const registerYWebsocketServer = async (app, pattern, store, checkAuth, { redisPrefix = 'y', initDocCallback = () => {} } = {}) => {
+export const registerYWebsocketServer = async (app, pattern, storage, redisPrefix, checkAuth, { initDocCallback = () => {} } = {}) => {
   const [client, subscriber] = await promise.all([
-    api.createApiClient(store, redisPrefix),
-    createSubscriber(store, redisPrefix)
+    api.createApiClient(storage, redisPrefix),
+    createSubscriber(storage, redisPrefix)
   ])
   /**
    * @param {string} stream

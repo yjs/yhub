@@ -32,21 +32,19 @@ const createWsClient = (tc, room, { branch = 'main', gc = true } = {}) => {
 }
 
 const createWorker = async () => {
-  const worker = await api.createWorker(utils.store, utils.redisPrefix, {})
-  worker.client.redisMinMessageLifetime = 800
-  worker.client.redisTaskDebounce = 500
+  const worker = await api.createWorker(utils.storage, utils.redisPrefix, {})
   utils.prevClients.push(worker.client)
   return worker
 }
 
 const createServer = async () => {
-  const server = await createYWebsocketServer({ port: utils.yredisPort, store: utils.store, redisPrefix: utils.redisPrefix, checkPermCallbackUrl: utils.checkPermCallbackUrl })
+  const server = await createYWebsocketServer({ port: utils.yredisPort, store: utils.storage, redisPrefix: utils.redisPrefix, checkPermCallbackUrl: utils.checkPermCallbackUrl })
   utils.prevClients.push(server)
   return server
 }
 
 const createApiClient = async () => {
-  const client = await api.createApiClient(utils.store, utils.redisPrefix)
+  const client = await api.createApiClient(utils.storage, utils.redisPrefix)
   utils.prevClients.push(client)
   return client
 }
@@ -92,7 +90,7 @@ const waitDocsSynced = (ydoc1, ydoc2) => {
     const isSynced = array.equalFlat(e1, e2)
     isSynced && console.info('docs sycned!')
     return isSynced
-  }).catch(err => promise.resolve())
+  }).catch(err => promise.resolve(err))
 }
 
 /**
@@ -114,7 +112,7 @@ export const testSyncAndCleanup = async tc => {
   await waitDocsSynced(doc1, doc3)
   t.info('docs synced (2)')
   t.assert(doc3.getMap().get('a') === 1)
-  await promise.wait(worker.client.redisMinMessageLifetime * 5)
+  await promise.wait(worker.client.redisMinMessageLifetime * 4)
   const docStreamExists = await redisClient.exists(api.computeRedisRoomStreamName(tc.testName + '-' + 'map', 'index', 'main', utils.redisPrefix))
   const workerLen = await redisClient.xLen(utils.redisPrefix + ':worker')
   t.assert(!docStreamExists && docStreamExistsBefore)
@@ -125,14 +123,14 @@ export const testSyncAndCleanup = async tc => {
   await waitDocsSynced(doc3, doc4)
   t.info('docs synced (3)')
   t.assert(doc3.getMap().get('a') === 1)
-  const memRetrieved = await utils.store.retrieveDoc(tc.testName + '-' + 'map', 'index')
+  const memRetrieved = await utils.storage.retrieveDoc(tc.testName + '-' + 'map', 'index')
   t.assert(memRetrieved?.references.length === 1)
   t.info('doc retrieved')
   // now write another updates that the worker will collect
   doc1.getMap().set('a', 2)
-  await promise.wait(worker.client.redisMinMessageLifetime * 2)
+  await promise.wait(worker.client.redisMinMessageLifetime * 4)
   t.assert(doc2.getMap().get('a') === 2)
-  const memRetrieved2 = await utils.store.retrieveDoc(tc.testName + '-' + 'map', 'index')
+  const memRetrieved2 = await utils.storage.retrieveDoc(tc.testName + '-' + 'map', 'index')
   t.info('map retrieved')
   // should delete old references
   t.assert(memRetrieved2?.references.length === 1)
@@ -144,12 +142,12 @@ export const testSyncAndCleanup = async tc => {
  */
 export const testGcNonGcDocs = async tc => {
   const { createWsClient } = await createTestCase(tc)
-  const {ydoc: ydocGc } = createWsClient('gctest')
+  const { ydoc: ydocGc } = createWsClient('gctest')
   ydocGc.getMap().set('a', 1)
   await promise.wait(500)
   ydocGc.getMap().set('a', 2)
   await promise.wait(100)
-  const {ydoc: ydocNoGc } = createWsClient('gctest', { gc: false })
+  const { ydoc: ydocNoGc } = createWsClient('gctest', { gc: false })
   await waitDocsSynced(ydocGc, ydocNoGc)
   t.assert(ydocNoGc.getMap().get('a') === 2)
   // check that content was not gc'd

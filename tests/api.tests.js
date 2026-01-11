@@ -4,7 +4,7 @@ import * as api from '../src/api.js'
 import * as encoding from 'lib0/encoding'
 import * as promise from 'lib0/promise'
 import * as redis from 'redis'
-import { prevClients, store } from './utils.js'
+import { prevClients, storage } from './utils.js'
 
 const redisPrefix = 'ytests'
 
@@ -20,7 +20,7 @@ const createTestCase = async tc => {
   const keysToDelete = await redisClient.keys(redisPrefix + ':*')
   keysToDelete.length > 0 && await redisClient.del(keysToDelete)
   await redisClient.quit()
-  const client = await api.createApiClient(store, redisPrefix)
+  const client = await api.createApiClient(storage, redisPrefix)
   prevClients.push(client)
   const room = tc.testName
   const docid = 'main'
@@ -45,9 +45,7 @@ const createTestCase = async tc => {
 }
 
 const createWorker = async () => {
-  const worker = await api.createWorker(store, redisPrefix, {})
-  worker.client.redisMinMessageLifetime = 10000
-  worker.client.redisTaskDebounce = 5000
+  const worker = await api.createWorker(storage, redisPrefix, {})
   prevClients.push(worker.client)
   return worker
 }

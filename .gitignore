@@ -2,6 +2,7 @@ dist
 node_modules
 tmp
 .env
+.env.testing
 .env.save*
 .env.backup*
 .DS_Store

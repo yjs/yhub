@@ -80,7 +80,7 @@ const decodeRedisRoomStreamName = (rediskey, expectedPrefix) => {
 }
 
 /**
- * @param {import('./storage.js').AbstractStorage} store
+ * @param {import('./storage.js').Storage} store
  * @param {string} redisPrefix
  */
 export const createApiClient = async (store, redisPrefix) => {
@@ -94,7 +94,7 @@ export const createApiClient = async (store, redisPrefix) => {
 
 export class Api {
   /**
-   * @param {import('./storage.js').AbstractStorage} store
+   * @param {import('./storage.js').Storage} store
    * @param {string} prefix
    */
   constructor (store, prefix) {
@@ -347,7 +347,7 @@ export class Api {
  */
 
 /**
- * @param {import('./storage.js').AbstractStorage} store
+ * @param {import('./storage.js').Storage} store
  * @param {string} redisPrefix
  * @param {WorkerOpts} opts
  */

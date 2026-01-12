@@ -26,9 +26,9 @@ export const storage = await createPostgresStorage(env.ensureConf('postgres-test
 const tableExists = await storage.sql`
   SELECT EXISTS (
     SELECT FROM pg_tables
-    WHERE tablename = 'yredis_docs_v2'
+    WHERE tablename = 'yhub_updates_v1'
   );
 `
 if (tableExists?.[0]?.exists) {
-  await storage.sql`DELETE from yredis_docs_v2`
+  await storage.sql`DELETE from yhub_updates_v1`
 }

@@ -99,6 +99,7 @@ export class Api {
    */
   constructor (store, prefix) {
     this.store = store
+    this.sql = store.sql
     this.prefix = prefix
     this.consumername = random.uuidv4()
     /**

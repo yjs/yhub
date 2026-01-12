@@ -10,28 +10,53 @@ export const createPostgresStorage = async (postgresUrl) => {
   // If a specific database is requested, ensure it exists
   const sql = postgres(postgresUrl, postgresConf)
 
-  const docsTableExists = await sql`
-    SELECT EXISTS (
-      SELECT FROM
-          pg_tables
-      WHERE
-          tablename  = 'yredis_docs_v2'
-    );
-  `
-  // we perform a check beforehand to avoid a pesky log message if the table already exists
-  if (!docsTableExists || docsTableExists.length === 0 || !docsTableExists[0].exists) {
-    await sql`
-      CREATE TABLE IF NOT EXISTS yredis_docs_v2 (
-          room        text,
-          doc         text,
-          branch      text DEFAULT 'main',
-          gc          boolean DEFAULT true,
-          r           SERIAL,
-          update      bytea,
-          sv          bytea,
-          PRIMARY KEY (room,doc,branch,gc,r)
+  { // INIT UPDATES TABLE
+    const docsTableExists = await sql`
+      SELECT EXISTS (
+        SELECT FROM
+            pg_tables
+        WHERE
+            tablename  = 'yhub_updates_v1'
       );
     `
+    // we perform a check beforehand to avoid a pesky log message if the table already exists
+    if (!docsTableExists || docsTableExists.length === 0 || !docsTableExists[0].exists) {
+      await sql`
+        CREATE TABLE IF NOT EXISTS yhub_updates_v1 (
+            org         text,
+            docid       text,
+            branch      text DEFAULT 'main',
+            gc          boolean DEFAULT true,
+            r           SERIAL,
+            update      bytea,
+            sv          bytea,
+            PRIMARY KEY (org,docid,branch,gc,r)
+        );
+      `
+    }
+  }
+
+  { // INIT ATTRIBUTIONS TABLE
+    const attributionsTableExists = await sql`
+      SELECT EXISTS (
+        SELECT FROM
+            pg_tables
+        WHERE
+            tablename  = 'yhub_attributions_v1'
+      );
+    `
+    // perform a check beforehand to avoid a pesky log message if the table already exists
+    if (!attributionsTableExists || attributionsTableExists.length === 0 || !attributionsTableExists[0].exists) {
+      await sql`
+        CREATE TABLE IF NOT EXISTS yhub_attributions_v1 (
+            org         text,
+            docid       text,
+            branch      text DEFAULT 'main',
+            contentmap  bytea,
+            PRIMARY KEY (org,docid,branch)
+        );
+      `
+    }
   }
   return new Storage(sql)
 }
@@ -50,34 +75,34 @@ export class Storage {
   }
 
   /**
-   * @param {string} room
-   * @param {string} docname
+   * @param {string} org
+   * @param {string} docid
    * @param {Y.Doc} ydoc
    * @param {Object} opts
    * @param {boolean} [opts.gc]
    * @param {string} [opts.branch]
    * @returns {Promise<void>}
    */
-  async persistDoc (room, docname, ydoc, { gc = true, branch = 'main' } = {}) {
+  async persistDoc (org, docid, ydoc, { gc = true, branch = 'main' } = {}) {
     await this.sql`
-      INSERT INTO yredis_docs_v2 (room,doc,branch,gc,r,update,sv)
-      VALUES (${room},${docname},${branch},${gc},DEFAULT,${Y.encodeStateAsUpdateV2(ydoc)},${Y.encodeStateVector(ydoc)})
+      INSERT INTO yhub_updates_v1 (org,docid,branch,gc,r,update,sv)
+      VALUES (${org},${docid},${branch},${gc},DEFAULT,${Y.encodeStateAsUpdateV2(ydoc)},${Y.encodeStateVector(ydoc)})
     `
   }
 
   /**
-   * @param {string} room
-   * @param {string} docname
+   * @param {string} org
+   * @param {string} docid
    * @param {Object} opts
    * @param {boolean} [opts.gc]
    * @param {string} [opts.branch]
    * @return {Promise<{ doc: Uint8Array, references: Array<number> } | null>}
    */
-  async retrieveDoc (room, docname, { gc = true, branch = 'main' } = {}) {
+  async retrieveDoc (org, docid, { gc = true, branch = 'main' } = {}) {
     /**
-     * @type {Array<{ room: string, doc: string, branch: string, gc: boolean, r: number, update: Buffer }>}
+     * @type {Array<{ r: number, update: Buffer }>}
      */
-    const rows = await this.sql`SELECT update,r from yredis_docs_v2 WHERE room = ${room} AND doc = ${docname} AND branch = ${branch} AND gc = ${gc}`
+    const rows = await this.sql`SELECT update,r from yhub_updates_v1 WHERE org = ${org} AND docid = ${docid} AND branch = ${branch} AND gc = ${gc}`
     if (rows.length === 0) {
       return null
     }
@@ -87,15 +112,15 @@ export class Storage {
   }
 
   /**
-   * @param {string} room
-   * @param {string} docname
+   * @param {string} org
+   * @param {string} docid
    * @param {Object} opts
    * @param {boolean} [opts.gc]
    * @param {string} [opts.branch]
    * @return {Promise<Uint8Array|null>}
    */
-  async retrieveStateVector (room, docname, { gc = true, branch = 'main' } = {}) {
-    const rows = await this.sql`SELECT sv from yredis_docs_v2 WHERE room = ${room} AND doc = ${docname} AND branch = ${branch} AND gc = ${gc} LIMIT 1`
+  async retrieveStateVector (org, docid, { gc = true, branch = 'main' } = {}) {
+    const rows = await this.sql`SELECT sv from yhub_updates_v1 WHERE org = ${org} AND docid = ${docid} AND branch = ${branch} AND gc = ${gc} LIMIT 1`
     if (rows.length > 1) {
       // expect that result is limited
       error.unexpectedCase()
@@ -104,16 +129,16 @@ export class Storage {
   }
 
   /**
-   * @param {string} room
-   * @param {string} docname
+   * @param {string} org
+   * @param {string} docid
    * @param {Array<any>} storeReferences
    * @param {Object} opts
    * @param {boolean} [opts.gc]
    * @param {string} [opts.branch]
    * @return {Promise<void>}
    */
-  async deleteReferences (room, docname, storeReferences, { gc = true, branch = 'main' } = {}) {
-    await this.sql`DELETE FROM yredis_docs_v2 WHERE room = ${room} AND doc = ${docname} AND branch = ${branch} AND gc = ${gc} AND r in (${storeReferences})`
+  async deleteReferences (org, docid, storeReferences, { gc = true, branch = 'main' } = {}) {
+    await this.sql`DELETE FROM yhub_updates_v1 WHERE org = ${org} AND docid = ${docid} AND branch = ${branch} AND gc = ${gc} AND r = ANY(${storeReferences})`
   }
 
   async destroy () {

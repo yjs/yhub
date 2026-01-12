@@ -16,10 +16,10 @@
     "moduleResolution": "nodenext",
     "baseUrl": "./",
     "paths": {
-      "@y/redis": ["./src/index.js"],
-      "@y/redis/storage/memory": ["./src/storage/memory.js"],
-      "@y/redis/storage/s3": ["./src/storage/s3.js"],
-      "@y/redis/storage/postgres": ["./src/storage/postgres.js"]
+      "@y/hub": ["./src/index.js"],
+      "@y/hub/storage/memory": ["./src/storage/memory.js"],
+      "@y/hub/storage/s3": ["./src/storage/s3.js"],
+      "@y/hub/storage/postgres": ["./src/storage/postgres.js"]
     }
   },
   "exclude": [

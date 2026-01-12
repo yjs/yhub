@@ -9,14 +9,15 @@
     "url": "https://github.com/sponsors/dmonad"
   },
   "scripts": {
-    "dev": "npm run init && concurrently -r 'npm run start:server' 'npm run start:worker' 'npm run redis' 'npm run postgres'",
+    "dev": "concurrently -r 'npm run redis' 'npm run postgres' 'sleep 10 && npm run init && npm start'",
+    "start": "concurrently -r 'npm run start:server' 'npm run start:worker'",
     "start:server": "node --env-file .env ./bin/server.js",
     "debug:server": "node --env-file .env --inspect-brk ./bin/worker.js ./bin/server.js",
     "start:worker": "node --env-file .env ./bin/worker.js",
     "debug:worker": "node --env-file .env --inspect-brk ./bin/worker.js",
     "redis": "docker run -p 6379:6379 redis",
     "postgres": "docker run -p 5432:5432 -e POSTGRES_USER=yredis -e POSTGRES_PASSWORD=yredis -e POSTGRES_DB=yredis postgres:16-alpine",
-    "init": "node --env-file .env ./bin/init-db.js",
+    "init": "node --env-file .env $(test -f .env.testing && echo '--env-file .env.testing') ./bin/init-db.js",
     "dist": "tsc",
     "lint": "standard && tsc",
     "test": "node --env-file .env $(test -f .env.testing && echo '--env-file .env.testing') tests/index.js",

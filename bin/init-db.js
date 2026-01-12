@@ -34,6 +34,63 @@ async function init (postgresUrl) {
       await adminSql.end({ timeout: 5 })
     }
   }
+
+  // Step 2: Create tables
+  console.log(`[init-db] Creating tables...`)
+  const sql = postgres(postgresUrl, { max: 1 })
+  try {
+    // Create updates table
+    const updatesTableExists = await sql`
+      SELECT EXISTS (
+        SELECT FROM pg_tables
+        WHERE tablename = 'yhub_updates_v1'
+      );
+    `
+    if (!updatesTableExists || updatesTableExists.length === 0 || !updatesTableExists[0].exists) {
+      console.log(`[init-db] Creating yhub_updates_v1 table...`)
+      await sql`
+        CREATE TABLE IF NOT EXISTS yhub_updates_v1 (
+            org         text,
+            docid       text,
+            branch      text DEFAULT 'main',
+            gc          boolean DEFAULT true,
+            r           SERIAL,
+            update      bytea,
+            sv          bytea,
+            PRIMARY KEY (org,docid,branch,gc,r)
+        );
+      `
+      console.log(`[init-db] ✓ yhub_updates_v1 table created`)
+    } else {
+      console.log(`[init-db] ✓ yhub_updates_v1 table already exists`)
+    }
+
+    // Create attributions table
+    const attributionsTableExists = await sql`
+      SELECT EXISTS (
+        SELECT FROM pg_tables
+        WHERE tablename = 'yhub_attributions_v1'
+      );
+    `
+    if (!attributionsTableExists || attributionsTableExists.length === 0 || !attributionsTableExists[0].exists) {
+      console.log(`[init-db] Creating yhub_attributions_v1 table...`)
+      await sql`
+        CREATE TABLE IF NOT EXISTS yhub_attributions_v1 (
+            org         text,
+            docid       text,
+            branch      text DEFAULT 'main',
+            contentmap  bytea,
+            PRIMARY KEY (org,docid,branch)
+        );
+      `
+      console.log(`[init-db] ✓ yhub_attributions_v1 table created`)
+    } else {
+      console.log(`[init-db] ✓ yhub_attributions_v1 table already exists`)
+    }
+  } finally {
+    await sql.end({ timeout: 5 })
+  }
+
   console.log(`[init-db] ✓ Initialization done: ${postgresUrl}`)
 }
 

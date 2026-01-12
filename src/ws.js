@@ -9,7 +9,7 @@ import * as protocol from './protocol.js'
 import * as logging from 'lib0/logging'
 import { createSubscriber } from './subscriber.js'
 
-const log = logging.createModuleLogger('@y/redis/ws')
+const log = logging.createModuleLogger('@y/hub/ws')
 
 /**
  * how to sync

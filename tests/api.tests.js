@@ -15,7 +15,15 @@ const createTestCase = async tc => {
   await promise.all(prevClients.map(c => c.destroy()))
   prevClients.length = 0
   const redisClient = redis.createClient({ url: api.redisUrl })
-  await redisClient.connect()
+  await promise.untilAsync(async () => {
+    try {
+      await redisClient.connect()
+    } catch (err) {
+      console.warn(`Can't connect to redis! url: ${api.redisUrl}`)
+      return false
+    }
+    return true
+  }, 10000)
   // flush existing content
   const keysToDelete = await redisClient.keys(redisPrefix + ':*')
   keysToDelete.length > 0 && await redisClient.del(keysToDelete)

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import * as env from 'lib0/environment'
-import * as yredis from '@y/redis'
+import * as yredis from '@y/hub'
 import * as Y from '@y/y'
 import { createPostgresStorage } from '../src/storage.js'
 

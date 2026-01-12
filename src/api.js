@@ -12,8 +12,8 @@ import * as protocol from './protocol.js'
 import * as env from 'lib0/environment'
 import * as logging from 'lib0/logging'
 
-const logWorker = logging.createModuleLogger('@y/redis/api/worker')
-const logApi = logging.createModuleLogger('@y/redis/api')
+const logWorker = logging.createModuleLogger('@y/hub/api/worker')
+const logApi = logging.createModuleLogger('@y/hub/api')
 
 export const redisUrl = env.ensureConf('redis')
 

@@ -7,7 +7,7 @@ import * as awarenessProtocol from '@y/protocols/awareness'
 import * as buffer from 'lib0/buffer'
 import * as logging from 'lib0/logging'
 
-const log = logging.createModuleLogger('@y/redis/protocol')
+const log = logging.createModuleLogger('@y/hub/protocol')
 
 export const messageSync = 0
 export const messageAwareness = 1

@@ -10,54 +10,12 @@ export const createPostgresStorage = async (postgresUrl) => {
   // If a specific database is requested, ensure it exists
   const sql = postgres(postgresUrl, postgresConf)
 
-  { // INIT UPDATES TABLE
-    const docsTableExists = await sql`
-      SELECT EXISTS (
-        SELECT FROM
-            pg_tables
-        WHERE
-            tablename  = 'yhub_updates_v1'
-      );
-    `
-    // we perform a check beforehand to avoid a pesky log message if the table already exists
-    if (!docsTableExists || docsTableExists.length === 0 || !docsTableExists[0].exists) {
-      await sql`
-        CREATE TABLE IF NOT EXISTS yhub_updates_v1 (
-            org         text,
-            docid       text,
-            branch      text DEFAULT 'main',
-            gc          boolean DEFAULT true,
-            r           SERIAL,
-            update      bytea,
-            sv          bytea,
-            PRIMARY KEY (org,docid,branch,gc,r)
-        );
-      `
-    }
+  try {
+    await sql`SELECT 1 as connected`
+  } catch (err) {
+    throw new Error(`Can't connect to postgres. url: ${postgresUrl}.\n${err}`)
   }
 
-  { // INIT ATTRIBUTIONS TABLE
-    const attributionsTableExists = await sql`
-      SELECT EXISTS (
-        SELECT FROM
-            pg_tables
-        WHERE
-            tablename  = 'yhub_attributions_v1'
-      );
-    `
-    // perform a check beforehand to avoid a pesky log message if the table already exists
-    if (!attributionsTableExists || attributionsTableExists.length === 0 || !attributionsTableExists[0].exists) {
-      await sql`
-        CREATE TABLE IF NOT EXISTS yhub_attributions_v1 (
-            org         text,
-            docid       text,
-            branch      text DEFAULT 'main',
-            contentmap  bytea,
-            PRIMARY KEY (org,docid,branch)
-        );
-      `
-    }
-  }
   return new Storage(sql)
 }
 

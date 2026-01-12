@@ -2,7 +2,7 @@
 
 import * as number from 'lib0/number'
 import * as env from 'lib0/environment'
-import * as yredis from '@y/redis'
+import * as yredis from '@y/hub'
 import { createPostgresStorage } from '../src/storage.js'
 
 const port = number.parseInt(env.getConf('port') || '3002')

@@ -1,4 +1,4 @@
-import * as Y from 'yjs'
+import * as Y from '@y/y'
 import * as uws from 'uws'
 import * as promise from 'lib0/promise'
 import * as api from './api.js'
@@ -184,7 +184,7 @@ export const registerYWebsocketServer = async (app, pattern, storage, redisPrefi
         message[0] === protocol.messageAwareness
       ) {
         if (message[0] === protocol.messageAwareness) {
-          const decoder = decoding.createDecoder(message)
+          const decoder = decoding.createDecoder(/** @type {any} */ (message))
           decoding.readVarUint(decoder) // read message type
           decoding.readVarUint(decoder) // read length of awareness update
           const alen = decoding.readVarUint(decoder) // number of awareness updates

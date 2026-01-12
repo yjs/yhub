@@ -97,6 +97,7 @@ const waitDocsSynced = (ydoc1, ydoc2) => {
  * @param {t.TestCase} tc
  */
 export const testSyncAndCleanup = async tc => {
+  const removedAfterXTimeouts = 3 // always needs min 2x of minMessageLifetime
   const { createWsClient, worker, redisClient } = await createTestCase(tc)
   const { ydoc: doc1 } = createWsClient('map')
   // doc2: can retrieve changes propagated on stream
@@ -112,7 +113,7 @@ export const testSyncAndCleanup = async tc => {
   await waitDocsSynced(doc1, doc3)
   t.info('docs synced (2)')
   t.assert(doc3.getMap().get('a') === 1)
-  await promise.wait(worker.client.redisMinMessageLifetime * 4)
+  await promise.wait(worker.client.redisMinMessageLifetime * removedAfterXTimeouts)
   const docStreamExists = await redisClient.exists(api.computeRedisRoomStreamName(tc.testName + '-' + 'map', 'index', 'main', utils.redisPrefix))
   const workerLen = await redisClient.xLen(utils.redisPrefix + ':worker')
   t.assert(!docStreamExists && docStreamExistsBefore)
@@ -128,7 +129,7 @@ export const testSyncAndCleanup = async tc => {
   t.info('doc retrieved')
   // now write another updates that the worker will collect
   doc1.getMap().set('a', 2)
-  await promise.wait(worker.client.redisMinMessageLifetime * 4)
+  await promise.wait(worker.client.redisMinMessageLifetime * removedAfterXTimeouts)
   t.assert(doc2.getMap().get('a') === 2)
   const memRetrieved2 = await utils.storage.retrieveDoc(tc.testName + '-' + 'map', 'index')
   t.info('map retrieved')

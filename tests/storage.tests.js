@@ -1,4 +1,4 @@
-import * as Y from 'yjs'
+import * as Y from '@y/y'
 import * as t from 'lib0/testing'
 import { storage } from './utils.js'
 
@@ -10,18 +10,18 @@ export const testStorage = async _tc => {
     t.info('persisting docs')
     // index doc for baseline
     const ydoc1 = new Y.Doc()
-    ydoc1.getMap().set('a', 1)
+    ydoc1.get().setAttr('a', 1)
     await storage.persistDoc('room', 'index', ydoc1)
     const sv1 = await storage.retrieveStateVector('room', 'index')
     t.assert(sv1)
     t.compare(new Uint8Array(sv1), Y.encodeStateVector(ydoc1), 'state vectors match')
     // second doc with different changes under the same index key
     const ydoc2 = new Y.Doc()
-    ydoc2.getMap().set('b', 1)
+    ydoc2.get().setAttr('b', 1)
     await storage.persistDoc('room', 'index', ydoc2)
     // third doc that will be stored under a different key
     const ydoc3 = new Y.Doc()
-    ydoc3.getMap().set('a', 2)
+    ydoc3.get().setAttr('a', 2)
     await storage.persistDoc('room', 'doc3', ydoc3)
     const sv2 = await storage.retrieveStateVector('room', 'doc3')
     t.assert(sv2)
@@ -35,14 +35,14 @@ export const testStorage = async _tc => {
     const doc1 = new Y.Doc()
     Y.applyUpdateV2(doc1, r1.doc)
     // should have merged both changes..
-    t.assert(doc1.getMap().get('a') === 1 && doc1.getMap().get('b') === 1)
+    t.assert(doc1.get().getAttr('a') === 1 && doc1.get().getAttr('b') === 1)
     // retrieve other doc..
     const doc3 = new Y.Doc()
     const r3 = await storage.retrieveDoc('room', 'doc3')
     t.assert(r3)
     t.assert(r3.references.length === 1)
     Y.applyUpdateV2(doc3, r3.doc)
-    t.assert(doc3.getMap().get('a') === 2)
+    t.assert(doc3.get().getAttr('a') === 2)
     t.info('delete references')
     await storage.deleteReferences('room', 'index', [r1.references[0]])
     const r1v2 = await storage.retrieveDoc('room', 'index')

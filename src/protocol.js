@@ -1,9 +1,9 @@
-import * as Y from 'yjs'
+import * as Y from '@y/y'
 import * as error from 'lib0/error'
 import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 import * as array from 'lib0/array'
-import * as awarenessProtocol from 'y-protocols/awareness'
+import * as awarenessProtocol from '@y/protocols/awareness'
 import * as buffer from 'lib0/buffer'
 import * as logging from 'lib0/logging'
 
@@ -27,7 +27,7 @@ export const messageSyncUpdate = 2
  * Before the server sends the messages to the clients, we can merge updates, and filter out older
  * awareness messages.
  *
- * @param {Array<Uint8Array>} messages
+ * @param {Array<Uint8Array<ArrayBuffer>>} messages
  */
 export const mergeMessages = messages => {
   if (messages.length < 2) {
@@ -35,7 +35,7 @@ export const mergeMessages = messages => {
   }
   const aw = new awarenessProtocol.Awareness(new Y.Doc())
   /**
-   * @type {Array<Uint8Array>}
+   * @type {Array<Uint8Array<ArrayBuffer>>}
    */
   const updates = []
   messages.forEach(m => {

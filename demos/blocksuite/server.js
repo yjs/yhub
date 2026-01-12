@@ -1,4 +1,4 @@
-import * as Y from 'yjs'
+import * as Y from '@y/y'
 import { fileURLToPath } from 'url'
 import { dirname, resolve } from 'path'
 import express from 'express'

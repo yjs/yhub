@@ -1,7 +1,7 @@
 {
-  "name": "@y/redis",
-  "version": "0.1.6",
-  "description": "Scalable websocket provider for Yjs using redis",
+  "name": "@y/hub",
+  "version": "0.0.0",
+  "description": "Scalable websocket provider for Yjs",
   "sideEffects": false,
   "type": "module",
   "funding": {
@@ -54,7 +54,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yjs/y-redis.git"
+    "url": "git+https://github.com/yjs/yhub.git"
   },
   "keywords": [
     "Yjs"
@@ -62,9 +62,9 @@
   "author": "Kevin Jahns <kevin.jahns@protonmail.com>",
   "license": "AGPL-3.0 OR PROPRIETARY",
   "bugs": {
-    "url": "https://github.com/yjs/y-redis/issues"
+    "url": "https://github.com/yjs/yhub/issues"
   },
-  "homepage": "https://github.com/yjs/y-redis#readme",
+  "homepage": "https://github.com/yjs/yhub#readme",
   "standard": {
     "ignore": [
       "/dist",
@@ -73,10 +73,11 @@
     ]
   },
   "dependencies": {
-    "lib0": "^0.2.93",
+    "@y/protocols": "^1.0.6-3",
+    "@y/y": "^14.0.0-20",
+    "lib0": "^1.0.0-0",
     "redis": "^4.6.12",
-    "uws": "github:uNetworking/uWebSockets.js#v20.56.0",
-    "yjs": "^13.5.6"
+    "uws": "github:uNetworking/uWebSockets.js#v20.56.0"
   },
   "optionalDependencies": {
     "postgres": "^3.4.3"
@@ -86,11 +87,11 @@
     "node": ">=20.0.0"
   },
   "devDependencies": {
-    "@types/node": "^20.11.5",
+    "@types/node": "^24.0.6",
     "@types/ws": "^8.5.10",
     "concurrently": "^8.2.2",
     "standard": "^17.1.0",
-    "typescript": "^5.3.3",
+    "typescript": "^5.9.3",
     "ws": "^8.16.0",
     "y-websocket": "^2.0.4"
   }

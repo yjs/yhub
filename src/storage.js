@@ -1,4 +1,4 @@
-import * as Y from 'yjs'
+import * as Y from '@y/y'
 import postgres from 'postgres'
 import * as error from 'lib0/error'
 
@@ -106,7 +106,7 @@ export class Storage {
     if (rows.length === 0) {
       return null
     }
-    const doc = Y.mergeUpdatesV2(rows.map(row => row.update))
+    const doc = Y.mergeUpdatesV2(/** @type {Uint8Array<ArrayBuffer>[]} */ (rows.map(row => row.update)))
     const references = rows.map(row => row.r)
     return { doc, references }
   }

@@ -1,6 +1,3 @@
-import * as Y from 'yjs'
-import * as error from 'lib0/error'
-
 /**
  * @param {import('../api.js').Api} api
  */
@@ -41,6 +38,4 @@ export class AttributionPlugin {
    * @return {'attributions'}
    */
   get key () { return 'attributions' }
-
-  
 }

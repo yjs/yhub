@@ -1,8 +1,8 @@
-import * as Y from 'yjs'
+import * as Y from '@y/y'
 import * as redis from 'redis'
 import * as map from 'lib0/map'
 import * as decoding from 'lib0/decoding'
-import * as awarenessProtocol from 'y-protocols/awareness'
+import * as awarenessProtocol from '@y/protocols/awareness'
 import * as array from 'lib0/array'
 import * as random from 'lib0/random'
 import * as number from 'lib0/number'
@@ -185,7 +185,7 @@ export class Api {
     reads?.forEach(stream => {
       res.push({
         stream: stream.name.toString(),
-        messages: protocol.mergeMessages(stream.messages.map(message => message.message.m).filter(m => m != null)),
+        messages: protocol.mergeMessages(stream.messages.map(message => /** @type {Uint8Array<ArrayBuffer>} */ (message.message.m)).filter(m => m != null)),
         lastId: array.last(stream.messages).id.toString()
       })
     })
@@ -225,6 +225,9 @@ export class Api {
   /**
    * @param {string} room
    * @param {string} docid
+   * @param {Object} [opts]
+   * @param {boolean} [opts.gc]
+   * @param {string} [opts.branch]
    */
   async getDoc (room, docid, { gc = true, branch = 'main' } = {}) {
     logApi(`getDoc(${room}, ${docid}, gc=${gc}, branch=${branch})`)

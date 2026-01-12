@@ -58,8 +58,8 @@ export const testUpdateApiMessages = async tc => {
   ydoc.getMap().set('key1', 'val1')
   ydoc.getMap().set('key2', 'val2')
   const { ydoc: loadedDoc } = await client.getDoc(room, docid)
-  t.compare(loadedDoc.getMap().get('key1'), 'val1')
-  t.compare(loadedDoc.getMap().get('key2'), 'val2')
+  t.compare(loadedDoc.get().getAttr('key1'), 'val1')
+  t.compare(loadedDoc.get().getAttr('key2'), 'val2')
 }
 
 /**
@@ -75,8 +75,8 @@ export const testWorker = async tc => {
     streamexists = (await client.redis.exists(stream)) === 1
   }
   const { ydoc: loadedDoc } = await client.getDoc(room, docid)
-  t.assert(loadedDoc.getMap().get('key1') === 'val1')
-  t.assert(loadedDoc.getMap().get('key2') === 'val2')
+  t.assert(loadedDoc.get().getAttr('key1') === 'val1')
+  t.assert(loadedDoc.get().getAttr('key2') === 'val2')
   let workertasksEmpty = false
   while (!workertasksEmpty) {
     workertasksEmpty = await client.redis.xLen(client.redisWorkerStreamName) === 0

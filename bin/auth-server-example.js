@@ -8,7 +8,7 @@ import * as logging from 'lib0/logging'
 import * as error from 'lib0/error'
 import * as promise from 'lib0/promise'
 import * as encoding from 'lib0/encoding'
-import * as Y from 'yjs'
+import * as Y from '@y/y'
 
 const appName = 'Auth-Server-Example'
 const authPrivateKey = await ecdsa.importKeyJwk(json.parse(env.ensureConf('auth-private-key')))
@@ -38,7 +38,7 @@ app.put('/ydoc/:room', async (res, req) => {
       const ydocUpdate = new Uint8Array(ydocUpdateData)
       const ydoc = new Y.Doc()
       Y.applyUpdateV2(ydoc, ydocUpdate)
-      console.log(`Ydoc in room "${room}" updated. New codemirror content: "${ydoc.getText('codemirror')}"`)
+      console.log(`Ydoc in room "${room}" updated. New codemirror content: "${ydoc.get('codemirror').toString()}"`)
       res.endWithoutBody()
     }
   })

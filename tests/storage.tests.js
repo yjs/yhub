@@ -11,18 +11,18 @@ export const testStorage = async _tc => {
     // index doc for baseline
     const ydoc1 = new Y.Doc()
     ydoc1.get().setAttr('a', 1)
-    await storage.persistDoc('room', 'index', ydoc1)
+    await storage.persistDoc('room', 'index', ydoc1, null)
     const sv1 = await storage.retrieveStateVector('room', 'index')
     t.assert(sv1)
     t.compare(new Uint8Array(sv1), Y.encodeStateVector(ydoc1), 'state vectors match')
     // second doc with different changes under the same index key
     const ydoc2 = new Y.Doc()
     ydoc2.get().setAttr('b', 1)
-    await storage.persistDoc('room', 'index', ydoc2)
+    await storage.persistDoc('room', 'index', ydoc2, null)
     // third doc that will be stored under a different key
     const ydoc3 = new Y.Doc()
     ydoc3.get().setAttr('a', 2)
-    await storage.persistDoc('room', 'doc3', ydoc3)
+    await storage.persistDoc('room', 'doc3', ydoc3, null)
     const sv2 = await storage.retrieveStateVector('room', 'doc3')
     t.assert(sv2)
     t.compare(new Uint8Array(sv2), Y.encodeStateVector(ydoc3), 'state vectors match')

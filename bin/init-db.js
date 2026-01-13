@@ -48,16 +48,18 @@ async function init (postgresUrl) {
     `
     if (!updatesTableExists || updatesTableExists.length === 0 || !updatesTableExists[0].exists) {
       console.log('[init-db] Creating yhub_updates_v1 table...')
+      // @todo move contentmap and sv to another table!
       await sql`
         CREATE TABLE IF NOT EXISTS yhub_updates_v1 (
-            org         text,
-            docid       text,
-            branch      text DEFAULT 'main',
-            gc          boolean DEFAULT true,
-            r           SERIAL,
-            update      bytea,
-            sv          bytea,
-            PRIMARY KEY (org,docid,branch,gc,r)
+            org             text,
+            docid           text,
+            branch          text DEFAULT 'main',
+            gc              boolean DEFAULT true,
+            r               SERIAL,
+            update          bytea,
+            sv              bytea,
+            contentmap      bytea,
+            PRIMARY KEY     (org,docid,branch,gc,r)
         );
       `
       console.log('[init-db] ✓ yhub_updates_v1 table created')

@@ -36,37 +36,55 @@ export class Storage {
    * @param {string} org
    * @param {string} docid
    * @param {Y.Doc} ydoc
+   * @param {Y.ContentMap?} yContentMap
    * @param {Object} opts
    * @param {boolean} [opts.gc]
    * @param {string} [opts.branch]
    * @returns {Promise<void>}
    */
-  async persistDoc (org, docid, ydoc, { gc = true, branch = 'main' } = {}) {
+  async persistDoc (org, docid, ydoc, yContentMap, { gc = true, branch = 'main' } = {}) {
     await this.sql`
-      INSERT INTO yhub_updates_v1 (org,docid,branch,gc,r,update,sv)
-      VALUES (${org},${docid},${branch},${gc},DEFAULT,${Y.encodeStateAsUpdateV2(ydoc)},${Y.encodeStateVector(ydoc)})
+      INSERT INTO yhub_updates_v1 (org,docid,branch,gc,r,update,sv,contentmap)
+      VALUES (${org},${docid},${branch},${gc},DEFAULT,${Y.encodeStateAsUpdateV2(ydoc)},${Y.encodeStateVector(ydoc)},${Y.encodeContentMap(yContentMap || Y.mergeContentMaps([]))})
     `
   }
 
   /**
    * @param {string} org
    * @param {string} docid
+   * @param {string} branch
+   * @return {Promise<Y.ContentMap>}
+   */
+  async retrieveContentMap (org, docid, branch) {
+    const rows = await this.sql`SELECT contentmap from yhub_updates_v1 WHERE org = ${org} AND docid = ${docid} AND branch = ${branch}`
+    return Y.mergeContentMaps(rows.map(row => Y.decodeContentMap(row.contentmap)))
+  }
+
+  /**
+   * @template {boolean} [IncludeContentMap=false]
+   * @param {string} org
+   * @param {string} docid
    * @param {Object} opts
    * @param {boolean} [opts.gc]
    * @param {string} [opts.branch]
-   * @return {Promise<{ doc: Uint8Array, references: Array<number> } | null>}
+   * @param {IncludeContentMap} [opts.yContentMap]
+   * @return {Promise<{ doc: Uint8Array, references: Array<number>, yContentMap: IncludeContentMap extends true ? Y.ContentMap : null } | null>}
    */
-  async retrieveDoc (org, docid, { gc = true, branch = 'main' } = {}) {
+  async retrieveDoc (org, docid, { gc = true, branch = 'main', yContentMap } = {}) {
     /**
-     * @type {Array<{ r: number, update: Buffer }>}
+     * @type {Array<{ r: number, update: Buffer, contentmap: Buffer }>}
      */
-    const rows = await this.sql`SELECT update,r from yhub_updates_v1 WHERE org = ${org} AND docid = ${docid} AND branch = ${branch} AND gc = ${gc}`
+    const rows = yContentMap
+      ? await this.sql`SELECT update,r,contentmap from yhub_updates_v1 WHERE org = ${org} AND docid = ${docid} AND branch = ${branch} AND gc = ${gc}`
+      : await this.sql`SELECT update,r from yhub_updates_v1 WHERE org = ${org} AND docid = ${docid} AND branch = ${branch} AND gc = ${gc}`
     if (rows.length === 0) {
       return null
     }
+    const rowcmaps = yContentMap ? rows.map(row => Y.decodeContentMap(row.contentmap)) : []
     const doc = Y.mergeUpdatesV2(/** @type {Uint8Array<ArrayBuffer>[]} */ (rows.map(row => row.update)))
+    const ycm = yContentMap ? Y.mergeContentMaps(rowcmaps) : null
     const references = rows.map(row => row.r)
-    return { doc, references }
+    return { doc, references, yContentMap: /** @type {any} */ (ycm) }
   }
 
   /**

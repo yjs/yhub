@@ -237,18 +237,22 @@ export class Api {
   }
 
   /**
+   * @template {boolean} [IncludeAttributions=false]
    * @param {string} room
    * @param {string} docid
    * @param {Object} [opts]
    * @param {boolean} [opts.gc]
    * @param {string} [opts.branch]
+   * @param {IncludeAttributions} [opts.attributions]
+   * @return {Promise<{ ydoc: Y.Doc, awareness: awarenessProtocol.Awareness, redisLastId: string, storeReferences: Array<number>?, docChanged: boolean, attributions: IncludeAttributions extends true ? Y.ContentMap : null}>}
    */
-  async getDoc (room, docid, { gc = true, branch = 'main' } = {}) {
+  async getDoc (room, docid, { gc = true, branch = 'main', attributions } = {}) {
     logApi(`getDoc(${room}, ${docid}, gc=${gc}, branch=${branch})`)
     const ms = extractMessagesFromStreamReply(await this.redis.xRead(redis.commandOptions({ returnBuffers: true }), { key: computeRedisRoomStreamName(room, docid, branch, this.prefix), id: '0' }), this.prefix)
     const docMessages = ms.get(room)?.get(docid) || null
     logApi(`getDoc(${room}, ${docid}, gc=${gc}, branch=${branch}) - retrieved ${docMessages?.messages.length || 0} messages`)
-    const docstate = await this.store.retrieveDoc(room, docid, { gc, branch })
+    const docstate = await this.store.retrieveDoc(room, docid, { gc, branch, yContentMap: attributions })
+    const contentMapAttributions = docstate?.yContentMap
     logApi(`getDoc(${room}, ${docid}, gc=${gc}, branch=${branch}) - retrieved doc`)
     const ydoc = new Y.Doc({ gc })
     const awareness = new awarenessProtocol.Awareness(ydoc)
@@ -264,6 +268,9 @@ export class Api {
         switch (message.type) {
           case 'update:v1': {
             Y.applyUpdate(ydoc, message.update)
+            if (message.attributions != null && contentMapAttributions != null) {
+              Y.mergeContentMaps([contentMapAttributions, Y.excludeContentMaps(Y.decodeContentMap(message.attributions), contentMapAttributions)])
+            }
             break
           }
           case 'awarenes:v1': {
@@ -276,7 +283,7 @@ export class Api {
         }
       })
     })
-    return { ydoc, awareness, redisLastId: docMessages?.lastId.toString() || '0', storeReferences: docstate?.references || null, docChanged }
+    return { ydoc, awareness, redisLastId: docMessages?.lastId.toString() || '0', storeReferences: docstate?.references || null, docChanged, attributions: /** @type {any} */ (contentMapAttributions) }
   }
 
   /**
@@ -313,7 +320,7 @@ export class Api {
         logWorker('requesting doc from store')
         // Persist both gc'd and non-gc'd versions
         const gcResult = await this.getDoc(room, docid, { gc: true, branch })
-        const nonGcResult = await this.getDoc(room, docid, { gc: false, branch })
+        const nonGcResult = await this.getDoc(room, docid, { gc: false, branch, attributions: true })
         logWorker('retrieved doc from store. redisLastId=' + gcResult.redisLastId, ' gcRefs=' + JSON.stringify(gcResult.storeReferences), ' nonGcRefs=' + JSON.stringify(nonGcResult.storeReferences))
         const lastId = math.max(number.parseInt(gcResult.redisLastId.split('-')[0]), number.parseInt(task.id.split('-')[0]))
         if (gcResult.docChanged || nonGcResult.docChanged) {
@@ -326,10 +333,13 @@ export class Api {
           }
           logWorker('persisting both gc and non-gc versions')
           await promise.all([
-            gcResult.docChanged ? this.store.persistDoc(room, docid, gcResult.ydoc, { gc: true, branch }) : promise.resolve(),
-            nonGcResult.docChanged ? this.store.persistDoc(room, docid, nonGcResult.ydoc, { gc: false, branch }) : promise.resolve()
+            gcResult.docChanged ? this.store.persistDoc(room, docid, gcResult.ydoc, gcResult.attributions, { gc: true, branch }) : promise.resolve(),
+            nonGcResult.docChanged ? this.store.persistDoc(room, docid, nonGcResult.ydoc, nonGcResult.attributions, { gc: false, branch }) : promise.resolve()
           ])
         }
+
+        // @todo write attributions here
+        console.log('attributions', nonGcResult.attributions)
         await promise.all([
           gcResult.storeReferences && gcResult.docChanged ? this.store.deleteReferences(room, docid, gcResult.storeReferences, { gc: true, branch }) : promise.resolve(),
           nonGcResult.storeReferences && nonGcResult.docChanged ? this.store.deleteReferences(room, docid, nonGcResult.storeReferences, { gc: false, branch }) : promise.resolve(),

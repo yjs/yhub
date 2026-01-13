@@ -7,6 +7,7 @@ import * as ecdsa from 'lib0/crypto/ecdsa'
 import * as env from 'lib0/environment'
 import * as fs from 'fs/promises'
 import * as promise from 'lib0/promise'
+import * as random from 'lib0/random'
 
 const app = express()
 const port = 5173
@@ -17,6 +18,13 @@ export const authPrivateKey = await ecdsa.importKeyJwk(JSON.parse(env.ensureConf
 export const authPublicKey = await ecdsa.importKeyJwk(JSON.parse(env.ensureConf('auth-public-key')))
 
 const appName = 'my-express-app'
+
+const userIdChoices = [
+  'Calvin Hobbes',
+  'Charlie Brown',
+  'Dilbert Adams',
+  'Garfield'
+]
 
 // This endpoint is called in regular intervals when the document changes.
 // The request contains a multi-part formdata field that can be read, for example, with formidable:
@@ -52,7 +60,7 @@ app.get('/auth/token', async (_req, res) => {
   const token = await jwt.encodeJwt(authPrivateKey, {
     iss: appName,
     exp: time.getUnixTime() + 60 * 60 * 1000, // token expires in one hour
-    yuserid: 'user1' // associate the client with a unique id that can will be used to check permissions
+    yuserid: random.oneOf(userIdChoices) // associate the client with a unique id that can will be used to check permissions
   })
   res.send(token)
 })

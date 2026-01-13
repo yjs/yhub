@@ -7,6 +7,7 @@ import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 import * as protocol from './protocol.js'
 import * as logging from 'lib0/logging'
+import * as time from 'lib0/time'
 import * as s from 'lib0/schema'
 import { createSubscriber } from './subscriber.js'
 
@@ -201,7 +202,13 @@ export const registerYWebsocketServer = async (app, pattern, storage, redisPrefi
           if (syncMessageType === protocol.messageSyncUpdate || syncMessageType === protocol.messageSyncStep2) {
             const update = decoding.readVarUint8Array(decoder)
             if (update.byteLength > 3) {
-              client.addMessage(user.room, 'index', { type: 'update:v1', attributions: undefined, update }, { branch: user.branch })
+              const now = time.getUnixTime()
+              const attributions = Y.encodeContentMap(Y.createContentMapFromContentIds(
+                Y.createContentIdsFromUpdate(update),
+                [Y.createContentAttribute('insert', user.userid), Y.createContentAttribute('insertAt', now)],
+                [Y.createContentAttribute('delete', user.userid), Y.createContentAttribute('deleteAt', now)]
+              ))
+              client.addMessage(user.room, 'index', { type: 'update:v1', attributions, update }, { branch: user.branch })
             }
           } else if (syncMessageType === protocol.messageSyncStep1) {
             // can be safely ignored because we send the full initial state at the beginning

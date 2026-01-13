@@ -36,7 +36,7 @@ async function init (postgresUrl) {
   }
 
   // Step 2: Create tables
-  console.log(`[init-db] Creating tables...`)
+  console.log('[init-db] Creating tables...')
   const sql = postgres(postgresUrl, { max: 1 })
   try {
     // Create updates table
@@ -47,7 +47,7 @@ async function init (postgresUrl) {
       );
     `
     if (!updatesTableExists || updatesTableExists.length === 0 || !updatesTableExists[0].exists) {
-      console.log(`[init-db] Creating yhub_updates_v1 table...`)
+      console.log('[init-db] Creating yhub_updates_v1 table...')
       await sql`
         CREATE TABLE IF NOT EXISTS yhub_updates_v1 (
             org         text,
@@ -60,9 +60,9 @@ async function init (postgresUrl) {
             PRIMARY KEY (org,docid,branch,gc,r)
         );
       `
-      console.log(`[init-db] ✓ yhub_updates_v1 table created`)
+      console.log('[init-db] ✓ yhub_updates_v1 table created')
     } else {
-      console.log(`[init-db] ✓ yhub_updates_v1 table already exists`)
+      console.log('[init-db] ✓ yhub_updates_v1 table already exists')
     }
 
     // Create attributions table
@@ -73,7 +73,7 @@ async function init (postgresUrl) {
       );
     `
     if (!attributionsTableExists || attributionsTableExists.length === 0 || !attributionsTableExists[0].exists) {
-      console.log(`[init-db] Creating yhub_attributions_v1 table...`)
+      console.log('[init-db] Creating yhub_attributions_v1 table...')
       await sql`
         CREATE TABLE IF NOT EXISTS yhub_attributions_v1 (
             org         text,
@@ -83,9 +83,9 @@ async function init (postgresUrl) {
             PRIMARY KEY (org,docid,branch)
         );
       `
-      console.log(`[init-db] ✓ yhub_attributions_v1 table created`)
+      console.log('[init-db] ✓ yhub_attributions_v1 table created')
     } else {
-      console.log(`[init-db] ✓ yhub_attributions_v1 table already exists`)
+      console.log('[init-db] ✓ yhub_attributions_v1 table already exists')
     }
   } finally {
     await sql.end({ timeout: 5 })

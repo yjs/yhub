@@ -2,6 +2,7 @@ import * as Y from '@y/y'
 import * as redis from 'redis'
 import * as map from 'lib0/map'
 import * as decoding from 'lib0/decoding'
+import * as encoding from 'lib0/encoding'
 import * as awarenessProtocol from '@y/protocols/awareness'
 import * as array from 'lib0/array'
 import * as random from 'lib0/random'
@@ -11,9 +12,30 @@ import * as math from 'lib0/math'
 import * as protocol from './protocol.js'
 import * as env from 'lib0/environment'
 import * as logging from 'lib0/logging'
+import * as s from 'lib0/schema'
 
 const logWorker = logging.createModuleLogger('@y/hub/api/worker')
 const logApi = logging.createModuleLogger('@y/hub/api')
+
+export const $redisUpdateMessage = s.$({ type: s.$literal('update:v1'), attributions: s.$uint8Array.optional, update: s.$uint8Array })
+export const $redisAwarenessMessage = s.$({ type: s.$literal('awarenes:v1'), update: s.$uint8Array })
+export const $redisMessage = s.$union($redisUpdateMessage, $redisAwarenessMessage)
+
+/**
+ * @typedef {s.Unwrap<typeof $redisMessage>} RedisMessage
+ */
+
+/**
+ * @param {Uint8Array} m
+ * @return {RedisMessage}
+ */
+export const parseRedisMessage = m => decoding.readAny(decoding.createDecoder(m))
+
+/**
+ * @param {RedisMessage} m
+ * @return {Uint8Array}
+ */
+export const encodeRedisMessage = m => encoding.encode(encoder => encoding.writeAny(encoder, m))
 
 export const redisUrl = env.ensureConf('redis')
 
@@ -195,20 +217,12 @@ export class Api {
   /**
    * @param {string} room
    * @param {string} docid
-   * @param {Buffer} m
-   * @param {Object} opts
+   * @param {RedisMessage} m
+   * @param {object} opts
    * @param {string} [opts.branch]
    */
   addMessage (room, docid, m, { branch = 'main' } = {}) {
-    // handle sync step 2 like a normal update message
-    if (m[0] === protocol.messageSync && m[1] === protocol.messageSyncStep2) {
-      if (m.byteLength < 4) {
-        // message does not contain any content, don't distribute
-        return promise.resolve()
-      }
-      m[1] = protocol.messageSyncUpdate
-    }
-    return this.redis.addMessage(computeRedisRoomStreamName(room, docid, branch, this.prefix), m)
+    return this.redis.addMessage(computeRedisRoomStreamName(room, docid, branch, this.prefix), Buffer.from(encodeRedisMessage(m)))
   }
 
   /**
@@ -232,8 +246,8 @@ export class Api {
   async getDoc (room, docid, { gc = true, branch = 'main' } = {}) {
     logApi(`getDoc(${room}, ${docid}, gc=${gc}, branch=${branch})`)
     const ms = extractMessagesFromStreamReply(await this.redis.xRead(redis.commandOptions({ returnBuffers: true }), { key: computeRedisRoomStreamName(room, docid, branch, this.prefix), id: '0' }), this.prefix)
-    logApi(`getDoc(${room}, ${docid}, gc=${gc}, branch=${branch}) - retrieved messages`)
     const docMessages = ms.get(room)?.get(docid) || null
+    logApi(`getDoc(${room}, ${docid}, gc=${gc}, branch=${branch}) - retrieved ${docMessages?.messages.length || 0} messages`)
     const docstate = await this.store.retrieveDoc(room, docid, { gc, branch })
     logApi(`getDoc(${room}, ${docid}, gc=${gc}, branch=${branch}) - retrieved doc`)
     const ydoc = new Y.Doc({ gc })
@@ -246,17 +260,18 @@ export class Api {
     })
     ydoc.transact(() => {
       docMessages?.messages.forEach(m => {
-        const decoder = decoding.createDecoder(m)
-        switch (decoding.readVarUint(decoder)) {
-          case 0: { // sync message
-            if (decoding.readVarUint(decoder) === 2) { // update message
-              Y.applyUpdate(ydoc, decoding.readVarUint8Array(decoder))
-            }
+        const message = parseRedisMessage(m)
+        switch (message.type) {
+          case 'update:v1': {
+            Y.applyUpdate(ydoc, message.update)
             break
           }
-          case 1: { // awareness message
-            awarenessProtocol.applyAwarenessUpdate(awareness, decoding.readVarUint8Array(decoder), null)
+          case 'awarenes:v1': {
+            awarenessProtocol.applyAwarenessUpdate(awareness, message.update, null)
             break
+          }
+          default: {
+            console.error('Received unknown message type. This might cause dataloss!', JSON.stringify(message))
           }
         }
       })

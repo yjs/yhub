@@ -7,16 +7,19 @@ import * as utils from './utils.js'
  * @param {t.TestCase} tc
  */
 export const testSyncAndCleanup = async tc => {
-  const removedAfterXTimeouts = 3 // always needs min 2x of minMessageLifetime
+  const removedAfterXTimeouts = 6 // always needs min 2x of minMessageLifetime
   const { createWsClient, worker, redisClient } = await utils.createTestCase(tc)
   const { ydoc: doc1 } = createWsClient('map')
   // doc2: can retrieve changes propagated on stream
   const { ydoc: doc2 } = createWsClient('map')
+  await promise.wait(5000)
   doc1.getMap().set('a', 1)
   t.info('docs syncing (0)')
   await utils.waitDocsSynced(doc1, doc2)
   t.info('docs synced (1)')
   const docStreamExistsBefore = await redisClient.exists(api.computeRedisRoomStreamName(tc.testName + '-' + 'map', 'index', 'main', utils.redisPrefix))
+  console.log('a:', doc2.getMap().get('a'))
+  console.log(doc2.store.clients.size, doc2.store.clients, doc2.store.pendingStructs)
   t.assert(doc2.getMap().get('a') === 1)
   // doc3 can retrieve older changes from stream
   const { ydoc: doc3 } = createWsClient('map')

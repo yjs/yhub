@@ -1,7 +1,6 @@
-import * as Y from 'yjs'
+import * as Y from '@y/y'
 import * as t from 'lib0/testing'
 import * as api from '../src/api.js'
-import * as encoding from 'lib0/encoding'
 import * as promise from 'lib0/promise'
 import * as redis from 'redis'
 import { prevClients, storage } from './utils.js'
@@ -36,12 +35,7 @@ const createTestCase = async tc => {
   const stream = api.computeRedisRoomStreamName(room, docid, branch, redisPrefix)
   const ydoc = new Y.Doc()
   ydoc.on('update', update => {
-    const m = encoding.encode(encoder => {
-      encoding.writeVarUint(encoder, 0) // sync protocol
-      encoding.writeVarUint(encoder, 2) // update message
-      encoding.writeVarUint8Array(encoder, update)
-    })
-    client.addMessage(room, docid, Buffer.from(m))
+    client.addMessage(room, docid, { type: 'update:v1', attributions: undefined, update })
   })
   return {
     client,
@@ -63,8 +57,8 @@ const createWorker = async () => {
  */
 export const testUpdateApiMessages = async tc => {
   const { client, ydoc, room, docid } = await createTestCase(tc)
-  ydoc.getMap().set('key1', 'val1')
-  ydoc.getMap().set('key2', 'val2')
+  ydoc.get().setAttr('key1', 'val1')
+  ydoc.get().setAttr('key2', 'val2')
   const { ydoc: loadedDoc } = await client.getDoc(room, docid)
   t.compare(loadedDoc.get().getAttr('key1'), 'val1')
   t.compare(loadedDoc.get().getAttr('key2'), 'val2')
@@ -76,8 +70,8 @@ export const testUpdateApiMessages = async tc => {
 export const testWorker = async tc => {
   const { client, ydoc, stream, room, docid } = await createTestCase(tc)
   await createWorker()
-  ydoc.getMap().set('key1', 'val1')
-  ydoc.getMap().set('key2', 'val2')
+  ydoc.get().setAttr('key1', 'val1')
+  ydoc.get().setAttr('key2', 'val2')
   let streamexists = true
   while (streamexists) {
     streamexists = (await client.redis.exists(stream)) === 1

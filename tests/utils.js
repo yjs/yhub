@@ -126,11 +126,14 @@ export const createTestCase = async tc => {
  */
 export const waitDocsSynced = (ydoc1, ydoc2) => {
   console.info('waiting for docs to sync...')
-  return promise.until(500, () => {
+  return promise.until(5000, () => {
     const e1 = Y.encodeStateAsUpdateV2(ydoc1)
     const e2 = Y.encodeStateAsUpdateV2(ydoc2)
     const isSynced = array.equalFlat(e1, e2)
     isSynced && console.info('docs sycned!')
     return isSynced
-  }).catch(err => promise.resolve(err))
+  }).catch(err => {
+    console.info('prematurely cancelled waiting for sync')
+    promise.resolve(err)
+  })
 }

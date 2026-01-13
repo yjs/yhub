@@ -30,6 +30,8 @@ export const messageSyncUpdate = 2
  * @param {Array<Uint8Array<ArrayBuffer>>} messages
  */
 export const mergeMessages = messages => {
+  return messages
+  // @todo the below doesn't work anymore. Probably need to parse messages before merging them
   if (messages.length < 2) {
     return messages
   }
@@ -105,12 +107,35 @@ export const encodeSyncStep2 = diff => encoding.encode(encoder => {
 })
 
 /**
+ * @param {encoding.Encoder} encoder
+ * @param {Uint8Array} update
+ */
+export const writeSyncUpdate = (encoder, update) => {
+  encoding.writeVarUint(encoder, messageSync)
+  encoding.writeVarUint(encoder, messageSyncUpdate)
+  encoding.writeVarUint8Array(encoder, update)
+}
+
+/**
+ * @param {Uint8Array} update
+ */
+export const encodeSyncUpdate = update => encoding.encode(encoder => writeSyncUpdate(encoder, update))
+
+/**
+ * @param {encoding.Encoder} encoder
+ * @param {Uint8Array} awUpdate
+ */
+export const writeAwarenessUpdate = (encoder, awUpdate) => {
+  encoding.writeVarUint(encoder, messageAwareness)
+  encoding.writeVarUint8Array(encoder, awUpdate)
+}
+
+/**
  * @param {awarenessProtocol.Awareness} awareness
  * @param {Array<number>} clients
  */
-export const encodeAwarenessUpdate = (awareness, clients) => encoding.encode(encoder => {
-  encoding.writeVarUint(encoder, messageAwareness)
-  encoding.writeVarUint8Array(encoder, awarenessProtocol.encodeAwarenessUpdate(awareness, clients))
+export const encodeAwareness = (awareness, clients) => encoding.encode(encoder => {
+  writeAwarenessUpdate(encoder, awarenessProtocol.encodeAwarenessUpdate(awareness, clients))
 })
 
 /**
@@ -119,11 +144,8 @@ export const encodeAwarenessUpdate = (awareness, clients) => encoding.encode(enc
  */
 export const encodeAwarenessUserDisconnected = (clientid, lastClock) =>
   encoding.encode(encoder => {
-    encoding.writeVarUint(encoder, messageAwareness)
-    encoding.writeVarUint8Array(encoder, encoding.encode(encoder => {
-      encoding.writeVarUint(encoder, 1) // one change
-      encoding.writeVarUint(encoder, clientid)
-      encoding.writeVarUint(encoder, lastClock + 1)
-      encoding.writeVarString(encoder, JSON.stringify(null))
-    }))
+    encoding.writeVarUint(encoder, 1) // one change
+    encoding.writeVarUint(encoder, clientid)
+    encoding.writeVarUint(encoder, lastClock + 1)
+    encoding.writeVarString(encoder, JSON.stringify(null))
   })

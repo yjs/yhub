@@ -7,6 +7,7 @@ import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 import * as protocol from './protocol.js'
 import * as logging from 'lib0/logging'
+import * as s from 'lib0/schema'
 import { createSubscriber } from './subscriber.js'
 
 const log = logging.createModuleLogger('@y/hub/ws')
@@ -104,12 +105,28 @@ export const registerYWebsocketServer = async (app, pattern, storage, redisPrefi
     if (app.numSubscribers(stream) === 0) {
       subscriber.unsubscribe(stream, redisMessageSubscriber)
     }
-    const message = messages.length === 1
-      ? messages[0]
-      : encoding.encode(encoder => messages.forEach(message => {
-        encoding.writeUint8Array(encoder, message)
-      }))
-    app.publish(stream, message, true, false)
+    const encoder = encoding.createEncoder()
+    messages.forEach(binm => {
+      const redisMessage = api.parseRedisMessage(binm)
+      console.log('redismes ', redisMessage)
+      switch (redisMessage.type) {
+        case 'update:v1': {
+          protocol.writeSyncUpdate(encoder, redisMessage.update)
+          break
+        }
+        case 'awarenes:v1': {
+          protocol.writeAwarenessUpdate(encoder, redisMessage.update)
+          break
+        }
+        default: {
+          s.$never.expect(redisMessage)
+        }
+      }
+    })
+    const m = encoding.toUint8Array(encoder)
+    // @todo remove
+    console.log('published message to everyone', m)
+    app.publish(stream, m, true, false)
   }
   app.ws(pattern, /** @type {uws.WebSocketBehavior<User>} */ ({
     compression: uws.SHARED_COMPRESSOR,
@@ -162,7 +179,7 @@ export const registerYWebsocketServer = async (app, pattern, storage, redisPrefi
         ws.send(protocol.encodeSyncStep1(Y.encodeStateVector(indexDoc.ydoc)), true, false)
         ws.send(protocol.encodeSyncStep2(Y.encodeStateAsUpdate(indexDoc.ydoc)), true, true)
         if (indexDoc.awareness.states.size > 0) {
-          ws.send(protocol.encodeAwarenessUpdate(indexDoc.awareness, array.from(indexDoc.awareness.states.keys())), true, true)
+          ws.send(protocol.encodeAwareness(indexDoc.awareness, array.from(indexDoc.awareness.states.keys())), true, true)
         }
       })
       if (api.isSmallerRedisId(indexDoc.redisLastId, user.initialRedisSubId)) {
@@ -177,33 +194,39 @@ export const registerYWebsocketServer = async (app, pattern, storage, redisPrefi
       if (!user.hasWriteAccess) return
       // It is important to copy the data here
       const message = Buffer.from(messageBuffer.slice(0, messageBuffer.byteLength))
-      if ( // filter out messages that we simply want to propagate to all clients
-        // sync update or sync step 2
-        (message[0] === protocol.messageSync && (message[1] === protocol.messageSyncUpdate || message[1] === protocol.messageSyncStep2)) ||
-        // awareness update
-        message[0] === protocol.messageAwareness
-      ) {
-        if (message[0] === protocol.messageAwareness) {
-          const decoder = decoding.createDecoder(/** @type {any} */ (message))
-          decoding.readVarUint(decoder) // read message type
-          decoding.readVarUint(decoder) // read length of awareness update
-          const alen = decoding.readVarUint(decoder) // number of awareness updates
-          const awId = decoding.readVarUint(decoder)
+      const decoder = decoding.createDecoder(message)
+      switch (decoding.readVarUint(decoder)) {
+        case 0: { // sync message
+          const syncMessageType = decoding.readVarUint(decoder)
+          if (syncMessageType === protocol.messageSyncUpdate || syncMessageType === protocol.messageSyncStep2) {
+            const update = decoding.readVarUint8Array(decoder)
+            if (update.byteLength > 3) {
+              client.addMessage(user.room, 'index', { type: 'update:v1', attributions: undefined, update }, { branch: user.branch })
+            }
+          } else if (syncMessageType === protocol.messageSyncStep1) {
+            // can be safely ignored because we send the full initial state at the beginning
+          } else {
+            console.warn('Unknown sync message type', syncMessageType)
+          }
+          break
+        }
+        case 1: { // awareness message
+          const update = decoding.readVarUint8Array(decoder)
+          const awDecoder = decoding.createDecoder(update)
+          const alen = decoding.readVarUint(awDecoder) // number of awareness updates
+          const awId = decoding.readVarUint(awDecoder)
           if (alen === 1 && (user.awarenessId === null || user.awarenessId === awId)) { // only update awareness if len=1
             user.awarenessId = awId
-            user.awarenessLastClock = decoding.readVarUint(decoder)
+            user.awarenessLastClock = decoding.readVarUint(awDecoder)
           }
+          client.addMessage(user.room, 'index', { type: 'awarenes:v1', update }, { branch: user.branch })
+          break
         }
-        client.addMessage(user.room, 'index', message, { branch: user.branch })
-      } else if (message[0] === protocol.messageSync && message[1] === protocol.messageSyncStep1) { // sync step 1
-        // can be safely ignored because we send the full initial state at the beginning
-      } else {
-        console.error('Unexpected message type', message)
       }
     },
     close: (ws, code, message) => {
       const user = ws.getUserData()
-      user.awarenessId && client.addMessage(user.room, 'index', Buffer.from(protocol.encodeAwarenessUserDisconnected(user.awarenessId, user.awarenessLastClock)), { branch: user.branch })
+      user.awarenessId && client.addMessage(user.room, 'index', { type: 'awarenes:v1', update: protocol.encodeAwarenessUserDisconnected(user.awarenessId, user.awarenessLastClock) }, { branch: user.branch })
       user.isClosed = true
       log(() => ['client connection closed (uid=', user.id, ', code=', code, ', message="', Buffer.from(message).toString(), '")'])
       user.subs.forEach(topic => {

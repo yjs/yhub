@@ -21,7 +21,7 @@
     "dist": "tsc",
     "lint": "standard && tsc",
     "test": "node --env-file .env $(test -f .env.testing && echo '--env-file .env.testing') tests/index.js",
-    "test-inspect": "node --env-file .env --inspect-brk tests/index.js",
+    "debug:test": "node --env-file .env $(test -f .env.testing && echo '--env-file .env.testing') --inspect-brk tests/index.js",
     "preversion": "npm run lint && npm run dist",
     "clean": "rm -rf **/dist "
   },

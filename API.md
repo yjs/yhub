@@ -6,6 +6,8 @@ All endpoints require an `auth-cookie` which will be check via the PERM
 CALLBACK.
 
 It is assumed that all documents can be identified by a unique `{guid}`.
+Furthermore, all "body" content is encoded via lib0/encoding's
+`encodeAny`. All binary data in parameters is encoded via base64.
 
 ## WebSocket
 
@@ -27,10 +29,10 @@ version as well.
 Rollback all changes that match the pattern. The changes will be distributed via
 websockets.
 
-* `POST /rollback/{guid}` body: `{ from?: number, to?: number, by?: string, contentIds: { inserts: Y.IdSet, deletes: Y.IdSet } }`
+* `POST /rollback/{guid}` body: `{ from?: number, to?: number, by?: string, contentIds: Y.ContentIds }`
   * `from`/`to`: unix timestamp range filter
   * `by=string`: comma-separated list of user-ids that matches the attributions
-  * `contentIds`: Changeset that describes the changes between two versions. **TODO** expose Yjs function to compute contentIds between two Y.Docs.
+  * `contentIds`: Changeset that describes the changes between two versions.
 
 ### Example
 
@@ -46,12 +48,14 @@ websockets.
 Visualize attributed changes using either pure deltas or by retrieving the
 before and after state of a Yjs doc. Optionally, include relevant attributions.
 
-* `GET /history/{guid}` parameters: `{ from?: number, to?: number, ydoc?: boolean, delta?: boolean, attributions?: boolean }`
+* `GET /history/{guid}` parameters: `{ from?: number, to?: number, by?: string, ydoc?: boolean, contentIds?: Y.ContentIds, delta?: boolean, attributions?: boolean }`
   * `from`/`to`: unix timestamp range filter
+  * `by=string`: comma-separated list of user-ids that matches the attributions
+  * `contentIds`: Changeset that describes the changes between two versions. @todo not implemented
   * `ydoc=true`: include encoded Yjs docs
   * `delta=true`: include delta representation
   * `attributions=true`: include attributions
-  * Returns `{ prevDoc?: Y.Doc, nextDoc?: Y.Doc, attributions?: Y.IdMap, deltaState?: Delta, deltaDiff?: Delta }`
+  * Returns `{ prevDoc?: Y.Doc, nextDoc?: Y.Doc, attributions?: Y.ContentMap, delta?: Delta }` - currently returns only the ydoc.get()-delta.
 
 ### Example: visualize editing trail of the past day
 

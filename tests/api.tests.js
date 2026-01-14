@@ -65,7 +65,7 @@ const fetchYhubResponse = async path => {
 
 /**
  * @param {string} path
- * @param {Object} body
+ * @param {any} body
  */
 const postYhubRequest = async (path, body) => {
   const encoder = encoding.createEncoder()
@@ -96,7 +96,7 @@ export const testHistoryRestApi = async tc => {
     t.compare(timestamps, [1, 2, 3])
   }
   {
-    const history = await fetchYhubResponse(`/history/${room}?from=2&to=3&ydoc=true&delta=true&attributions=true`)
+    const history = await fetchYhubResponse(`/history/${room}?from=2&to=2&ydoc=true&delta=true&attributions=true`)
     console.log(history)
     debugger
     console.log('prevDoc: ', JSON.stringify(Y.createDocFromUpdate(history.prevDoc).toJSON()))

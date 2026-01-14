@@ -94,7 +94,7 @@ export const createYWebsocketServer = async ({
        * @param {Array<Y.ContentAttribute<any>>} attrs
        */
       const attrFilter = attrs => {
-        if ((from || to) && !attrs.some(attr => (attr.name === 'insertAt' || attr.name === 'deleteAt') && (from == null || attr.val >= from) && (to == null || attr.val < to))) {
+        if ((from || to) && !attrs.some(attr => (attr.name === 'insertAt' || attr.name === 'deleteAt') && (from == null || attr.val >= from) && (to == null || attr.val <= to))) {
           return false
         }
         if (by != null && !attrs.some(attr => (attr.name === 'insert' || attr.name === 'delete') && /** @type {string} */ (attr.val).split(',').includes(by))) {

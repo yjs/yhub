@@ -78,6 +78,59 @@
       .btn:hover {
         opacity: 0.9;
       }
+      .popup-overlay {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 1000;
+        justify-content: center;
+        align-items: center;
+      }
+      .popup-overlay.active {
+        display: flex;
+      }
+      .popup {
+        background: white;
+        border-radius: 8px;
+        padding: 20px;
+        max-width: 600px;
+        max-height: 80vh;
+        overflow: auto;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+      }
+      .popup-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 15px;
+        border-bottom: 1px solid #ddd;
+        padding-bottom: 10px;
+      }
+      .popup-header h3 {
+        margin: 0;
+      }
+      .popup-close {
+        background: none;
+        border: none;
+        font-size: 24px;
+        cursor: pointer;
+        color: #666;
+      }
+      .popup-close:hover {
+        color: #000;
+      }
+      .popup-content {
+        font-family: monospace;
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: #f8f8f8;
+        padding: 10px;
+        border-radius: 4px;
+      }
     </style>
   </head>
   <body>
@@ -116,6 +169,15 @@
           <button class="btn btn-primary" id="render-btn">Render</button>
           <button class="btn btn-danger" id="rollback-btn">Rollback</button>
         </div>
+      </div>
+    </div>
+    <div id="diff-popup" class="popup-overlay">
+      <div class="popup">
+        <div class="popup-header">
+          <h3>History Diff</h3>
+          <button class="popup-close" id="popup-close">&times;</button>
+        </div>
+        <div class="popup-content" id="popup-content"></div>
       </div>
     </div>
     <script type="module" src="../dist/demo.js" async></script>

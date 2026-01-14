@@ -27,7 +27,7 @@ export const usercolors = [
 
 export const userColor = usercolors[random.uint32() % usercolors.length]
 
-const room = 'y-redis-demo-app'
+const room = 'y-redis-demo-app-1'
 
 // request an auth token before trying to connect
 const authToken = await fetch(`http://${location.host}/auth/token`).then(request => request.text())
@@ -82,6 +82,25 @@ const toSelect = /** @type {HTMLSelectElement} */ (document.getElementById('to-t
 const renderBtn = /** @type {HTMLButtonElement} */ (document.getElementById('render-btn'))
 const rollbackBtn = /** @type {HTMLButtonElement} */ (document.getElementById('rollback-btn'))
 
+// Popup elements
+const diffPopup = /** @type {HTMLElement} */ (document.getElementById('diff-popup'))
+const popupContent = /** @type {HTMLElement} */ (document.getElementById('popup-content'))
+const popupClose = /** @type {HTMLButtonElement} */ (document.getElementById('popup-close'))
+
+const showPopup = (/** @type {string} */ content) => {
+  popupContent.textContent = content
+  diffPopup.classList.add('active')
+}
+
+const hidePopup = () => {
+  diffPopup.classList.remove('active')
+}
+
+popupClose.addEventListener('click', hidePopup)
+diffPopup.addEventListener('click', (e) => {
+  if (e.target === diffPopup) hidePopup()
+})
+
 /**
  * @param {number} timestamp
  */
@@ -94,13 +113,19 @@ const formatTimestamp = (timestamp) => {
  * @param {Array<number>} timestamps
  */
 const populateSelect = (select, timestamps) => {
+  const prevValue = select.value
   select.innerHTML = ''
-  timestamps.forEach(ts => {
+  timestamps.forEach((ts, index) => {
     const option = document.createElement('option')
     option.value = ts.toString()
-    option.textContent = formatTimestamp(ts)
+    const hexId = index.toString(16).toUpperCase().padStart(2, '0')
+    option.textContent = `${hexId}: ${formatTimestamp(ts)}`
     select.appendChild(option)
   })
+  // Restore previous selection if it still exists
+  if (prevValue && Array.from(select.options).some(opt => opt.value === prevValue)) {
+    select.value = prevValue
+  }
 }
 
 const fetchTimestamps = async () => {
@@ -147,11 +172,12 @@ renderBtn.addEventListener('click', async () => {
       return ydoc
     }
 
-    const alertMessage = `\
-      prevDoc: ${JSON.stringify(createDocFromUpdate(result.prevDoc).getText().toJSON())}
-      nextDoc: ${JSON.stringify(createDocFromUpdate(result.nextDoc).getText().toJSON())}
-      delta: ${JSON.stringify(result.delta)}`
-    alert(alertMessage)
+    const message = `prevDoc: ${JSON.stringify(createDocFromUpdate(result.prevDoc).getText().toJSON())}
+
+nextDoc: ${JSON.stringify(createDocFromUpdate(result.nextDoc).getText().toJSON())}
+
+delta: ${JSON.stringify(result.delta, null, 2)}`
+    showPopup(message)
   } catch (e) {
     alert('Error fetching history: ' + e)
   }
@@ -186,5 +212,6 @@ rollbackBtn.addEventListener('click', async () => {
   }
 })
 
-// Initial fetch
+// Initial fetch and periodic polling
 fetchTimestamps()
+setInterval(fetchTimestamps, 2000) // Refresh timestamps every 5 seconds

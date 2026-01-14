@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Yjs y-redis / CodeMirror6 Demo</title>
+    <style>
+      body {
+        display: flex;
+        margin: 0;
+        font-family: sans-serif;
+      }
+      .main-content {
+        flex: 1;
+        padding: 20px;
+      }
+      .cm-wrap { height: 300px; border: 1px solid #ddd}
+      .cm-scroller { overflow: auto; }
+      .sidepanel {
+        width: 300px;
+        background: #f5f5f5;
+        border-left: 1px solid #ddd;
+        display: flex;
+        flex-direction: column;
+      }
+      .tabs {
+        display: flex;
+        border-bottom: 1px solid #ddd;
+      }
+      .tab {
+        flex: 1;
+        padding: 10px;
+        text-align: center;
+        cursor: pointer;
+        background: #e0e0e0;
+        border: none;
+      }
+      .tab.active {
+        background: #f5f5f5;
+        font-weight: bold;
+      }
+      .tab-content {
+        display: none;
+        padding: 15px;
+      }
+      .tab-content.active {
+        display: block;
+      }
+      .form-group {
+        margin-bottom: 15px;
+      }
+      .form-group label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: bold;
+      }
+      .form-group select {
+        width: 100%;
+        padding: 8px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+      }
+      .btn {
+        padding: 10px 20px;
+        margin-right: 10px;
+        margin-bottom: 10px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      .btn-primary {
+        background: #007bff;
+        color: white;
+      }
+      .btn-danger {
+        background: #dc3545;
+        color: white;
+      }
+      .btn:hover {
+        opacity: 0.9;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="main-content">
+      <button type="button" id="y-connect-btn">Disconnect</button>
+      <p></p>
+      <p>
+        This is a demo of the <a href="https://github.com/yjs/yjs">Yjs</a> ⇔
+        <a href="https://codemirror.net">CodeMirror</a> binding:
+        <a href="https://github.com/yjs/y-codemirror.next">y-codemirror.next</a>.
+      </p>
+      <p>
+        The content of this editor is shared with every client that visits this
+        domain.
+      </p>
+      <div id="editor"></div>
+    </div>
+    <div class="sidepanel">
+      <div class="tabs">
+        <button class="tab active" data-tab="history">History</button>
+      </div>
+      <div id="history-tab" class="tab-content active">
+        <div class="form-group">
+          <label for="from-timestamp">From:</label>
+          <select id="from-timestamp">
+            <option value="">Loading...</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="to-timestamp">To:</label>
+          <select id="to-timestamp">
+            <option value="">Loading...</option>
+          </select>
+        </div>
+        <div>
+          <button class="btn btn-primary" id="render-btn">Render</button>
+          <button class="btn btn-danger" id="rollback-btn">Rollback</button>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="../dist/demo.js" async></script>
+  </body>
+</html>

@@ -94,10 +94,10 @@ export const createYWebsocketServer = async ({
        * @param {Array<Y.ContentAttribute<any>>} attrs
        */
       const attrFilter = attrs => {
-        if ((from || to) && !attrs.some(attr => (attr.name === 'insertAt' || attr.name === 'deleteAt') && (from == null || attr.val >= from) && (to == null || attr.val <= to))) {
+        if ((from || to) && !attrs.some(attr => (attr.name === 'insertAt' || attr.name === 'deleteAt') && (from == null || attr.val >= from) && (to == null || attr.val < to))) {
           return false
         }
-        if (by != null && !attrs.some(attr => (attr.name === 'insertBy' || attr.name === 'deleteBy') && /** @type {string} */ (attr.val).split(',').includes(by))) {
+        if (by != null && !attrs.some(attr => (attr.name === 'insert' || attr.name === 'delete') && /** @type {string} */ (attr.val).split(',').includes(by))) {
           return false
         }
         return true
@@ -113,8 +113,27 @@ export const createYWebsocketServer = async ({
 
   // The REST API defined in `API.md`
 
+  /**
+   * @param {uws.HttpResponse} res
+   */
+  const setCorsHeaders = (res) => {
+    res.writeHeader('Access-Control-Allow-Origin', '*')
+    res.writeHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    res.writeHeader('Access-Control-Allow-Headers', 'Content-Type')
+  }
+
+  // Handle CORS preflight requests
+  app.options('/*', (res, _req) => {
+    res.cork(() => {
+      setCorsHeaders(res)
+      res.writeStatus('204 No Content')
+      res.end()
+    })
+  })
+
   // POST /rollback/{guid} - Rollback changes matching the pattern
   app.post('/rollback/:room', (res, req) => {
+    debugger
     const room = /** @type {string} */ (req.getParameter(0))
     let buffer = Buffer.allocUnsafe(0)
     let aborted = false
@@ -125,6 +144,7 @@ export const createYWebsocketServer = async ({
      * @param {Buffer} buffer
      */
     const handleRollbackRequest = async buffer => {
+      debugger
       if (aborted) return
       try {
         const decoder = decoding.createDecoder(buffer)
@@ -141,18 +161,21 @@ export const createYWebsocketServer = async ({
             yhubApi.addMessage(room, 'index', {
               type: 'update:v1',
               update,
-              attributions: Y.encodeContentMap(Y.createContentMapFromContentIds(Y.createContentIdsFromUpdateV2(update), [Y.createContentAttribute('insertBy', 'system'), Y.createContentAttribute('insertAt', now)], [Y.createContentAttribute('deleteBy', 'system'), Y.createContentAttribute('deleteAt', now)]))
+              attributions: Y.encodeContentMap(Y.createContentMapFromContentIds(Y.createContentIdsFromUpdate(update), [Y.createContentAttribute('insert', 'system'), Y.createContentAttribute('insertAt', now)], [Y.createContentAttribute('delete', 'system'), Y.createContentAttribute('deleteAt', now)]))
             })
           })
           Y.undoContentIds(ydoc, revertIds)
           if (!aborted) {
             // write response
             const encoder = encoding.createEncoder()
-            encoding.writeAny(encoder, { success: true, message: 'Rollback completed (mock)' })
+            encoding.writeAny(encoder, { success: true, message: 'Rollback completed' })
             const response = encoding.toUint8Array(encoder)
-            res.writeStatus('200 OK')
-            res.writeHeader('Content-Type', 'application/octet-stream')
-            res.end(response)
+            res.cork(() => {
+              setCorsHeaders(res)
+              res.writeStatus('200 OK')
+              res.writeHeader('Content-Type', 'application/octet-stream')
+              res.end(response)
+            })
           }
           return
         }
@@ -160,12 +183,17 @@ export const createYWebsocketServer = async ({
       } catch (_err) {
         console.warn('[rollback api] error parsing request')
       }
-      const encoder = encoding.createEncoder()
-      encoding.writeAny(encoder, { error: 'error consuming request' })
-      const response = encoding.toUint8Array(encoder)
-      res.writeStatus('400 Bad Request')
-      res.writeHeader('Content-Type', 'application/octet-stream')
-      res.end(response)
+      if (!aborted) {
+        const encoder = encoding.createEncoder()
+        encoding.writeAny(encoder, { error: 'error consuming request' })
+        const response = encoding.toUint8Array(encoder)
+        res.cork(() => {
+          setCorsHeaders(res)
+          res.writeStatus('400 Bad Request')
+          res.writeHeader('Content-Type', 'application/octet-stream')
+          res.end(response)
+        })
+      }
     }
     res.onData((chunk, isLast) => {
       const chunkBuffer = Buffer.from(chunk)
@@ -221,9 +249,12 @@ export const createYWebsocketServer = async ({
     const encoder = encoding.createEncoder()
     encoding.writeAny(encoder, response)
     const responseData = encoding.toUint8Array(encoder)
-    res.writeStatus('200 OK')
-    res.writeHeader('Content-Type', 'application/octet-stream')
-    res.end(responseData)
+    res.cork(() => {
+      setCorsHeaders(res)
+      res.writeStatus('200 OK')
+      res.writeHeader('Content-Type', 'application/octet-stream')
+      res.end(responseData)
+    })
   })
 
   // GET /timestamps/{guid} - Get all editing timestamps for a document
@@ -240,7 +271,7 @@ export const createYWebsocketServer = async ({
      * @type {Set<number>}
      */
     const timestamps = new Set()
-    filteredAttributions.deletes.forEach(attrRange => {
+    filteredAttributions.inserts.forEach(attrRange => {
       attrRange.attrs.forEach(attr => {
         if (attr.name === 'insertAt') {
           timestamps.add(attr.val)
@@ -261,9 +292,12 @@ export const createYWebsocketServer = async ({
     const encoder = encoding.createEncoder()
     encoding.writeAny(encoder, response)
     const responseData = encoding.toUint8Array(encoder)
-    res.writeStatus('200 OK')
-    res.writeHeader('Content-Type', 'application/octet-stream')
-    res.end(responseData)
+    res.cork(() => {
+      setCorsHeaders(res)
+      res.writeStatus('200 OK')
+      res.writeHeader('Content-Type', 'application/octet-stream')
+      res.end(responseData)
+    })
   })
 
   await promise.create((resolve, reject) => {

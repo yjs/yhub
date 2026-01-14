@@ -252,7 +252,7 @@ export class Api {
     const docMessages = ms.get(room)?.get(docid) || null
     logApi(`getDoc(${room}, ${docid}, gc=${gc}, branch=${branch}) - retrieved ${docMessages?.messages.length || 0} messages`)
     const docstate = await this.store.retrieveDoc(room, docid, { gc, branch, yContentMap: attributions })
-    const contentMapAttributions = docstate?.yContentMap
+    let contentMapAttributions = docstate?.yContentMap || (attributions ? Y.mergeContentMaps([]) : null)
     logApi(`getDoc(${room}, ${docid}, gc=${gc}, branch=${branch}) - retrieved doc`)
     const ydoc = new Y.Doc({ gc })
     const awareness = new awarenessProtocol.Awareness(ydoc)
@@ -268,8 +268,9 @@ export class Api {
         switch (message.type) {
           case 'update:v1': {
             Y.applyUpdate(ydoc, message.update)
+            console.log('le message containing attributions', message.attributions, contentMapAttributions, Y.decodeContentMap(message.attributions))
             if (message.attributions != null && contentMapAttributions != null) {
-              Y.mergeContentMaps([contentMapAttributions, Y.excludeContentMaps(Y.decodeContentMap(message.attributions), contentMapAttributions)])
+              contentMapAttributions = Y.mergeContentMaps([contentMapAttributions, Y.excludeContentMaps(Y.decodeContentMap(message.attributions), contentMapAttributions)])
             }
             break
           }
@@ -332,6 +333,7 @@ export class Api {
             console.error(e)
           }
           logWorker('persisting both gc and non-gc versions')
+          console.log('stored attributions', nonGcResult.attributions, gcResult.attributions)
           await promise.all([
             gcResult.docChanged ? this.store.persistDoc(room, docid, gcResult.ydoc, gcResult.attributions, { gc: true, branch }) : promise.resolve(),
             nonGcResult.docChanged ? this.store.persistDoc(room, docid, nonGcResult.ydoc, nonGcResult.attributions, { gc: false, branch }) : promise.resolve()

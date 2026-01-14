@@ -12,7 +12,7 @@
     "dev": "concurrently -r 'npm run redis' 'npm run postgres' 'sleep 10 && npm run init && npm start'",
     "start": "concurrently -r 'npm run start:server' 'npm run start:worker'",
     "start:server": "node --env-file .env ./bin/server.js",
-    "debug:server": "node --env-file .env --inspect-brk ./bin/worker.js ./bin/server.js",
+    "debug:server": "node --env-file .env --inspect-brk ./bin/server.js",
     "start:worker": "node --env-file .env ./bin/worker.js",
     "debug:worker": "node --env-file .env --inspect-brk ./bin/worker.js",
     "redis": "docker run -p 6379:6379 redis",

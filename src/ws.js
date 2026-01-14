@@ -208,6 +208,7 @@ export const registerYWebsocketServer = async (app, pattern, storage, redisPrefi
                 [Y.createContentAttribute('insert', user.userid), Y.createContentAttribute('insertAt', now)],
                 [Y.createContentAttribute('delete', user.userid), Y.createContentAttribute('deleteAt', now)]
               ))
+              console.log('storing attributions! ', attributions)
               client.addMessage(user.room, 'index', { type: 'update:v1', attributions, update }, { branch: user.branch })
             }
           } else if (syncMessageType === protocol.messageSyncStep1) {

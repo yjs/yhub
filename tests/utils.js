@@ -31,7 +31,8 @@ export const checkPermCallbackUrl = `${authDemoServerUrl}/auth/perm/`
 export const authTokenUrl = `${authDemoServerUrl}/auth/token`
 
 export const yredisPort = 9999
-export const yredisUrl = `ws://localhost:${yredisPort}/`
+export const yhubHost = `localhost:${yredisPort}`
+export const yredisUrl = `ws://${yhubHost}/`
 
 export const storage = await createPostgresStorage(env.ensureConf('postgres-testing'))
 // Clean up test data - only delete if table exists
@@ -65,13 +66,13 @@ const createWsClient = (tc, room, { branch = 'main', gc = true } = {}) => {
   return { ydoc, provider }
 }
 
-const createWorker = async () => {
+export const createWorker = async () => {
   const worker = await api.createWorker(storage, redisPrefix, {})
   prevClients.push(worker.client)
   return worker
 }
 
-const createServer = async () => {
+export const createServer = async () => {
   const server = await createYWebsocketServer({ port: yredisPort, store: storage, redisPrefix, checkPermCallbackUrl })
   prevClients.push(server)
   return server

@@ -100,25 +100,6 @@ cd yhub
 npm i
 ```
 
-### Setup the environment variables
-
-```sh
-cp .env.docker.template .env
-# generate unique authentication tokens
-npx 0ecdsa-generate-keypair --name auth >> .env
-```
-
-The sample configuration configures s3 using minio.
-Have a look at `.env.template` for more configuration options.
-
-### Run demo
-
-```sh
-cd ./demos/auth-express
-docker compose up
-# open http://localhost:5173 in a browser
-```
-
 # Full setup
 
 Components are configured via environment variables. It makes sense to start by
@@ -136,24 +117,14 @@ recommended if you want to debug the redis stream.
 Alternatively, simply run redis via docker:
 
 ```sh
-# start the official redis docker container on port 6379
-docker run -p 6379:6379 redis
-# or `npm run redis`
+npm run redis
 ```
 
-#### Start an S3 instance
-
-Setup an S3-compatible store at your favorite cloud provider.
-
-Alternatively, simply run a *minio* store as a docker container:
+### Start Postgres instance
 
 ```sh
-docker run -p 9000:9000 -p 9001:9001 quay.io/minio/minio server /data --console-address \":9001\"
-# or `npm run minio`
+npm run postgres
 ```
-
-This is just a dev setup. Have a look at the minio documentation if you want to
-run it in production.
 
 #### Clone demo
 
@@ -182,7 +153,7 @@ npm run start:server
 # run a single worker in a separate terminal
 npm run start:worker
 # start the express server in a separater terminal
-cd demos/auth-express
+cd demos/attributions
 npm i
 npm start
 ```

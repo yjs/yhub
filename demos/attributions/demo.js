@@ -27,7 +27,7 @@ export const usercolors = [
 
 export const userColor = usercolors[random.uint32() % usercolors.length]
 
-const room = 'y-redis-demo-app-1'
+const room = 'y-redis-demo-app-2'
 
 // request an auth token before trying to connect
 const authToken = await fetch(`http://${location.host}/auth/token`).then(request => request.text())

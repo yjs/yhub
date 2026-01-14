@@ -75,7 +75,7 @@
   },
   "dependencies": {
     "@y/protocols": "^1.0.6-3",
-    "@y/y": "^14.0.0-20",
+    "@y/y": "^14.0.0-21",
     "lib0": "^1.0.0-0",
     "redis": "^4.6.12",
     "uws": "github:uNetworking/uWebSockets.js#v20.56.0"

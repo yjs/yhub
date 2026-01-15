@@ -2,6 +2,7 @@
 
 import postgres from 'postgres'
 import * as env from 'lib0/environment'
+import { Client as S3Client } from 'minio'
 
 /**
  * Initialize the database and tables for y/hub
@@ -96,11 +97,47 @@ async function init (postgresUrl) {
   console.log(`[init-db] ✓ Initialization done: ${postgresUrl}`)
 }
 
+/**
+ * Initialize S3 bucket if it doesn't exist
+ * @param {S3Client} s3client
+ * @param {string} bucket
+ */
+async function initS3Bucket (s3client, bucket) {
+  console.log(`[init-db] Checking if S3 bucket '${bucket}' exists...`)
+  const exists = await s3client.bucketExists(bucket)
+  if (!exists) {
+    console.log(`[init-db] Creating S3 bucket '${bucket}'...`)
+    await s3client.makeBucket(bucket)
+    console.log(`[init-db] ✓ S3 bucket '${bucket}' created`)
+  } else {
+    console.log(`[init-db] ✓ S3 bucket '${bucket}' already exists`)
+  }
+}
+
 console.log('[init-db] Initializing databases based on environment variables POSTGRES & POSTGRES_TESTING')
 
 const postgresUrl = env.getConf('postgres')
 const postgresTestingUrl = env.getConf('postgres-testing')
 postgresUrl && await init(postgresUrl)
 postgresTestingUrl && await init(postgresTestingUrl)
+
+// Initialize S3 buckets
+const s3Bucket = env.getConf('S3_YHUB_BUCKET')
+const s3TestBucket = env.getConf('S3_YHUB_TEST_BUCKET')
+
+if (s3Bucket) {
+  console.log('[init-db] Initializing S3 buckets...')
+  const s3client = new S3Client({
+    endPoint: env.ensureConf('S3_ENDPOINT'),
+    port: parseInt(env.ensureConf('S3_PORT'), 10),
+    useSSL: env.ensureConf('S3_SSL') === 'true',
+    accessKey: env.ensureConf('S3_ACCESS_KEY'),
+    secretKey: env.ensureConf('S3_SECRET_KEY')
+  })
+  await initS3Bucket(s3client, s3Bucket)
+  if (s3TestBucket) {
+    await initS3Bucket(s3client, s3TestBucket)
+  }
+}
 
 console.log('[init-db] All databases initialized successfully')

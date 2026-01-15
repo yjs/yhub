@@ -153,11 +153,11 @@ export const createYWebsocketServer = async ({
         if (s.$object({ from: s.$number.optional, to: s.$number.optional, by: s.$string.optional, contentIds: s.$uint8Array.optional }).check(decodedBody)) {
           const { from, to, by, contentIds: contentIdsBin } = decodedBody
           const contentIds = contentIdsBin && Y.decodeContentIds(contentIdsBin)
-          let { attributions, ydoc } = await yhubApi.getDoc(room, 'index', { gc: false, attributions: true })
+          const { attributions, ydoc } = await yhubApi.getDoc(room, 'index', { gc: false, attributions: true })
           const reducedAttributions = filterContentMapHelper(attributions, from, to, by, contentIds)
           const revertIds = Y.createContentIdsFromContentMap(reducedAttributions)
           ydoc.once('update', update => {
-            const now  = time.getUnixTime()
+            const now = time.getUnixTime()
             yhubApi.addMessage(room, 'index', {
               type: 'update:v1',
               update,

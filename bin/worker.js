@@ -3,10 +3,17 @@
 import * as env from 'lib0/environment'
 import * as yredis from '@y/hub'
 import * as Y from '@y/y'
-import { createPostgresStorage } from '../src/storage.js'
+import { createStorage } from '../src/storage.js'
 
 const redisPrefix = env.ensureConf('redis-prefix')
-const store = await createPostgresStorage(env.ensureConf('postgres'))
+const store = await createStorage(env.ensureConf('postgres'), {
+  bucket: env.ensureConf('S3_YHUB_BUCKET'),
+  endPoint: env.ensureConf('S3_ENDPOINT'),
+  port: parseInt(env.ensureConf('S3_PORT'), 10),
+  useSSL: env.ensureConf('S3_SSL') === 'true',
+  accessKey: env.ensureConf('S3_ACCESS_KEY'),
+  secretKey: env.ensureConf('S3_SECRET_KEY')
+})
 
 let ydocUpdateCallback = env.getConf('ydoc-update-callback')
 if (ydocUpdateCallback != null && ydocUpdateCallback.slice(-1) !== '/') {

@@ -1,9 +1,9 @@
-import * as Y from 'yjs'
+import * as Y from '@y/y'
 import * as env from 'lib0/environment'
 import * as json from 'lib0/json'
 import * as ecdsa from 'lib0/crypto/ecdsa'
 import { WebSocket } from 'ws'
-import { WebsocketProvider } from 'y-websocket'
+import { WebsocketProvider } from '@y/websocket'
 import * as redis from 'redis'
 import * as time from 'lib0/time'
 import * as jwt from 'lib0/crypto/jwt'
@@ -12,7 +12,7 @@ import * as promise from 'lib0/promise'
 import * as array from 'lib0/array'
 
 import { createYWebsocketServer } from '../src/server.js'
-import { createPostgresStorage } from '../src/storage.js'
+import { createStorage } from '../src/storage.js'
 import * as api from '../src/api.js'
 
 /**
@@ -32,9 +32,17 @@ export const authTokenUrl = `${authDemoServerUrl}/auth/token`
 
 export const yredisPort = 9999
 export const yhubHost = `localhost:${yredisPort}`
-export const yredisUrl = `ws://${yhubHost}/`
+export const yredisUrl = `ws://${yhubHost}/ws`
 
-export const storage = await createPostgresStorage(env.ensureConf('postgres-testing'))
+export const storage = await createStorage(env.ensureConf('postgres-testing'), {
+  bucket: env.ensureConf('S3_YHUB_TEST_BUCKET'),
+  endPoint: env.ensureConf('S3_ENDPOINT'),
+  port: parseInt(env.ensureConf('S3_PORT'), 10),
+  useSSL: env.ensureConf('S3_SSL') === 'true',
+  accessKey: env.ensureConf('S3_ACCESS_KEY'),
+  secretKey: env.ensureConf('S3_SECRET_KEY')
+})
+
 // Clean up test data - only delete if table exists
 const tableExists = await storage.sql`
   SELECT EXISTS (
@@ -128,13 +136,14 @@ export const createTestCase = async tc => {
 export const waitDocsSynced = (ydoc1, ydoc2) => {
   console.info('waiting for docs to sync...')
   return promise.until(5000, () => {
-    const e1 = Y.encodeStateAsUpdateV2(ydoc1)
-    const e2 = Y.encodeStateAsUpdateV2(ydoc2)
-    const isSynced = array.equalFlat(e1, e2)
+    const cids1 = Y.createContentIdsFromDoc(ydoc1)
+    const cids2 = Y.createContentIdsFromDoc(ydoc2)
+    const diff = Y.excludeContentIds(cids1, cids2)
+    const isSynced = diff.deletes.isEmpty() && diff.inserts.isEmpty()
     isSynced && console.info('docs sycned!')
     return isSynced
   }).catch(err => {
-    console.info('prematurely cancelled waiting for sync')
+    console.info('prematurely cancelled waiting for sync', err)
     promise.resolve(err)
   })
 }

@@ -244,7 +244,7 @@ export class Api {
    * @param {boolean} [opts.gc]
    * @param {string} [opts.branch]
    * @param {IncludeAttributions} [opts.attributions]
-   * @return {Promise<{ ydoc: Y.Doc, awareness: awarenessProtocol.Awareness, redisLastId: string, storeReferences: Array<number>?, docChanged: boolean, attributions: IncludeAttributions extends true ? Y.ContentMap : null}>}
+   * @return {Promise<{ ydoc: Y.Doc, awareness: awarenessProtocol.Awareness, redisLastId: string, storeReferences: { db: Array<number>, s3: Array<string> }?, docChanged: boolean, attributions: IncludeAttributions extends true ? Y.ContentMap : null}>}
    */
   async getDoc (room, docid, { gc = true, branch = 'main', attributions } = {}) {
     logApi(`getDoc(${room}, ${docid}, gc=${gc}, branch=${branch})`)
@@ -257,7 +257,7 @@ export class Api {
     const ydoc = new Y.Doc({ gc })
     const awareness = new awarenessProtocol.Awareness(ydoc)
     awareness.setLocalState(null) // we don't want to propagate awareness state
-    if (docstate) { Y.applyUpdateV2(ydoc, docstate.doc) }
+    if (docstate) { Y.applyUpdate(ydoc, docstate.doc) }
     let docChanged = false
     ydoc.once('afterTransaction', tr => {
       docChanged = tr.changed.size > 0
@@ -268,7 +268,6 @@ export class Api {
         switch (message.type) {
           case 'update:v1': {
             Y.applyUpdate(ydoc, message.update)
-            console.log('le message containing attributions', message.attributions, contentMapAttributions, Y.decodeContentMap(message.attributions))
             if (message.attributions != null && contentMapAttributions != null) {
               contentMapAttributions = Y.mergeContentMaps([contentMapAttributions, Y.excludeContentMaps(Y.decodeContentMap(message.attributions), contentMapAttributions)])
             }

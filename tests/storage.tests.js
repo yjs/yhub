@@ -31,23 +31,23 @@ export const testStorage = async _tc => {
     t.info('retrieving docs')
     const r1 = await storage.retrieveDoc('room', 'index')
     t.assert(r1)
-    t.assert(r1.references.length === 2) // we stored two different versions that should be merged now
+    t.assert(r1.references.db.length === 2) // we stored two different versions that should be merged now
     const doc1 = new Y.Doc()
-    Y.applyUpdateV2(doc1, r1.doc)
+    Y.applyUpdate(doc1, r1.doc)
     // should have merged both changes..
     t.assert(doc1.get().getAttr('a') === 1 && doc1.get().getAttr('b') === 1)
     // retrieve other doc..
     const doc3 = new Y.Doc()
     const r3 = await storage.retrieveDoc('room', 'doc3')
     t.assert(r3)
-    t.assert(r3.references.length === 1)
-    Y.applyUpdateV2(doc3, r3.doc)
+    t.assert(r3.references.db.length === 1)
+    Y.applyUpdate(doc3, r3.doc)
     t.assert(doc3.get().getAttr('a') === 2)
     t.info('delete references')
-    await storage.deleteReferences('room', 'index', [r1.references[0]])
+    await storage.deleteReferences('room', 'index', { db: [r1.references.db[0]], s3: [] })
     const r1v2 = await storage.retrieveDoc('room', 'index')
-    t.assert(r1v2 && r1v2.references.length === 1)
-    await storage.deleteReferences('room', 'index', [r1.references[1]])
+    t.assert(r1v2 && r1v2.references.db.length === 1)
+    await storage.deleteReferences('room', 'index', { db: [r1.references.db[1]], s3: [] })
     const r1v3 = await storage.retrieveDoc('room', 'index')
     t.assert(r1v3 == null)
   }

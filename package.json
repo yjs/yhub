@@ -80,14 +80,14 @@
     "lib0": "^1.0.0-0",
     "minio": "^8.0.6",
     "redis": "^4.6.12",
-    "uws": "github:uNetworking/uWebSockets.js#v20.56.0"
+    "uws": "github:uNetworking/uWebSockets.js#v20.57.0"
   },
   "optionalDependencies": {
     "postgres": "^3.4.3"
   },
   "engines": {
     "npm": ">=8.0.0",
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.6",

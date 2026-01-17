@@ -5,6 +5,8 @@ import * as yredis from '@y/hub'
 import * as Y from '@y/y'
 import { createStorage } from '../src/storage.js'
 
+console.log('starting worker')
+
 const redisPrefix = env.ensureConf('redis-prefix')
 const store = await createStorage(env.ensureConf('postgres'), {
   bucket: env.ensureConf('S3_YHUB_BUCKET'),

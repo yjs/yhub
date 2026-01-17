@@ -5,6 +5,8 @@ import * as env from 'lib0/environment'
 import * as yredis from '@y/hub'
 import { createStorage } from '../src/storage.js'
 
+console.log('starting server')
+
 const port = number.parseInt(env.getConf('port') || '3002')
 const redisPrefix = env.ensureConf('redis-prefix')
 const checkPermCallbackUrl = env.ensureConf('AUTH_PERM_CALLBACK')

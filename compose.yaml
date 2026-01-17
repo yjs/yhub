@@ -21,6 +21,7 @@ services:
         condition: service_completed_successfully
   redis:
     image: redis:alpine
+    profiles: ["db"]
     ports:
       - "6379:6379"
     healthcheck:
@@ -30,6 +31,7 @@ services:
       retries: 5
   postgres:
     image: postgres:16-alpine
+    profiles: ["db"]
     ports:
       - "5432:5432"
     environment:
@@ -43,6 +45,7 @@ services:
       retries: 5
   minio:
     image: quay.io/minio/minio
+    profiles: ["db"]
     ports:
       - 9000:9000
       - 9001:9001
@@ -55,7 +58,7 @@ services:
       start_period: 5s
   init:
     build: .
-    command: sh -c "sleep 5 && node ./bin/init-db.js"
+    command: sh -c "sleep 5 && node ./bin/init-db.js ; echo done"
     env_file:
       - .env
       - .env.docker

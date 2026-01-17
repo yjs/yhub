@@ -4,22 +4,65 @@ services:
     ports:
       - "3002:3002"
     command: node ./bin/server.js --no-colors
-    env_file: .env
+    env_file:
+      - .env
+      - .env.docker
     depends_on:
-      - minio
-      - redis
+      init:
+        condition: service_completed_successfully
   worker:
     build: .
     command: node ./bin/worker.js --no-colors
-    env_file: .env
+    env_file:
+      - .env
+      - .env.docker
     depends_on:
-      - minio
-      - redis
+      init:
+        condition: service_completed_successfully
   redis:
     image: redis:alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: yhub
+      POSTGRES_PASSWORD: yhub
+      POSTGRES_DB: yhub
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yhub"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
   minio:
     image: quay.io/minio/minio
     ports:
       - 9000:9000
       - 9001:9001
     command: server /data --console-address :9001
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+  init:
+    build: .
+    command: sh -c "sleep 5 && node ./bin/init-db.js"
+    env_file:
+      - .env
+      - .env.docker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy

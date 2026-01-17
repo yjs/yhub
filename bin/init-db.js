@@ -141,3 +141,5 @@ if (s3Bucket) {
 }
 
 console.log('[init-db] All databases initialized successfully')
+
+process.exit(0)

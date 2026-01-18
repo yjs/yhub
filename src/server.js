@@ -133,7 +133,6 @@ export const createYWebsocketServer = async ({
 
   // POST /rollback/{guid} - Rollback changes matching the pattern
   app.post('/rollback/:room', (res, req) => {
-    debugger
     const room = /** @type {string} */ (req.getParameter(0))
     let buffer = Buffer.allocUnsafe(0)
     let aborted = false
@@ -144,7 +143,6 @@ export const createYWebsocketServer = async ({
      * @param {Buffer} buffer
      */
     const handleRollbackRequest = async buffer => {
-      debugger
       if (aborted) return
       try {
         const decoder = decoding.createDecoder(buffer)

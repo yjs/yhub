@@ -37,7 +37,7 @@ export const parseRedisMessage = m => decoding.readAny(decoding.createDecoder(m)
  */
 export const encodeRedisMessage = m => encoding.encode(encoder => encoding.writeAny(encoder, m))
 
-export const redisUrl = env.ensureConf('redis')
+export const redisUrl = env.ensureConf('valkey')
 
 /**
  * @param {string} a

@@ -66,7 +66,6 @@ export const testGcNonGcDocs = async tc => {
   await promise.wait(100)
   const { ydoc: ydocNoGc } = createWsClient('gctest', { gc: false })
   await utils.waitDocsSynced(ydocGc, ydocNoGc)
-  debugger
   t.assert(ydocNoGc.get().getAttr('a') === 2)
   // check that content was not gc'd
   t.assert(ydocNoGc.get()._map.get('a')?.left?.content.getContent()[0] === 1)

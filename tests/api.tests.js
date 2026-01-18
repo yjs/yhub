@@ -98,7 +98,6 @@ export const testHistoryRestApi = async tc => {
   {
     const history = await fetchYhubResponse(`/history/${room}?from=2&to=2&ydoc=true&delta=true&attributions=true`)
     console.log(history)
-    debugger
     console.log('prevDoc: ', JSON.stringify(Y.createDocFromUpdate(history.prevDoc).toJSON()))
     console.log('nextDoc: ', JSON.stringify(Y.createDocFromUpdate(history.nextDoc).toJSON()))
     console.log('delta: ', JSON.stringify(history.delta))
@@ -110,7 +109,6 @@ export const testHistoryRestApi = async tc => {
     const xdoc = await client.getDoc(room, docid)
     const rollbackContent = xdoc.ydoc.get().toDelta()
     console.log(rollbackContent.toJSON())
-    debugger
     t.compare(rollbackContent, delta.create().insert('hello hi world'))
   }
 }

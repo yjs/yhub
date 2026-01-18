@@ -23,8 +23,8 @@
     "clean": "rm -rf **/dist "
   },
   "bin": {
-    "y-redis-server": "./bin/server.js",
-    "y-redis-worker": "./bin/worker.js"
+    "yhub-server": "./bin/server.js",
+    "yhub-worker": "./bin/worker.js"
   },
   "files": [
     "dist/*",

@@ -21,13 +21,13 @@ services:
     depends_on:
       init:
         condition: service_completed_successfully
-  redis:
-    image: redis:alpine
+  valkey:
+    image: valkey/valkey:alpine
     profiles: ["db"]
     ports:
       - "6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -45,15 +45,15 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-  minio:
-    image: quay.io/minio/minio
+  s3mock:
+    image: adobe/s3mock:latest
     profiles: ["db"]
     ports:
-      - 9000:9000
-      - 9001:9001
-    command: server /data --console-address :9001
+      - 9090:9090
+    environment:
+      - initialBuckets=yhub,yhub-testing
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -68,7 +68,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
+      valkey:
         condition: service_healthy
-      minio:
+      s3mock:
         condition: service_healthy

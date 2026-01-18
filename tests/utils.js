@@ -9,7 +9,6 @@ import * as time from 'lib0/time'
 import * as jwt from 'lib0/crypto/jwt'
 import * as t from 'lib0/testing' // eslint-disable-line
 import * as promise from 'lib0/promise'
-import * as array from 'lib0/array'
 
 import { createYWebsocketServer } from '../src/server.js'
 import { createStorage } from '../src/storage.js'

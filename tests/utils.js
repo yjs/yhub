@@ -66,11 +66,15 @@ const authToken = await jwt.encodeJwt(authPrivateKey, {
  * @param {object} params
  * @param {string} [params.branch]
  * @param {boolean} [params.gc]
+ * @param {boolean} [params.syncAwareness]
  */
-const createWsClient = (tc, room, { branch = 'main', gc = true } = {}) => {
+const createWsClient = (tc, room, { branch = 'main', gc = true, syncAwareness = true } = {}) => {
   const ydoc = new Y.Doc({ gc })
   const roomPrefix = tc.testName
   const provider = new WebsocketProvider(yredisUrl, roomPrefix + '-' + room, ydoc, { WebSocketPolyfill: /** @type {any} */ (WebSocket), disableBc: true, params: { branch, gc: gc.toString() }, protocols: [`yauth-${authToken}`] })
+  if (!syncAwareness) {
+    provider.awareness.destroy()
+  }
   return { ydoc, provider }
 }
 
@@ -124,6 +128,7 @@ export const createTestCase = async tc => {
      * @param {object} [opts]
      * @param {string} [opts.branch]
      * @param {boolean} [opts.gc]
+     * @param {boolean} [opts.syncAwareness]
      */
     createWsClient: (docid, opts) => createWsClient(tc, docid, opts)
   }

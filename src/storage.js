@@ -48,7 +48,6 @@ const $s3YUpdate = s.$([{ type: s.$literal('update:v1'), update: s.$uint8Array }
  * @return {Promise<YUpdate>}
  */
 const storeInS3 = async (s3client, s3bucket, org, docid, ydoc) => {
-  debugger
   const path = `${org}/${docid}-${random.uint32().toString(16).slice(2)}`
   const file = buffer.encodeAny($s3YUpdate.expect({
     type: 'update:v1',

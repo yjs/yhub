@@ -104,7 +104,7 @@ export const testHistoryRestApi = async tc => {
     console.log('delta: ', JSON.stringify(history.delta))
   }
   { // rollback
-    const rollbackResult = await postYhubRequest(`/rollback/${room}`, { from: 2, to: 3 }) // undo (delete "hello" & insert "!")
+    const rollbackResult = await postYhubRequest(`/rollback/${room}`, { from: 2, to: 2 }) // undo (delete "hello" & insert "!")
     console.log(rollbackResult)
     await promise.wait(3000)
     const xdoc = await client.getDoc(room, docid)

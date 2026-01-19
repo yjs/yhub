@@ -1,7 +1,7 @@
 services:
   server:
     build: .
-    profiles: ["frontend"]
+    profiles: ["all"]
     ports:
       - "3002:3002"
     command: node ./bin/server.js --no-colors
@@ -13,7 +13,7 @@ services:
         condition: service_completed_successfully
   worker:
     build: .
-    profiles: ["worker"]
+    profiles: ["all"]
     command: node ./bin/worker.js --no-colors
     env_file:
       - .env
@@ -23,7 +23,7 @@ services:
         condition: service_completed_successfully
   valkey:
     image: valkey/valkey:alpine
-    profiles: ["db"]
+    profiles: ["all", "db"]
     ports:
       - "6379:6379"
     healthcheck:
@@ -33,7 +33,7 @@ services:
       retries: 5
   postgres:
     image: postgres:16-alpine
-    profiles: ["db"]
+    profiles: ["all", "db"]
     ports:
       - "5432:5432"
     environment:
@@ -47,7 +47,7 @@ services:
       retries: 5
   s3mock:
     image: adobe/s3mock:latest
-    profiles: ["db"]
+    profiles: ["all", "db"]
     ports:
       - 9090:9090
     environment:
@@ -60,7 +60,7 @@ services:
       start_period: 5s
   init:
     build: .
-    profiles: ["db"]
+    profiles: ["all", "db"]
     command: sh -c "sleep 5 && node ./bin/init-db.js ; echo done"
     env_file:
       - .env

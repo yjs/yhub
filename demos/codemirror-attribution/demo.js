@@ -31,7 +31,7 @@ const room = 'y-redis-demo-app'
 const authToken = await fetch(`http://${location.host}/auth/token`).then(request => request.text())
 
 const ydoc = new Y.Doc()
-const provider = new WebsocketProvider('ws://localhost:3002/ws', room, ydoc, { params: { yauth: authToken }, disableBc: true })
+const provider = new WebsocketProvider('ws://localhost:3002', room, ydoc, { params: { yauth: authToken }, disableBc: true })
 
 // The auth token expires eventually (by default in one hour)
 // Periodically pull a new auth token (e.g. every 30 minutes) and update the auth parameter

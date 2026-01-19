@@ -69,15 +69,20 @@ const readYUpdateToV1 = async (s3client, s3bucket, yupdate) => {
   switch (yupdate.type) {
     case 'update:v1': return yupdate.update
     case 's3:update:v1': {
-      const stream = await s3client.getObject(s3bucket, yupdate.path)
-      const chunks = []
-      for await (const chunk of stream) {
-        chunks.push(chunk)
+      try {
+        const stream = await s3client.getObject(s3bucket, yupdate.path)
+        const chunks = []
+        for await (const chunk of stream) {
+          chunks.push(chunk)
+        }
+        const data = Buffer.concat(chunks)
+        const decoded = $s3YUpdate.expect(buffer.decodeAny(data))
+        s.$literal('update:v1').validate(decoded.type)
+        return decoded.update
+      } catch (err) {
+        console.warn(`Error retrieving document via S3 - indicating data loss. bucket: ${s3bucket}, update: ${JSON.stringify(yupdate)}`)
+        return Y.encodeStateAsUpdate(new Y.Doc()) // return empty update
       }
-      const data = Buffer.concat(chunks)
-      const decoded = $s3YUpdate.expect(buffer.decodeAny(data))
-      s.$literal('update:v1').validate(decoded.type)
-      return decoded.update
     }
   }
   s.$never.expect(yupdate)

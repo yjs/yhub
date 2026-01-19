@@ -213,12 +213,14 @@ export const createYWebsocketServer = async ({
     const includeYdoc = req.getQuery('ydoc') === 'true'
     const includeDelta = req.getQuery('delta') === 'true'
     const includeAttributions = req.getQuery('attributions') === 'true'
+    let aborted = false
     res.onAborted(() => {
+      aborted = true
       console.log('Request aborted')
     })
     const hubDoc = await yhubApi.getDoc(room, 'index', { gc: false, attributions: true })
     const filteredAttributions = filterContentMapHelper(hubDoc.attributions, from, to, by, undefined)
-    const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(hubDoc.attributions, 0, from, undefined, undefined))
+    const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(hubDoc.attributions, 0, from != null ? from - 1 : null, undefined, undefined))
     const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(hubDoc.attributions, 0, to, undefined, undefined))
     const docUpdate = Y.encodeStateAsUpdate(hubDoc.ydoc)
     const prevDocUpdate = Y.intersectUpdateWithContentIds(docUpdate, beforeContentIds)
@@ -247,12 +249,14 @@ export const createYWebsocketServer = async ({
     const encoder = encoding.createEncoder()
     encoding.writeAny(encoder, response)
     const responseData = encoding.toUint8Array(encoder)
-    res.cork(() => {
-      setCorsHeaders(res)
-      res.writeStatus('200 OK')
-      res.writeHeader('Content-Type', 'application/octet-stream')
-      res.end(responseData)
-    })
+    if (!aborted) {
+      res.cork(() => {
+        setCorsHeaders(res)
+        res.writeStatus('200 OK')
+        res.writeHeader('Content-Type', 'application/octet-stream')
+        res.end(responseData)
+      })
+    }
   })
 
   // GET /timestamps/{guid} - Get all editing timestamps for a document
@@ -260,10 +264,13 @@ export const createYWebsocketServer = async ({
     const room = req.getParameter(0) || ''
     const from = number.parseInt(req.getQuery('from') || '0')
     const to = number.parseInt(req.getQuery('to') || number.MAX_SAFE_INTEGER.toString())
+    let aborted = false
     res.onAborted(() => {
+      aborted = true
       console.log('Request aborted')
     })
-    const hubDoc = await yhubApi.getDoc(room, 'index', { attributions: true })
+    const hubDoc = await yhubApi.getDoc(room, 'index', { gc: false, attributions: true })
+    debugger
     const filteredAttributions = filterContentMapHelper(hubDoc.attributions, from, to, undefined, undefined)
     /**
      * @type {Set<number>}
@@ -290,12 +297,14 @@ export const createYWebsocketServer = async ({
     const encoder = encoding.createEncoder()
     encoding.writeAny(encoder, response)
     const responseData = encoding.toUint8Array(encoder)
-    res.cork(() => {
-      setCorsHeaders(res)
-      res.writeStatus('200 OK')
-      res.writeHeader('Content-Type', 'application/octet-stream')
-      res.end(responseData)
-    })
+    if (!aborted) {
+      res.cork(() => {
+        setCorsHeaders(res)
+        res.writeStatus('200 OK')
+        res.writeHeader('Content-Type', 'application/octet-stream')
+        res.end(responseData)
+      })
+    }
   })
 
   await promise.create((resolve, reject) => {

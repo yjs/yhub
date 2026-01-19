@@ -10,6 +10,21 @@
         --suggestion-insert-color: #7ce24d;
       }
 
+      body {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .main-container {
+        display: flex;
+        flex: 1;
+        gap: 16px;
+      }
+
+      .editor-container {
+        flex: 1;
+      }
+
       #editor {
         min-height: 500px;
       }
@@ -37,6 +52,44 @@
           content: '❌';
         }
       }
+
+      /* History sidepanel styles */
+      #history-panel {
+        width: 200px;
+        border: 1px solid #ddd;
+        padding: 8px;
+        overflow-y: auto;
+        max-height: 600px;
+        user-select: none;
+      }
+
+      #history-panel h3 {
+        margin: 0 0 8px 0;
+        font-size: 14px;
+      }
+
+      .version-item {
+        padding: 8px;
+        cursor: pointer;
+        font-size: 12px;
+        font-family: monospace;
+      }
+
+      .version-item:nth-child(odd) {
+        background-color: #f5f5f5;
+      }
+
+      .version-item:nth-child(even) {
+        background-color: #ffffff;
+      }
+
+      .version-item.selected {
+        background-color: #cce5ff !important;
+      }
+
+      .version-item:hover:not(.selected) {
+        background-color: #e9e9e9;
+      }
     </style>
   </head>
   <body>
@@ -52,6 +105,11 @@
       <input id='toggle-suggest-mode' type="checkbox">
       suggest-mode
     </label>
+    <label>
+      <input id='toggle-render-version' type="checkbox" disabled>
+      render version
+    </label>
+    <button id="rollback-btn" style="display: none; margin-left: 8px;">Rollback</button>
     <p></p>
     <p>
       This is a demo of the <a href="https://github.com/yjs/yjs">Yjs</a> ⇔
@@ -62,7 +120,15 @@
       The content of this editor is shared with every client that visits this
       domain.
     </p>
-    <div id=editor></div>
+    <div class="main-container">
+      <div class="editor-container">
+        <div id=editor></div>
+      </div>
+      <div id="history-panel">
+        <h3>History</h3>
+        <div id="version-list"></div>
+      </div>
+    </div>
     <script type="module" src="./dist/demo.js" async></script>
   </body>
 </html>

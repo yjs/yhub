@@ -3,8 +3,11 @@ include:
 services:
   demo:
     build: .
+    profiles: ["all"]
     ports:
       - 5173:5173
     depends_on:
       - server
-    env_file: ../../.env
+    env_file:
+      - ../../.env
+      - ../../.env.docker

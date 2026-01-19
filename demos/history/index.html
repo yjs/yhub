@@ -2,133 +2,270 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Yjs CodeMirror6 Demo</title>
+    <title>Y/hub History Demo</title>
     <style>
-      .cm-wrap { height: 300px; border: 1px solid #ddd}
-      .cm-scroller { overflow: auto; }
+      * {
+        box-sizing: border-box;
+      }
+
       :root {
+        --primary-color: #4f46e5;
+        --primary-hover: #4338ca;
+        --danger-color: #dc2626;
+        --danger-hover: #b91c1c;
         --suggestion-insert-color: #7ce24d;
+        --border-color: #e5e7eb;
+        --bg-light: #f9fafb;
+        --text-primary: #111827;
+        --text-secondary: #6b7280;
       }
 
       body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        margin: 0;
+        padding: 24px;
+        background-color: var(--bg-light);
+        color: var(--text-primary);
+        line-height: 1.5;
+      }
+
+      .header {
+        margin-bottom: 24px;
+      }
+
+      .header h1 {
+        margin: 0 0 8px 0;
+        font-size: 24px;
+        font-weight: 600;
+      }
+
+      .header p {
+        margin: 0;
+        color: var(--text-secondary);
+        font-size: 14px;
+      }
+
+      .header a {
+        color: var(--primary-color);
+        text-decoration: none;
+      }
+
+      .header a:hover {
+        text-decoration: underline;
+      }
+
+      .toolbar {
         display: flex;
-        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+        padding: 12px 16px;
+        background: white;
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        margin-bottom: 16px;
+        flex-wrap: wrap;
+      }
+
+      .toolbar label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 14px;
+        cursor: pointer;
+        color: var(--text-secondary);
+        transition: color 0.15s;
+      }
+
+      .toolbar label:hover {
+        color: var(--text-primary);
+      }
+
+      .toolbar input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+        accent-color: var(--primary-color);
+        cursor: pointer;
+      }
+
+      .toolbar input[type="checkbox"]:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .toolbar label:has(input:disabled) {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .btn {
+        padding: 8px 16px;
+        font-size: 14px;
+        font-weight: 500;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.15s;
+      }
+
+      .btn-danger {
+        background-color: var(--danger-color);
+        color: white;
+      }
+
+      .btn-danger:hover {
+        background-color: var(--danger-hover);
       }
 
       .main-container {
         display: flex;
-        flex: 1;
         gap: 16px;
       }
 
       .editor-container {
         flex: 1;
+        min-width: 0;
       }
 
       #editor {
+        background: white;
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        overflow: hidden;
         min-height: 500px;
       }
 
-      #editor {
-        .yjs-attribution-insert {
-          background-color: var(--suggestion-insert-color);
-        }
-        .yjs-attribution-format {
-          text-decoration: underline;
-          text-decoration-style: wavy;
-          text-decoration-color: var(--suggestion-insert-color);
-        }
-        .yjs-attribution-delete {
-          color: grey;
-          text-decoration: line-through;
-        }
+      #editor .cm-editor {
+        height: 100%;
       }
 
-      .ql-toolbar {
-        .ql-suggestion[value="accept"]:after {
-          content: '✅';
-        }
-        .ql-suggestion[value="reject"]:after {
-          content: '❌';
-        }
+      #editor .cm-scroller {
+        overflow: auto;
+      }
+
+      #editor .yjs-attribution-insert {
+        background-color: var(--suggestion-insert-color);
+      }
+
+      #editor .yjs-attribution-format {
+        text-decoration: underline;
+        text-decoration-style: wavy;
+        text-decoration-color: var(--suggestion-insert-color);
+      }
+
+      #editor .yjs-attribution-delete {
+        color: #9ca3af;
+        text-decoration: line-through;
       }
 
       /* History sidepanel styles */
       #history-panel {
-        width: 200px;
-        border: 1px solid #ddd;
-        padding: 8px;
-        overflow-y: auto;
+        width: 240px;
+        flex-shrink: 0;
+        background: white;
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
         max-height: 600px;
-        user-select: none;
       }
 
       #history-panel h3 {
-        margin: 0 0 8px 0;
+        margin: 0;
+        padding: 12px 16px;
         font-size: 14px;
+        font-weight: 600;
+        border-bottom: 1px solid var(--border-color);
+        background: var(--bg-light);
+      }
+
+      #version-list {
+        overflow-y: auto;
+        flex: 1;
+        user-select: none;
       }
 
       .version-item {
-        padding: 8px;
+        padding: 10px 16px;
         cursor: pointer;
-        font-size: 12px;
-        font-family: monospace;
+        font-size: 13px;
+        font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+        border-bottom: 1px solid var(--border-color);
+        transition: background-color 0.1s;
+      }
+
+      .version-item:last-child {
+        border-bottom: none;
       }
 
       .version-item:nth-child(odd) {
-        background-color: #f5f5f5;
+        background-color: var(--bg-light);
       }
 
       .version-item:nth-child(even) {
-        background-color: #ffffff;
+        background-color: white;
       }
 
       .version-item.selected {
-        background-color: #cce5ff !important;
+        background-color: #dbeafe !important;
+        color: var(--primary-color);
+        font-weight: 500;
       }
 
       .version-item:hover:not(.selected) {
-        background-color: #e9e9e9;
+        background-color: #f3f4f6;
+      }
+
+      .ql-toolbar {
+        .ql-suggestion[value="accept"]:after {
+          content: 'Accept';
+        }
+        .ql-suggestion[value="reject"]:after {
+          content: 'Reject';
+        }
       }
     </style>
   </head>
   <body>
-    <label>
-      <input id='toggle-connect' type="checkbox">
-      connect
-    </label>
-    <label>
-      <input id='toggle-show-suggestions' type="checkbox">
-      show suggestions
-    </label>
-    <label>
-      <input id='toggle-suggest-mode' type="checkbox">
-      suggest-mode
-    </label>
-    <label>
-      <input id='toggle-render-version' type="checkbox" disabled>
-      render version
-    </label>
-    <button id="rollback-btn" style="display: none; margin-left: 8px;">Rollback</button>
-    <p></p>
-    <p>
-      This is a demo of the <a href="https://github.com/yjs/yjs">Yjs</a> ⇔
-      <a href="https://codemirror.net">CodeMirror</a> binding:
-      <a href="https://github.com/yjs/y-codemirror.next">y-codemirror.next</a>.
-    </p>
-    <p>
-      The content of this editor is shared with every client that visits this
-      domain.
-    </p>
+    <div class="header">
+      <h1>Y/hub History Demo</h1>
+      <p>
+        Collaborative editing with <a href="https://github.com/yjs/yjs">Yjs</a> and
+        <a href="https://codemirror.net">CodeMirror 6</a>.
+        Select a version range from the history panel to view changes.
+      </p>
+    </div>
+
+    <div class="toolbar">
+      <label>
+        <input id='toggle-connect' type="checkbox">
+        Connect
+      </label>
+      <label>
+        <input id='toggle-show-suggestions' type="checkbox">
+        Show suggestions
+      </label>
+      <label>
+        <input id='toggle-suggest-mode' type="checkbox">
+        Suggest mode
+      </label>
+      <label>
+        <input id='toggle-render-version' type="checkbox" disabled>
+        Viewing history
+      </label>
+      <button id="rollback-btn" class="btn btn-danger" style="display: none;">Rollback</button>
+    </div>
+
     <div class="main-container">
       <div class="editor-container">
-        <div id=editor></div>
+        <div id="editor"></div>
       </div>
       <div id="history-panel">
         <h3>History</h3>
         <div id="version-list"></div>
       </div>
     </div>
+
     <script type="module" src="./dist/demo.js" async></script>
   </body>
 </html>

@@ -29,7 +29,7 @@ export const usercolors = [
 
 export const userColor = usercolors[random.uint32() % usercolors.length]
 
-const roomName = 'codemirror-suggestion-demo-4'
+const roomName = 'codemirror-suggestion-demo-8'
 
 /*
  * # Logic for toggling connection & suggestion mode

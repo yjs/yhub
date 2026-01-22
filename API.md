@@ -72,7 +72,7 @@ the activity API and the changeset API to reconstruct an editing trail.
 * `GET /activity/{guid}` parameters: `{ from?: number, to?: number, limit?: number, order?: string, group?: boolean, delta?: boolean }`
   * `from`/`to`: unix timestamp range filter
   * `limit=number`: maximum number of entries to return
-  * `order=string`: `"asc"` (oldest first) or `"desc"` (newest first, default)
+  * `order='asc'|'desc'`: `"asc"` (oldest first) or `"desc"` (newest first, default)
   * `group=boolean`: bundle consecutive changes from the same user into a single entry (experimental)
   * `delta=boolean`: include delta representation for each activity entry
   * Returns `Array<{ from: number, to: number, by: string?, delta?: Delta }>`

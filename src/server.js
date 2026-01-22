@@ -264,6 +264,9 @@ export const createYWebsocketServer = async ({
     const room = req.getParameter(0) || ''
     const from = number.parseInt(req.getQuery('from') || '0')
     const to = number.parseInt(req.getQuery('to') || number.MAX_SAFE_INTEGER.toString())
+    const includeDelta = req.getQuery('delta') === 'true'
+    const limit = number.parseInt(req.getQuery('limit') || number.MAX_SAFE_INTEGER.toString())
+    const reverse = req.getQuery('order') === 'desc'
     const group = req.getQuery('group') !== 'false'
     let aborted = false
     res.onAborted(() => {
@@ -271,12 +274,11 @@ export const createYWebsocketServer = async ({
       console.log('Request aborted')
     })
     const hubDoc = await yhubApi.getDoc(room, 'index', { gc: false, attributions: true })
-    debugger
     const filteredAttributions = filterContentMapHelper(hubDoc.attributions, from, to, undefined, undefined)
     /**
-     * @type {Set<{ from: number, to: number, by: string|null }>}
+     * @type {Array<{ from: number, to: number, by: string|null }>}
      */
-    const activity = new Set()
+    const activity = []
     filteredAttributions.inserts.forEach(attrRange => {
       /**
        * @type {number?}
@@ -294,7 +296,7 @@ export const createYWebsocketServer = async ({
         }
       })
       if (t != null) {
-        activity.add({
+        activity.push({
           from: t, to: t, by
         })
       }
@@ -316,28 +318,51 @@ export const createYWebsocketServer = async ({
         }
       })
       if (t != null) {
-        activity.add({
+        activity.push({
           from: t, to: t, by
         })
       }
     })
-    const sortedActivity = Array.from(activity).sort((a, b) => a.from - b.from)
+    activity.sort((a, b) => a.from - b.from)
     /**
-     * @type {Array<{ from: number, to: number, by: string? }>}
+     * @type {Array<{ from: number, to: number, by: string?, delta?: any }>}
      */
-    const activityResult = group ? [] : sortedActivity
-    if (group) {
-      /**
-       * @type {{ from: number, to: number, by: string? }|null}
-       */
-      let lastActivity = null
-      sortedActivity.forEach(act => {
-        if (lastActivity != null && lastActivity.by === act.by && act.from - lastActivity.to < 300) {
-          lastActivity.to = act.to
-        } else {
-          activityResult.push(act)
-          lastActivity = act
-        }
+    const activityResult = []
+    const groupDistance = group ? 1000 : 1
+    /**
+     * @type {{ from: number, to: number, by: string? }|null}
+     */
+    let lastActivity = null
+    activity.forEach(act => {
+      if (lastActivity != null && lastActivity.by === act.by && act.from - lastActivity.to < groupDistance) {
+        lastActivity.to = act.to
+      } else {
+        activityResult.push(act)
+        lastActivity = act
+      }
+    })
+    if (reverse) {
+      activityResult.reverse()
+    }
+    if (limit > 0) {
+      activityResult.splice(limit)
+    }
+    if (includeDelta) {
+      activityResult.forEach(act => {
+        const actAttributions = filterContentMapHelper(filteredAttributions, act.from, act.to, undefined, undefined)
+        const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(hubDoc.attributions, 0, act.from != null ? act.from - 1 : null, undefined, undefined))
+        const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(hubDoc.attributions, 0, act.to, undefined, undefined))
+        const docUpdate = Y.encodeStateAsUpdate(hubDoc.ydoc)
+        const prevDocUpdate = Y.intersectUpdateWithContentIds(docUpdate, beforeContentIds)
+        const nextDocUpdate = Y.intersectUpdateWithContentIds(docUpdate, afterContentIds)
+        const prevDoc = new Y.Doc()
+        const nextDoc = new Y.Doc()
+        Y.applyUpdate(prevDoc, prevDocUpdate)
+        Y.applyUpdate(nextDoc, nextDocUpdate)
+        const attrs = Y.createContentMapFromContentIds(Y.createContentIdsFromContentMap(actAttributions), [Y.createContentAttribute('insert', act.by), Y.createContentAttribute('insertAt', act.from)], [Y.createContentAttribute('delete', act.by), Y.createContentAttribute('deleteAt', act.from)])
+        const am = Y.createAttributionManagerFromDiff(prevDoc, nextDoc, { attrs })
+        // we only include the delta for the first type we find on ydoc.
+        act.delta = nextDoc.get(nextDoc.share.keys().next().value || '').toDelta(am).toJSON()
       })
     }
     const encoder = encoding.createEncoder()

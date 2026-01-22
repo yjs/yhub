@@ -159,7 +159,7 @@
 
       /* Activity sidepanel styles */
       #activity-panel {
-        width: 240px;
+        width: 320px;
         flex-shrink: 0;
         background: white;
         border: 1px solid var(--border-color);
@@ -217,19 +217,35 @@
       }
 
       .version-time,
-      .version-user {
+      .version-user,
+      .version-delta,
+      .version-meta {
         pointer-events: none;
       }
 
-      .version-time {
-        font-size: 13px;
+      .version-delta {
+        font-size: 8px;
+        color: var(--text-secondary);
+        margin-bottom: 6px;
+        word-break: break-all;
+        white-space: pre-wrap;
+      }
+
+      .version-meta {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 11px;
       }
 
       .version-user {
-        font-size: 11px;
+        color: var(--text-primary);
+        font-weight: 500;
+      }
+
+      .version-time {
         color: var(--text-secondary);
-        margin-top: 2px;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        font-size: 9px;
       }
 
       .ql-toolbar {

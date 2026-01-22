@@ -324,17 +324,38 @@ const renderVersionList = () => {
     div.dataset.index = String(i)
     div.dataset.timestamp = String(act.from)
 
-    const timeSpan = document.createElement('div')
+    if (act.delta) {
+      const deltaSpan = document.createElement('div')
+      deltaSpan.className = 'version-delta'
+      const deltaArr = act.delta.children ? act.delta.children : act.delta
+      // Pretty print: first two items on separate lines if large, rest on same line
+      if (Array.isArray(deltaArr)) {
+        const lines = []
+        for (let j = 0; j < deltaArr.length; j++) {
+          const item = JSON.stringify(deltaArr[j])
+          lines.push(item)
+        }
+        deltaSpan.textContent = '[' + lines.join(',\n ') + ']'
+      } else {
+        deltaSpan.textContent = JSON.stringify(deltaArr)
+      }
+      div.appendChild(deltaSpan)
+    }
+
+    const metaRow = document.createElement('div')
+    metaRow.className = 'version-meta'
+
+    const userSpan = document.createElement('span')
+    userSpan.className = 'version-user'
+    userSpan.textContent = act.by || 'unknown'
+    metaRow.appendChild(userSpan)
+
+    const timeSpan = document.createElement('span')
     timeSpan.className = 'version-time'
     timeSpan.textContent = formatTimestamp(act.from)
-    div.appendChild(timeSpan)
+    metaRow.appendChild(timeSpan)
 
-    if (act.by) {
-      const userSpan = document.createElement('div')
-      userSpan.className = 'version-user'
-      userSpan.textContent = act.by
-      div.appendChild(userSpan)
-    }
+    div.appendChild(metaRow)
 
     // Apply selection styling
     if (selectionStart !== null && selectionEnd !== null) {
@@ -350,11 +371,11 @@ const renderVersionList = () => {
 }
 
 /**
- * Fetch timestamps from the API
+ * Fetch activity from the API
  */
-const fetchTimestamps = async () => {
+const fetchActivity = async () => {
   try {
-    const response = await fetch(`${yhubApiUrl}/activity/${roomName}?yauth=${authToken}`)
+    const response = await fetch(`${yhubApiUrl}/activity/${roomName}?yauth=${authToken}&delta=true`)
     if (response.ok) {
       const arrayBuffer = await response.arrayBuffer()
       const data = buffer.decodeAny(new Uint8Array(arrayBuffer))
@@ -412,6 +433,6 @@ document.addEventListener('mouseup', () => {
   isSelecting = false
 })
 
-// Fetch timestamps initially and then poll every 5 seconds
-fetchTimestamps()
-setInterval(fetchTimestamps, 5000)
+// Fetch activity initially and then poll every 5 seconds
+fetchActivity()
+setInterval(fetchActivity, 5000)

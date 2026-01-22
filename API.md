@@ -43,12 +43,12 @@ websockets.
   * This call enables you to undo all changes within a certain editing-interval.
 * Rollback all changes of a certain user between two versions: `POST /rollback/{guid}` body: `{ by: userid, contentIds: Y.createContentIdsFromDocDiff(prevYDoc, nextYDoc) }`
 
-## History
+## Changeset
 
 Visualize attributed changes using either pure deltas or by retrieving the
 before and after state of a Yjs doc. Optionally, include relevant attributions.
 
-* `GET /history/{guid}` parameters: `{ from?: number, to?: number, by?: string, ydoc?: boolean, contentIds?: Y.ContentIds, delta?: boolean, attributions?: boolean }`
+* `GET /changeset/{guid}` parameters: `{ from?: number, to?: number, by?: string, ydoc?: boolean, contentIds?: Y.ContentIds, delta?: boolean, attributions?: boolean }`
   * `from`/`to`: unix timestamp range filter
   * `by=string`: comma-separated list of user-ids that matches the attributions
   * `contentIds`: Changeset that describes the changes between two versions. @todo not implemented
@@ -59,19 +59,23 @@ before and after state of a Yjs doc. Optionally, include relevant attributions.
 
 ### Example: visualize editing trail of the past day
 
-* Retrieve timestamps `GET /timestamps/{guid}?from={now-1day}`
+* Retrieve activity `GET /activity/{guid}?from={now-1day}`
 * Optionally, bundle changes that belong to each other: `[1, 2, 70, 71] ⇒ [2, 71]` - because `1,2` and `70,71` belong to each other.
-* For each timestamp: `GET /history/{guid}?from=timestamps[I - 1]&to=timestamps[I]&delta=true&attributions=true`
+* For each timestamp: `GET /changeset/{guid}?from=timestamps[I - 1]&to=timestamps[I]&delta=true&attributions=true`
 * Which will give you the state of the document at timestamp `from`: `deltaState` and the (attributed) diff that is needed to get to timestamp `to`: `diff`.
 
-## Timestamps
+## Activity
 
 Retrieve all editing-timestamps for a certain document. Use
-the timestamps API and the history API to reconstruct an editing trail.
+the activity API and the changeset API to reconstruct an editing trail.
 
-* `GET /timestamps/{guid}` parameters: `{ from?: number, to?: number }`
+* `GET /activity/{guid}` parameters: `{ from?: number, to?: number, limit?: number, order?: string, group?: boolean, delta?: boolean }`
   * `from`/`to`: unix timestamp range filter
-  * Returns `Array<number>`
+  * `limit=number`: maximum number of entries to return
+  * `order=string`: `"asc"` (oldest first) or `"desc"` (newest first, default)
+  * `group=boolean`: bundle consecutive changes from the same user into a single entry (experimental)
+  * `delta=boolean`: include delta representation for each activity entry
+  * Returns `Array<{ from: number, to: number, by: string?, delta?: Delta }>`
 
 ## Webhooks
 

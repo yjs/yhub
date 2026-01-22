@@ -29,7 +29,7 @@ export const usercolors = [
 
 export const userColor = usercolors[random.uint32() % usercolors.length]
 
-const roomName = 'codemirror-suggestion-demo-8'
+const roomName = 'codemirror-suggestion-demo-9'
 
 /*
  * # Logic for toggling connection & suggestion mode
@@ -226,7 +226,7 @@ let currentVersionRange = null
  */
 const renderVersions = async (from, to) => {
   try {
-    const response = await fetch(`${yhubApiUrl}/history/${roomName}?yauth=${authToken}&from=${from}&to=${to}&ydoc=true&attributions=true`)
+    const response = await fetch(`${yhubApiUrl}/changeset/${roomName}?yauth=${authToken}&from=${from}&to=${to}&ydoc=true&attributions=true`)
     if (response.ok) {
       const arrayBuffer = await response.arrayBuffer()
       const history = buffer.decodeAny(new Uint8Array(arrayBuffer))
@@ -248,7 +248,7 @@ const renderVersions = async (from, to) => {
       elemRollbackBtn.style.display = 'inline-block'
     }
   } catch (e) {
-    console.error('Failed to fetch history:', e)
+    console.error('Failed to fetch changeset:', e)
   }
 }
 
@@ -281,9 +281,9 @@ const rollback = async () => {
 elemRollbackBtn.addEventListener('click', rollback)
 
 /**
- * @type {Array<number>}
+ * @type {Array<{ from: number, to: number, by: string }>}
  */
-let timestamps = []
+let activity = []
 
 /**
  * @type {number | null}
@@ -317,13 +317,24 @@ const formatTimestamp = (timestamp) => {
 const renderVersionList = () => {
   versionListEl.innerHTML = ''
   // Render in reverse order (newest first)
-  for (let i = timestamps.length - 1; i >= 0; i--) {
-    const ts = timestamps[i]
+  for (let i = activity.length - 1; i >= 0; i--) {
+    const act = activity[i]
     const div = document.createElement('div')
     div.className = 'version-item'
-    div.textContent = formatTimestamp(ts)
     div.dataset.index = String(i)
-    div.dataset.timestamp = String(ts)
+    div.dataset.timestamp = String(act.from)
+
+    const timeSpan = document.createElement('div')
+    timeSpan.className = 'version-time'
+    timeSpan.textContent = formatTimestamp(act.from)
+    div.appendChild(timeSpan)
+
+    if (act.by) {
+      const userSpan = document.createElement('div')
+      userSpan.className = 'version-user'
+      userSpan.textContent = act.by
+      div.appendChild(userSpan)
+    }
 
     // Apply selection styling
     if (selectionStart !== null && selectionEnd !== null) {
@@ -343,17 +354,17 @@ const renderVersionList = () => {
  */
 const fetchTimestamps = async () => {
   try {
-    const response = await fetch(`${yhubApiUrl}/timestamps/${roomName}?yauth=${authToken}`)
+    const response = await fetch(`${yhubApiUrl}/activity/${roomName}?yauth=${authToken}`)
     if (response.ok) {
       const arrayBuffer = await response.arrayBuffer()
-      const data = buffer.decodeAny(new Uint8Array(arrayBuffer)).timestamps
+      const data = buffer.decodeAny(new Uint8Array(arrayBuffer))
       if (Array.isArray(data) && data.length > 0) {
-        timestamps = data
+        activity = data
         renderVersionList()
       }
     }
   } catch (e) {
-    console.error('Failed to fetch timestamps:', e)
+    console.error('Failed to fetch activity:', e)
   }
 }
 
@@ -361,8 +372,20 @@ const fetchTimestamps = async () => {
 versionListEl.addEventListener('mousedown', (e) => {
   const target = /** @type {HTMLElement} */ (e.target)
   if (target.classList.contains('version-item')) {
+    const clickedIndex = parseInt(target.dataset.index || '0', 10)
+    // If clicking on an already selected item while viewing history, cancel viewing mode
+    if (elemToggleRenderVersion.checked && selectionStart !== null && selectionEnd !== null) {
+      const minIdx = Math.min(selectionStart, selectionEnd)
+      const maxIdx = Math.max(selectionStart, selectionEnd)
+      if (clickedIndex >= minIdx && clickedIndex <= maxIdx) {
+        elemToggleRenderVersion.checked = false
+        elemToggleRenderVersion.dispatchEvent(new Event('change'))
+        e.preventDefault()
+        return
+      }
+    }
     isSelecting = true
-    selectionStart = parseInt(target.dataset.index || '0', 10)
+    selectionStart = clickedIndex
     selectionEnd = selectionStart
     renderVersionList()
     e.preventDefault()
@@ -382,8 +405,8 @@ document.addEventListener('mouseup', () => {
   if (isSelecting && selectionStart !== null && selectionEnd !== null) {
     const minIdx = Math.min(selectionStart, selectionEnd)
     const maxIdx = Math.max(selectionStart, selectionEnd)
-    const fromTimestamp = timestamps[minIdx]
-    const toTimestamp = timestamps[maxIdx]
+    const fromTimestamp = activity[minIdx].from
+    const toTimestamp = activity[maxIdx].to
     renderVersions(fromTimestamp, toTimestamp)
   }
   isSelecting = false

@@ -130,7 +130,7 @@ const populateSelect = (select, timestamps) => {
 
 const fetchTimestamps = async () => {
   try {
-    const response = await fetch(`http://${yhubHost}/timestamps/${room}`)
+    const response = await fetch(`http://${yhubHost}/activity/${room}`)
     const data = await response.arrayBuffer()
     const decoder = decoding.createDecoder(new Uint8Array(data))
     const { timestamps } = decoding.readAny(decoder)
@@ -159,7 +159,7 @@ renderBtn.addEventListener('click', async () => {
     return
   }
   try {
-    const response = await fetch(`http://${yhubHost}/history/${room}?from=${from}&to=${to}&delta=true&ydoc=true`)
+    const response = await fetch(`http://${yhubHost}/changeset/${room}?from=${from}&to=${to}&delta=true&ydoc=true`)
     const data = await response.arrayBuffer()
     const decoder = decoding.createDecoder(new Uint8Array(data))
     const result = decoding.readAny(decoder)
@@ -179,7 +179,7 @@ nextDoc: ${JSON.stringify(createDocFromUpdate(result.nextDoc).getText().toJSON()
 delta: ${JSON.stringify(result.delta, null, 2)}`
     showPopup(message)
   } catch (e) {
-    alert('Error fetching history: ' + e)
+    alert('Error fetching changeset: ' + e)
   }
 })
 

@@ -202,8 +202,8 @@ export const createYWebsocketServer = async ({
     })
   })
 
-  // GET /history/{guid} - Get attributed changes and document states
-  app.get('/history/:room', async (res, req) => {
+  // GET /changeset/{guid} - Get attributed changes and document states
+  app.get('/changeset/:room', async (res, req) => {
     const room = req.getParameter(0) || ''
     const by = req.getQuery('by')
     const _from = req.getQuery('from')
@@ -259,11 +259,12 @@ export const createYWebsocketServer = async ({
     }
   })
 
-  // GET /timestamps/{guid} - Get all editing timestamps for a document
-  app.get('/timestamps/:room', async (res, req) => {
+  // GET /activity/{guid} - Get all editing timestamps for a document
+  app.get('/activity/:room', async (res, req) => {
     const room = req.getParameter(0) || ''
     const from = number.parseInt(req.getQuery('from') || '0')
     const to = number.parseInt(req.getQuery('to') || number.MAX_SAFE_INTEGER.toString())
+    const group = req.getQuery('group') !== 'false'
     let aborted = false
     res.onAborted(() => {
       aborted = true
@@ -273,29 +274,74 @@ export const createYWebsocketServer = async ({
     debugger
     const filteredAttributions = filterContentMapHelper(hubDoc.attributions, from, to, undefined, undefined)
     /**
-     * @type {Set<number>}
+     * @type {Set<{ from: number, to: number, by: string|null }>}
      */
-    const timestamps = new Set()
+    const activity = new Set()
     filteredAttributions.inserts.forEach(attrRange => {
+      /**
+       * @type {number?}
+       */
+      let t = null
+      /**
+       * @type {string?}
+       */
+      let by = null
       attrRange.attrs.forEach(attr => {
         if (attr.name === 'insertAt') {
-          timestamps.add(attr.val)
+          t = attr.val
+        } else if (attr.name === 'insert') {
+          by = attr.val
         }
       })
+      if (t != null) {
+        activity.add({
+          from: t, to: t, by
+        })
+      }
     })
     filteredAttributions.deletes.forEach(attrRange => {
+      /**
+       * @type {number?}
+       */
+      let t = null
+      /**
+       * @type {string?}
+       */
+      let by = null
       attrRange.attrs.forEach(attr => {
         if (attr.name === 'deleteAt') {
-          timestamps.add(attr.val)
+          t = attr.val
+        } else if (attr.name === 'delete') {
+          by = attr.val
         }
       })
+      if (t != null) {
+        activity.add({
+          from: t, to: t, by
+        })
+      }
     })
-    const sortedTimestamps = Array.from(timestamps).sort((a, b) => a - b)
-    const response = {
-      timestamps: sortedTimestamps
+    const sortedActivity = Array.from(activity).sort((a, b) => a.from - b.from)
+    /**
+     * @type {Array<{ from: number, to: number, by: string? }>}
+     */
+    const activityResult = group ? [] : sortedActivity
+    if (group) {
+      /**
+       * @type {{ from: number, to: number, by: string? }|null}
+       */
+      let lastActivity = null
+      sortedActivity.forEach(act => {
+        if (lastActivity != null && lastActivity.by === act.by && act.from - lastActivity.to < 300) {
+          lastActivity.to = act.to
+        } else {
+          activityResult.push(act)
+          lastActivity = act
+        }
+      })
     }
     const encoder = encoding.createEncoder()
-    encoding.writeAny(encoder, response)
+    encoding.writeAny(encoder, activityResult)
     const responseData = encoding.toUint8Array(encoder)
     if (!aborted) {
       res.cork(() => {

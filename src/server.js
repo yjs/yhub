@@ -15,9 +15,6 @@ import * as s from 'lib0/schema'
 import * as time from 'lib0/time'
 import * as number from 'lib0/number'
 
-const wsServerPublicKey = await ecdsa.importKeyJwk(json.parse(env.ensureConf('auth-public-key')))
-// const wsServerPrivateKey = await ecdsa.importKeyJwk(json.parse(env.ensureConf('auth-private-key')))
-
 class YWebsocketServer {
   /**
    * @param {uws.TemplatedApp} app
@@ -62,6 +59,7 @@ export const createYWebsocketServer = async ({
       throw new Error('Missing Token')
     }
     // verify that the user has a valid token
+    const wsServerPublicKey = await ecdsa.importKeyJwk(json.parse(env.ensureConf('auth-public-key')))
     const { payload: userToken } = await jwt.verifyJwt(wsServerPublicKey, token)
     if (userToken.yuserid == null) {
       throw new Error('Missing userid in user token!')

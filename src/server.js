@@ -15,6 +15,10 @@ import * as s from 'lib0/schema'
 import * as time from 'lib0/time'
 import * as number from 'lib0/number'
 
+/**
+ * ECDSA public key used to verify JWT tokens from WebSocket clients.
+ * The key is loaded from the 'auth-public-key' environment configuration as a JWK (JSON Web Key).
+ */
 const wsServerPublicKey = await ecdsa.importKeyJwk(json.parse(env.ensureConf('auth-public-key')))
 // const wsServerPrivateKey = await ecdsa.importKeyJwk(json.parse(env.ensureConf('auth-private-key')))
 

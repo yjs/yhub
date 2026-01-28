@@ -77,11 +77,9 @@
     "@y/y": "^14.0.0-21",
     "lib0": "^1.0.0-0",
     "minio": "^8.0.6",
+    "postgres": "^3.4.3",
     "redis": "^4.6.12",
     "uws": "github:uNetworking/uWebSockets.js#v20.57.0"
-  },
-  "optionalDependencies": {
-    "postgres": "^3.4.3"
   },
   "engines": {
     "npm": ">=8.0.0",
@@ -93,6 +91,7 @@
     "@y/websocket": "^4.0.0-3",
     "concurrently": "^8.2.2",
     "standard": "^17.1.0",
+    "standardjs": "^1.0.0-alpha",
     "typescript": "^5.9.3",
     "ws": "^8.16.0",
     "y-websocket": "^2.0.4"

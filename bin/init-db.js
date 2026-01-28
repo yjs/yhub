@@ -3,6 +3,7 @@
 import postgres from 'postgres'
 import * as env from 'lib0/environment'
 import { Client as S3Client } from 'minio'
+import { createClient as createRedisClient } from 'redis'
 
 /**
  * Initialize the database and tables for y/hub
@@ -47,56 +48,33 @@ async function init (postgresUrl) {
     const updatesTableExists = await sql`
       SELECT EXISTS (
         SELECT FROM pg_tables
-        WHERE tablename = 'yhub_updates_v1'
+        WHERE tablename = 'yhub_ydoc_v1'
       );
     `
     if (!updatesTableExists || updatesTableExists.length === 0 || !updatesTableExists[0].exists) {
-      console.log('[init-db] Creating yhub_updates_v1 table...')
+      console.log('[init-db] Creating yhub_ydoc_v1 table...')
       // @todo move contentmap and sv to another table!
       await sql`
-        CREATE TABLE IF NOT EXISTS yhub_updates_v1 (
+        CREATE TABLE IF NOT EXISTS yhub_ydoc_v1 (
             org             text,
             docid           text,
-            branch          text DEFAULT 'main',
-            gc              boolean DEFAULT true,
-            r               SERIAL,
-            update          bytea,
-            sv              bytea,
+            branch          text,
+            t               text,
+            created         INT8,
+            gcDoc           bytea,
+            nongcDoc        bytea,
             contentmap      bytea,
-            PRIMARY KEY     (org,docid,branch,gc,r)
+            contentids      bytea,
+            PRIMARY KEY     (org,docid,branch,t)
         );
       `
-      console.log('[init-db] ✓ yhub_updates_v1 table created')
+      console.log('[init-db] ✓ yhub_ydoc_v1 table created')
     } else {
-      console.log('[init-db] ✓ yhub_updates_v1 table already exists')
-    }
-
-    // Create attributions table
-    const attributionsTableExists = await sql`
-      SELECT EXISTS (
-        SELECT FROM pg_tables
-        WHERE tablename = 'yhub_attributions_v1'
-      );
-    `
-    if (!attributionsTableExists || attributionsTableExists.length === 0 || !attributionsTableExists[0].exists) {
-      console.log('[init-db] Creating yhub_attributions_v1 table...')
-      await sql`
-        CREATE TABLE IF NOT EXISTS yhub_attributions_v1 (
-            org         text,
-            docid       text,
-            branch      text DEFAULT 'main',
-            contentmap  bytea,
-            PRIMARY KEY (org,docid,branch)
-        );
-      `
-      console.log('[init-db] ✓ yhub_attributions_v1 table created')
-    } else {
-      console.log('[init-db] ✓ yhub_attributions_v1 table already exists')
+      console.log('[init-db] ✓ yhub_ydoc_v1 table already exists')
     }
   } finally {
     await sql.end({ timeout: 5 })
   }
-
   console.log(`[init-db] ✓ Initialization done: ${postgresUrl}`)
 }
 
@@ -140,6 +118,21 @@ if (s3Bucket) {
   await initS3Bucket(s3client, s3Bucket)
   if (s3TestBucket) {
     await initS3Bucket(s3client, s3TestBucket)
+  }
+}
+
+const redisUrl = env.getConf('redis') || null
+const prefix = env.getConf('redis-prefix')
+const redisWorkerGroupName = prefix + ':worker'
+const redisWorkerStreamName = prefix + ':worker'
+if (redisUrl) {
+  const redis = createRedisClient({ url: redisUrl })
+  redis.connect()
+  try {
+    await redis.xGroupCreate(redisWorkerStreamName, redisWorkerGroupName, '0', { MKSTREAM: true })
+    console.log('[init-db] successfully created redis worker and group')
+  } catch (err) {
+    console.error('[init-db] redis - failde to init worker stream: ', { redisWorkerStreamName, redisWorkerGroupName })
   }
 }
 

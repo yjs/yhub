@@ -40,6 +40,9 @@ export const encodeRedisMessage = m => encoding.encode(encoder => encoding.write
 export const redisUrl = env.ensureConf('valkey')
 
 /**
+ * @todo remove this duplicate!
+ *
+ *
  * @param {string} a
  * @param {string} b
  * @return {boolean} iff a < b
@@ -223,17 +226,6 @@ export class Api {
    */
   addMessage (room, docid, m, { branch = 'main' } = {}) {
     return this.redis.addMessage(computeRedisRoomStreamName(room, docid, branch, this.prefix), Buffer.from(encodeRedisMessage(m)))
-  }
-
-  /**
-   * @param {string} room
-   * @param {string} docid
-   * @param {Object} opts
-   * @param {boolean} [opts.gc]
-   * @param {string} [opts.branch]
-   */
-  async getStateVector (room, docid = '/', { gc = true, branch = 'main' } = {}) {
-    return this.store.retrieveStateVector(room, docid, { gc, branch })
   }
 
   /**

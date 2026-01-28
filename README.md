@@ -109,7 +109,7 @@ The worker periodically:
 
 ```sql
 -- Main updates table
-CREATE TABLE yhub_updates_v1 (
+CREATE TABLE yhub_ydoc_v1 (
     org         text,           -- Organization/namespace (the "room")
     docid       text,           -- Document identifier
     branch      text DEFAULT 'main',
@@ -119,15 +119,6 @@ CREATE TABLE yhub_updates_v1 (
     sv          bytea,          -- State vector
     contentmap  bytea,          -- Attribution content map
     PRIMARY KEY (org, docid, branch, gc, r)
-);
-
--- Attributions table (for history tracking)
-CREATE TABLE yhub_attributions_v1 (
-    org         text,
-    docid       text,
-    branch      text DEFAULT 'main',
-    contentmap  bytea,
-    PRIMARY KEY (org, docid, branch)
 );
 ```
 

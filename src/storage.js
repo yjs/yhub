@@ -168,23 +168,6 @@ export class Storage {
   /**
    * @param {string} org
    * @param {string} docid
-   * @param {Object} opts
-   * @param {boolean} [opts.gc]
-   * @param {string} [opts.branch]
-   * @return {Promise<Uint8Array|null>}
-   */
-  async retrieveStateVector (org, docid, { gc = true, branch = 'main' } = {}) {
-    const rows = await this.sql`SELECT sv from yhub_updates_v1 WHERE org = ${org} AND docid = ${docid} AND branch = ${branch} AND gc = ${gc} LIMIT 1`
-    if (rows.length > 1) {
-      // expect that result is limited
-      error.unexpectedCase()
-    }
-    return rows.length === 0 ? null : rows[0].sv
-  }
-
-  /**
-   * @param {string} org
-   * @param {string} docid
    * @param {{ db: Array<number>, s3: Array<string> }} storeReferences
    * @param {Object} opts
    * @param {boolean} [opts.gc]

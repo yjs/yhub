@@ -10,6 +10,15 @@ YHub uses a dual-storage architecture:
 
 All binary content follows a versioned schema approach, enabling future format migrations without breaking compatibility.
 
+## Goals
+
+- **FAST** lookups of documents and editing traces
+- Better integration of collab into existing backends
+- Plugin architecture for persistence, task management, custom callbacks on events
+- Future compatibility
+- infinitely scalable
+- In the future: **LOCAL FIRST**, sync all organization documents
+
 ---
 
 ## Binary Content Schemas

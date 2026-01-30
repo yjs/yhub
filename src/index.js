@@ -46,7 +46,7 @@ export class YHub {
             if (!strm.isSmallerRedisClock(d.lastPersistedClock, d.lastClock)) {
               return null
             }
-            this.conf.worker?.events?.docUpdate(object.assign({}, d, { references: null }))
+            this.conf.worker?.events?.docUpdate?.(object.assign({}, d, { references: null }))
             await this.persistence.store(task.room, d)
             await promise.all([
               this.persistence.deleteReferences(d.references),

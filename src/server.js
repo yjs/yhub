@@ -446,9 +446,9 @@ const registerWebsocketServer = (yhub, app) => {
       try {
         const room = reqToRoom(req)
         const gc = req.getQuery('gc') !== 'false' // default to true unless explicitly set to 'false'
-        const authInfo = await yhub.conf.server?.authPlugin.readAuthInfo(req)
+        const authInfo = await yhub.conf.server?.auth.readAuthInfo(req)
         s.$string.expect(authInfo.userid)
-        const accessType = authInfo && await yhub.conf.server?.authPlugin.getAccessType(authInfo, room)
+        const accessType = authInfo && await yhub.conf.server?.auth.getAccessType(authInfo, room)
         if (authInfo == null || !t.hasReadAccess(accessType)) {
           res.cork(() => {
             res.writeStatus('401 Unauthorized').end('Unauthorized')
@@ -574,4 +574,3 @@ const filterContentMapHelper = (contentMap, from, to, by, requestedIds) => {
   }
   return contentMap
 }
-

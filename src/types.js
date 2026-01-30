@@ -1,7 +1,7 @@
 import * as Y from '@y/y'
 import * as s from 'lib0/schema'
 
-export const $accessType = s.$union(s.$literal('r'), s.$literal('rw') , s.$null)
+export const $accessType = s.$union(s.$literal('r'), s.$literal('rw'), s.$null)
 
 /**
  * @typedef {s.Unwrap<typeof $accessType>} AccessType
@@ -18,12 +18,12 @@ export const hasReadAccess = accessType => accessType === 'r' || accessType === 
 export const hasWriteAccess = accessType => accessType === 'rw'
 
 /**
- * # Asset 
+ * # Asset
  *
  * Types of content we deal with (v1 encoded ydocs, v2 encoded ydocs, v1 encoded contentmaps, ..)
  *
  * # AssetIds
- * 
+ *
  * Describe how to retrieve any asset.
  */
 
@@ -154,10 +154,11 @@ export const $message = s.$union($updateMessage, $awarenessMessage)
  * @typedef {s.Unwrap<typeof $message>} Message
  */
 
-/**
- * @typedef {{ org: string, docid: string, branch: string }} Room
- */
+export const $room = s.$object({ org: s.$string, docid: s.$string, branch: s.$string })
 
+/**
+ * @typedef {s.Unwrap<typeof $room>} Room
+ */
 
 export const $compactTask = s.$({
   type: s.$literal('compact'),
@@ -184,7 +185,7 @@ export const $task = $compactTask
 // @todo rename 'gc' and 'nongc' to 'gcDoc' and `nongcDoc`
 /**
  * @template {{ gc?: boolean, nongc?: boolean, contentmap?: boolean, references?: boolean, contentids?: boolean, awareness?: boolean }} [Include=any]
- * @typedef {import('lib0/ts').Prettify<{ 
+ * @typedef {import('lib0/ts').Prettify<{
  *   lastClock: string,
  *   lastPersistedClock: string,
  *   gcDoc: IfHasConf<Include, 'gc', Uint8Array<ArrayBuffer>>,
@@ -213,13 +214,10 @@ export const $persistencePlugin = s.$object({
   retrieve: s.$lambda(s.$any).nullable.optional
 })
 
-/**
- * @type {s.Schema<AuthPlugin<any>>}
- */
-export const $authPlugin = s.$({
+export const $authPlugin = /** @type {s.Schema<AuthPlugin<any>>} */ (s.$object({
   readAuthInfo: /** @type {any} */ (s.$function),
   getAccessType: /** @type {any} */ (s.$function)
-})
+}))
 
 /**
  * @typedef {{ userid: string }} UserAuthInfo
@@ -229,14 +227,14 @@ export const $authPlugin = s.$({
  * @template {UserAuthInfo} AuthInfo
  * @typedef {object} AuthPlugin
  * @property {(req:import('uws').HttpRequest) => Promise<AuthInfo>} AuthPlugin.readAuthInfo
- * @property {(authInfo: AuthInfo, room: Room) => Promise<AccessType>} AuthPlugin.getAccessType: 
+ * @property {(authInfo: AuthInfo, room: Room) => Promise<AccessType>} AuthPlugin.getAccessType:
  */
 
 /**
  * @template {UserAuthInfo} AuthInfo
  * @param {AuthPlugin<AuthInfo>} authDef
  */
-export const createAuthPlugin = authDef => authDef 
+export const createAuthPlugin = authDef => authDef
 
 export const $config = s.$object({
   redis: s.$object({
@@ -254,7 +252,7 @@ export const $config = s.$object({
   postgres: s.$string,
   persistence: s.$array($persistencePlugin),
   events: s.$object({
-    docUpdate: s.$lambda(s.$any, s.$instanceOf(Y.Doc), s.$instanceOf(Y.Attributions), s.$undefined),
+    docUpdate: s.$lambda(s.$any, s.$instanceOf(Y.Doc), s.$instanceOf(Y.Attributions), s.$undefined)
   }).optional,
   worker: s.$object({
     taskConcurrency: s.$number,
@@ -262,9 +260,9 @@ export const $config = s.$object({
       docUpdate: /** @type {s.$Optional<s.Schema<(doctable:DocTable<{ gc: true, nongc: true, contentmap: true, contentids: true }>) => void>>} */ (s.$function.optional)
     }).optional
   }).nullable.optional,
-  server: s.$({ 
+  server: s.$({
     port: s.$number,
-    authPlugin: $authPlugin 
+    auth: $authPlugin
   }).nullable.optional
 })
 

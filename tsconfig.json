@@ -17,9 +17,7 @@
     "baseUrl": "./",
     "paths": {
       "@y/hub": ["./src/index.js"],
-      "@y/hub/storage/memory": ["./src/storage/memory.js"],
-      "@y/hub/storage/s3": ["./src/storage/s3.js"],
-      "@y/hub/storage/postgres": ["./src/storage/postgres.js"]
+      "@y/hub/plugins/s3": ["./src/plugins/s3.js"]
     }
   },
   "exclude": [

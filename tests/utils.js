@@ -1,135 +1,140 @@
 import * as Y from '@y/y'
 import * as env from 'lib0/environment'
-import * as json from 'lib0/json'
-import * as ecdsa from 'lib0/crypto/ecdsa'
 import { WebSocket } from 'ws'
 import { WebsocketProvider } from '@y/websocket'
-import * as redis from 'redis'
-import * as time from 'lib0/time'
-import * as jwt from 'lib0/crypto/jwt'
 import * as t from 'lib0/testing' // eslint-disable-line
 import * as promise from 'lib0/promise'
-
-import { createYHubServer } from '../src/server.js'
-import { createStorage } from '../src/storage.js'
-import * as api from '../src/api.js'
-
-/**
- * @type {Array<{ destroy: function():Promise<void>}>}
- */
-export const prevClients = []
-
-export const authPrivateKey = await ecdsa.importKeyJwk(json.parse(env.ensureConf('auth-private-key')))
-export const authPublicKey = await ecdsa.importKeyJwk(json.parse(env.ensureConf('auth-public-key')))
-
-export const redisPrefix = 'ytests'
-
-export const authDemoServerPort = 5173
-export const authDemoServerUrl = `http://localhost:${authDemoServerPort}`
-export const checkPermCallbackUrl = `${authDemoServerUrl}/auth/perm/`
-export const authTokenUrl = `${authDemoServerUrl}/auth/token`
-
-export const yredisPort = 9999
-export const yhubHost = `localhost:${yredisPort}`
-export const yredisUrl = `ws://${yhubHost}/ws`
-
-export const storage = await createStorage(env.ensureConf('postgres-testing'), {
-  bucket: env.ensureConf('S3_YHUB_TEST_BUCKET'),
-  endPoint: env.ensureConf('S3_ENDPOINT'),
-  port: parseInt(env.ensureConf('S3_PORT'), 10),
-  useSSL: env.ensureConf('S3_SSL') === 'true',
-  accessKey: env.ensureConf('S3_ACCESS_KEY'),
-  secretKey: env.ensureConf('S3_SECRET_KEY')
-})
+import { createYHub } from '@y/hub'
+import * as number from 'lib0/number'
+import { S3PersistenceV1 } from '@y/hub/plugins/s3'
+import postgres from 'postgres'
+import * as object from 'lib0/object'
+import * as types from '../src/types.js'
+import { encodeRoomName } from '../src/stream.js'
 
 // Clean up test data - only delete if table exists
-const tableExists = await storage.sql`
+const sql = postgres(env.ensureConf('postgres'))
+const tableExists = await sql`
   SELECT EXISTS (
     SELECT FROM pg_tables
-    WHERE tablename = 'yhub_updates_v1'
+    WHERE tablename = 'yhub_ydoc_v1'
   );
 `
 if (tableExists?.[0]?.exists) {
-  await storage.sql`DELETE from yhub_updates_v1`
+  await sql`DELETE from yhub_updates_v1`
 }
 
-const authToken = await jwt.encodeJwt(authPrivateKey, {
-  iss: 'my-auth-server',
-  exp: time.getUnixTime() + 60 * 60 * 1000, // token expires in one hour
-  yuserid: 'user1' // fill this with a unique id of the authorized user
+const yhubPort = number.parseInt(env.getConf('port') || '9999')
+export const yhub = await createYHub({
+  redis: {
+    url: env.ensureConf('redis'),
+    prefix: 'yhub:testing',
+    taskDebounce: 1000,
+    minMessageLifetime: 6000
+  },
+  postgres: env.ensureConf('postgres'),
+  persistence: [
+    new S3PersistenceV1({
+      bucket: env.ensureConf('S3_YHUB_TEST_BUCKET'),
+      endPoint: env.ensureConf('S3_ENDPOINT'),
+      port: parseInt(env.ensureConf('S3_PORT'), 10),
+      useSSL: env.ensureConf('S3_SSL') === 'true',
+      accessKey: env.ensureConf('S3_ACCESS_KEY'),
+      secretKey: env.ensureConf('S3_SECRET_KEY')
+    })
+  ],
+  server: {
+    port: yhubPort,
+    auth: types.createAuthPlugin({
+      // pick a "unique" userid
+      async readAuthInfo (req) {
+        return { userid: 'user1' }
+      },
+      // always grant rw access
+      async getAccessType () { return 'rw' }
+    })
+  },
+  worker: {
+    taskConcurrency: 5
+  }
 })
+{
+  const redis = yhub.stream.redis
+  const redisKeys = await redis.keys('yhub:testing:*')
+  if (redisKeys.length > 0) {
+    await redis.del(redisKeys)
+  }
+}
 
 /**
+ * @param {Partial<import('../src/types.js').YHubConfig>} conf
+ */
+export const createTestHub = (conf) => {
+  const testConf = object.assign({}, yhub.conf, { server: null, worker: null }, conf)
+  return createYHub(testConf)
+}
+
+/**
+ * @param {number} port
+ */
+export const wsUrlFromPort = port => `ws://localhost:${port}/ws/${defaultOrg}`
+
+export const defaultOrg = 'testOrg'
+export const yhubHost = `localhost:${yhubPort}`
+export const wsUrl = wsUrlFromPort(yhubPort)
+
+/**
+ * @template {boolean} WaitForSync
  * @param {t.TestCase} tc
- * @param {string} room
  * @param {object} params
+ * @param {string} [params.docid]
  * @param {string} [params.branch]
  * @param {boolean} [params.gc]
  * @param {boolean} [params.syncAwareness]
+ * @param {WaitForSync} [params.waitForSync]
+ * @param {string} [params.wsUrl]
+ * @param {{[K:string]:any}} [params.wsParams]
+ * @return {WaitForSync extends true ? Promise<{ ydoc: Y.Doc, provider: WebsocketProvider }> : { ydoc: Y.Doc, provider: WebsocketProvider }}
  */
-const createWsClient = (tc, room, { branch = 'main', gc = true, syncAwareness = true } = {}) => {
-  const ydoc = new Y.Doc({ gc })
-  const roomPrefix = tc.testName
-  const provider = new WebsocketProvider(yredisUrl, roomPrefix + '-' + room, ydoc, { WebSocketPolyfill: /** @type {any} */ (WebSocket), disableBc: true, params: { branch, gc: gc.toString() }, protocols: [`yauth-${authToken}`] })
+const createWsClient = (tc, { docid = 'index', branch = 'main', gc = true, syncAwareness = true, waitForSync, wsUrl: _wsUrl = wsUrl, wsParams = {} } = {}) => {
+  const testPrefix = tc.testName
+  const guid = testPrefix + '-' + docid
+  const ydoc = new Y.Doc({ gc, guid })
+  const provider = new WebsocketProvider(_wsUrl, guid, ydoc, { WebSocketPolyfill: /** @type {any} */ (WebSocket), disableBc: true, params: { branch, gc: gc.toString(), ...wsParams } })
   if (!syncAwareness) {
     provider.awareness.destroy()
   }
-  return { ydoc, provider }
-}
-
-export const createWorker = async () => {
-  const worker = await api.createWorker(storage, redisPrefix, {})
-  prevClients.push(worker.client)
-  return worker
-}
-
-export const createServer = async () => {
-  const server = await createYHubServer({ port: yredisPort, store: storage, redisPrefix, checkPermCallbackUrl })
-  prevClients.push(server)
-  return server
-}
-
-const createApiClient = async () => {
-  const client = await api.createApiClient(storage, redisPrefix)
-  prevClients.push(client)
-  return client
+  if (waitForSync) {
+    return /** @type {WaitForSync extends true ? Promise<{ ydoc: Y.Doc, provider: WebsocketProvider }> : { ydoc: Y.Doc, provider: WebsocketProvider }} */ (ydoc.whenSynced.then(() => ({ ydoc, provider })))
+  }
+  return /** @type {WaitForSync extends true ? Promise<{ ydoc: Y.Doc, provider: WebsocketProvider }> : { ydoc: Y.Doc, provider: WebsocketProvider }} */ ({ ydoc, provider })
 }
 
 /**
  * @param {t.TestCase} tc
  */
 export const createTestCase = async tc => {
-  await promise.all(prevClients.map(c => c.destroy()))
-  prevClients.length = 0
-  const redisClient = redis.createClient({ url: api.redisUrl })
-  await promise.untilAsync(async () => {
-    try {
-      await redisClient.connect()
-    } catch (err) {
-      console.warn(`Can't connect to redis! url: ${api.redisUrl}`)
-      return false
-    }
-    return true
-  }, 10000)
-  // flush existing content
-  const keysToDelete = await redisClient.keys(redisPrefix + ':*')
-  await redisClient.del(keysToDelete)
-  prevClients.push({ destroy: () => redisClient.quit().then(() => {}) })
-  const server = await createServer()
-  const [apiClient, worker] = await promise.all([createApiClient(), createWorker()])
+  const org = 'testorg'
+  const defaultRoom = { org, docid: tc.testName + '-index', branch: 'main' }
   return {
-    redisClient,
-    apiClient,
-    server,
-    worker,
+    // this must match with the default values in createWsClient
+    defaultRoom,
+    defaultStream: encodeRoomName(defaultRoom, yhub.stream.prefix),
+    yhub,
+    org,
     /**
-     * @param {string} docid
-     * @param {object} [opts]
-     * @param {string} [opts.branch]
-     * @param {boolean} [opts.gc]
-     * @param {boolean} [opts.syncAwareness]
+     * @template {boolean} [WaitForSync=false]
+     * @param {object} [params]
+     * @param {string} [params.docid]
+     * @param {string} [params.branch]
+     * @param {boolean} [params.gc]
+     * @param {boolean} [params.syncAwareness]
+     * @param {WaitForSync} [params.waitForSync]
+     * @param {string} [params.wsUrl]
+     * @param {{[K:string]:any}} [params.wsParams]
+     * @return {WaitForSync extends true ? Promise<{ ydoc: Y.Doc, provider: WebsocketProvider }> : { ydoc: Y.Doc, provider: WebsocketProvider }}
      */
-    createWsClient: (docid, opts) => createWsClient(tc, docid, opts)
+    createWsClient: (params) => createWsClient(tc, params)
   }
 }
 

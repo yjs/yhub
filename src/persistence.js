@@ -1,14 +1,16 @@
 import * as Y from '@y/y'
 import postgres from 'postgres'
-import * as s from 'lib0/schema'
 import * as buffer from 'lib0/buffer'
 import * as promise from 'lib0/promise'
-import * as t from './types.js'
 import * as map from 'lib0/map'
 import * as set from 'lib0/set'
 import * as number from 'lib0/number'
 import * as array from 'lib0/array'
 import * as object from 'lib0/object'
+// eslint-disable-next-line
+import * as s from 'lib0/schema'
+// eslint-disable-next-line
+import * as t from './types.js'
 
 /**
  * @param {string} postgresUrl - postgres://username:password@host:port/database
@@ -204,12 +206,12 @@ export class Persistence {
       nongcDoc: /** @type {Include['nongc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeNongc ? nongcUpdates.map(asset => asset.update) : null),
       contentmap: /** @type {Include['contentmap'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeContentmap ? contentmapAssets.map(asset => asset.contentmap) : null),
       contentids: /** @type {Include['contentids'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeContentids ? contentidsAssets.map(asset => asset.contentids) : null),
-      references: references
+      references
     }
   }
 
   /**
-   * @param {Array<{ assetId: t.AssetId, asset: t.Asset }>} references 
+   * @param {Array<{ assetId: t.AssetId, asset: t.Asset }>} references
    * @return {Promise<void>}
    */
   async deleteReferences (references) {

@@ -1,4 +1,5 @@
-import * as t from  './types.js'
+// eslint-disable-next-line
+import * as t from './types.js'
 import * as s from 'lib0/schema'
 import * as random from 'lib0/random'
 import * as number from 'lib0/number'
@@ -208,7 +209,6 @@ export class Stream {
     }
   }
 
-
   /**
    * @param {Array<{room: t.Room|string, clock: string}>} rooms room-clock pairs
    * @param {object} opts
@@ -235,7 +235,7 @@ export class Stream {
       const streamName = stream.name.toString()
       res.push({
         room: decodeRoomName(streamName, this.prefix),
-        streamName: streamName,
+        streamName,
         lastClock: array.last(stream.messages).id.toString(),
         messages: stream.messages.filter(m => m.message.m != null).map(message => {
           const dm = buffer.decodeAny(/** @type {Uint8Array<ArrayBuffer>} */ (message.message.m))

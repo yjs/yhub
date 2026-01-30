@@ -1,9 +1,6 @@
 import * as Y from '@y/y'
 import * as encoding from 'lib0/encoding'
 import * as awarenessProtocol from '@y/protocols/awareness'
-import * as logging from 'lib0/logging'
-
-const log = logging.createModuleLogger('@y/hub/protocol')
 
 export const messageSync = 0
 export const messageAwareness = 1

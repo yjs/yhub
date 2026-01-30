@@ -21,6 +21,15 @@ All binary content follows a versioned schema approach, enabling future format m
 
 ---
 
+## Rooms
+
+"rooms" is the concept how we share data. Data in the same "room" is shared. The
+websocket provider subscribes to rooms. For most applications we connect to a
+single document: `room = { org: string, docid: string, branch: string }`.
+
+In future releases, we could also subscribe to all documents in a whole
+organization (for offline sync): `room = { org: string }`.
+
 ## Binary Content Schemas
 
 All binary data in YHub has an explicit schema with version information. This approach enables:
@@ -54,7 +63,7 @@ CREATE TABLE yhub_ydoc_v1 (
     org             text,
     docid           text,
     branch          text,
-    t               text,       -- timestamp/clock identifier
+    t               text,       -- redis identifier (timestamp)
     created         INT8,       -- Unix timestamp in milliseconds
     gcDoc           bytea,      -- Garbage-collected Y.js update
     nongcDoc        bytea,      -- Non-garbage-collected Y.js update

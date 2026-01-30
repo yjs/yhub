@@ -10,7 +10,7 @@ import * as jwt from 'lib0/crypto/jwt'
 import * as t from 'lib0/testing' // eslint-disable-line
 import * as promise from 'lib0/promise'
 
-import { createYWebsocketServer } from '../src/server.js'
+import { createYHubServer } from '../src/server.js'
 import { createStorage } from '../src/storage.js'
 import * as api from '../src/api.js'
 
@@ -84,7 +84,7 @@ export const createWorker = async () => {
 }
 
 export const createServer = async () => {
-  const server = await createYWebsocketServer({ port: yredisPort, store: storage, redisPrefix, checkPermCallbackUrl })
+  const server = await createYHubServer({ port: yredisPort, store: storage, redisPrefix, checkPermCallbackUrl })
   prevClients.push(server)
   return server
 }

@@ -89,6 +89,17 @@ export const mergeMessages = messages => {
 }
 
 /**
+ * @param {Array<Uint8Array>} ms
+ */
+export const mergeAwarenessUpdates = ms => {
+  const aw = new awarenessProtocol.Awareness(new Y.Doc())
+  ms.forEach(m => {
+    awarenessProtocol.applyAwarenessUpdate(aw, m, null)
+  })
+  return aw
+}
+
+/**
  * @param {Uint8Array} sv
  */
 export const encodeSyncStep1 = sv => encoding.encode(encoder => {

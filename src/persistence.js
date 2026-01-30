@@ -9,6 +9,7 @@ import * as map from 'lib0/map'
 import * as set from 'lib0/set'
 import * as number from 'lib0/number'
 import * as array from 'lib0/array'
+import * as object from 'lib0/object'
 
 /**
  * @param {string} postgresUrl - postgres://username:password@host:port/database
@@ -93,9 +94,7 @@ export class Persistence {
   }
 
   /**
-   * @param {string} org
-   * @param {string} docid
-   * @param {string} branch
+   * @param {t.Room} room
    * @param {object} content
    * @param {string} content.lastClock
    * @param {Uint8Array<ArrayBuffer>} content.gcDoc
@@ -104,28 +103,28 @@ export class Persistence {
    * @param {Uint8Array<ArrayBuffer>} content.contentids
    * @returns {Promise<void>}
    */
-  async store (org, docid, branch, { lastClock, gcDoc, nongcDoc, contentmap, contentids }) {
+  async store (room, { lastClock, gcDoc, nongcDoc, contentmap, contentids }) {
     /**
      * @type {t.AssetId}
      */
-    const gcDocAssetId = { type: 'id:ydoc:v1', org, docid, branch, gc: true, t: lastClock }
+    const gcDocAssetId = object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), gc: true, t: lastClock }, room)
     /**
      * @type {t.AssetId}
      */
-    const nongcDocAssetId = { type: 'id:ydoc:v1', org, docid, branch, gc: false, t: lastClock }
+    const nongcDocAssetId = object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), gc: false, t: lastClock }, room)
     /**
      * @type {t.AssetId}
      */
-    const contentmapAssetId = { type: 'id:contentmap:v1', org, docid, branch, t: lastClock }
+    const contentmapAssetId = object.assign({ type: /** @type {const} */ ('id:contentmap:v1'), t: lastClock }, room)
     /**
      * @type {t.AssetId}
      */
-    const contentidsAssetId = { type: 'id:contentids:v1', org, docid, branch, t: lastClock }
+    const contentidsAssetId = object.assign({ type: /** @type {const} */ ('id:contentids:v1'), t: lastClock }, room)
     const [gcDocAsset, nongcDocAsset, contentmapAsset, contentidsAsset] = await promise.all([
       tryPersistencePluginStore(this.plugins, gcDocAssetId, { type: 'asset:ydoc:v1', update: gcDoc }),
       tryPersistencePluginStore(this.plugins, nongcDocAssetId, { type: 'asset:ydoc:v1', update: nongcDoc }),
       tryPersistencePluginStore(this.plugins, contentmapAssetId, { type: 'asset:contentmap:v1', contentmap }),
-      tryPersistencePluginStore(this.plugins, contentmapAssetId, { type: 'asset:contentids:v1', contentids })
+      tryPersistencePluginStore(this.plugins, contentidsAssetId, { type: 'asset:contentids:v1', contentids })
     ])
     const encodedGcDocAsset = buffer.encodeAny(gcDocAsset)
     const encodedNongcDocAsset = buffer.encodeAny(nongcDocAsset)
@@ -134,30 +133,26 @@ export class Persistence {
     const created = number.parseInt(lastClock.split('-')[0])
     await this.sql`
       INSERT INTO yhub_ydoc_v1 (org,docid,branch,t,created,gcDoc,nongcDoc,contentmap,contentids)
-      VALUES (${org},${docid},${branch},${lastClock},${created},${encodedGcDocAsset},${encodedNongcDocAsset},${encodedContentmapAsset},${encodedContentidsAsset})
+      VALUES (${room.org},${room.docid},${room.branch},${lastClock},${created},${encodedGcDocAsset},${encodedNongcDocAsset},${encodedContentmapAsset},${encodedContentidsAsset})
     `
   }
 
   /**
-   * @param {string} org
-   * @param {string} docid
-   * @param {string} branch
+   * @param {t.Room} room
    * @return {Promise<Y.ContentMap>}
    */
-  async retrieveContentmap (org, docid, branch) {
-    const { contentmap } = await this.retrieveDoc(org, docid, branch, { contentmap: true })
+  async retrieveContentmap (room) {
+    const { contentmap } = await this.retrieveDoc(room, { contentmap: true })
     return Y.mergeContentMaps(contentmap.map(Y.decodeContentMap))
   }
 
   /**
    * @template {{ gc?: boolean, nongc?: boolean, contentmap?: boolean, references?: boolean, contentids?: boolean }} Include
-   * @param {string} org
-   * @param {string} docid
-   * @param {string} branch
+   * @param {t.Room} room
    * @param {Include} includeContent
    * @return {Promise<{ lastClock: string, gcDoc: Include['gc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null, nongcDoc: Include['nongc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null, contentmap: Include['contentmap'] extends true ? Array<Uint8Array<ArrayBuffer>> : null, references: Include['references'] extends true ? Array<{ assetId: t.AssetId, asset: t.Asset }> : null, contentids: Include['contentids'] extends true ? Array<Uint8Array<ArrayBuffer>> : null }>}
    */
-  async retrieveDoc (org, docid, branch, includeContent) {
+  async retrieveDoc (room, includeContent) {
     const includeContentmap = includeContent.contentmap === true
     const includeContentids = includeContent.contentids === true
     const includeGc = includeContent.gc === true
@@ -174,32 +169,32 @@ export class Persistence {
         ${includeContentmap ? this.sql`, contentmap` : this.sql``}
         ${includeContentids ? this.sql`, contentids` : this.sql``}
       FROM yhub_ydoc_v1 
-      WHERE org = ${org} AND docid = ${docid} AND branch = ${branch}
+      WHERE org = ${room.org} AND docid = ${room.docid} AND branch = ${room.branch}
     `
     /**
      * @type {Include['references'] extends true ? Array<{ assetId: t.AssetId, asset: t.Asset }> : null}
      */
     const references = includeReferences ? /** @type {any} */ ([]) : null
     const contentmapAssets = await promise.all(rows.filter(row => row.contentmap != null).map(row => {
-      const assetId = { type: /** @type {const} */ ('id:contentmap:v1'), org, docid, branch, t: row.t }
+      const assetId = object.assign({ type: /** @type {const} */ ('id:contentmap:v1'), t: row.t }, room)
       const contentmapAsset = /** @type {s.Unwrap<typeof t.$contentMapAsset> | t.RetrievableAsset} */ (buffer.decodeAny(/** @type {Buffer} */ (row.contentmap)))
       references?.push({ assetId, asset: contentmapAsset })
       return tryPersistencePluginRetrieve(this.plugins, assetId, contentmapAsset)
     }))
     const contentidsAssets = await promise.all(rows.filter(row => row.contentids != null).map(row => {
-      const assetId = { type: /** @type {const} */ ('id:contentids:v1'), org, docid, branch, t: row.t }
+      const assetId = object.assign({ type: /** @type {const} */ ('id:contentids:v1'), t: row.t }, room)
       const contentidsAsset = /** @type {s.Unwrap<typeof t.$contentidsAsset> | t.RetrievableAsset} */ (buffer.decodeAny(/** @type {Buffer} */ (row.contentids)))
       references?.push({ assetId, asset: contentidsAsset })
       return tryPersistencePluginRetrieve(this.plugins, assetId, contentidsAsset)
     }))
     const gcUpdates = await promise.all(rows.filter(row => row.gcDoc != null).map(row => {
-      const assetId = { type: /** @type {const} */ ('id:ydoc:v1'), org, docid, branch, t: row.t, gc: true }
+      const assetId = object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), t: row.t, gc: true }, room)
       const gcDocAsset = /** @type {s.Unwrap<typeof t.$ydocAsset> | t.RetrievableAsset} */ (buffer.decodeAny(/** @type {Buffer} */ (row.gcDoc)))
       references?.push({ assetId, asset: gcDocAsset })
       return tryPersistencePluginRetrieve(this.plugins, assetId, gcDocAsset)
     }))
     const nongcUpdates = await promise.all(rows.filter(row => row.nongcDoc != null).map(row => {
-      const assetId = { type: /** @type {const} */ ('id:ydoc:v1'), org, docid, branch, t: row.t, gc: false }
+      const assetId = object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), t: row.t, gc: false }, room)
       const nongcDocAsset = /** @type {s.Unwrap<typeof t.$ydocAsset> | t.RetrievableAsset} */ (buffer.decodeAny(/** @type {Buffer} */ (row.nongcDoc)))
       references?.push({ assetId, asset: nongcDocAsset })
       return tryPersistencePluginRetrieve(this.plugins, assetId, nongcDocAsset)

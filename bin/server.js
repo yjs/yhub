@@ -19,4 +19,4 @@ const store = await createStorage(env.ensureConf('postgres'), {
   secretKey: env.ensureConf('S3_SECRET_KEY')
 })
 
-yredis.createYWebsocketServer({ port, store, checkPermCallbackUrl, redisPrefix })
+yredis.createYHubServer({ port, store, checkPermCallbackUrl, redisPrefix })

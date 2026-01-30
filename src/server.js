@@ -1,120 +1,46 @@
 import * as uws from 'uws'
-import * as env from 'lib0/environment'
 import * as logging from 'lib0/logging'
 import * as error from 'lib0/error'
-import * as jwt from 'lib0/crypto/jwt'
-import * as ecdsa from 'lib0/crypto/ecdsa'
-import * as json from 'lib0/json'
 import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
-import { registerYWebsocketServer } from '../src/ws.js'
 import * as promise from 'lib0/promise'
-import * as api from './api.js'
 import * as Y from '@y/y'
 import * as s from 'lib0/schema'
 import * as time from 'lib0/time'
 import * as number from 'lib0/number'
+import * as yhub from './hub.js'
+import * as t from './types.js'
+import * as protocol from './protocol.js'
+import * as array from 'lib0/array'
 
-/**
- * ECDSA public key used to verify JWT tokens from WebSocket clients.
- * The key is loaded from the 'auth-public-key' environment configuration as a JWK (JSON Web Key).
- */
-const wsServerPublicKey = await ecdsa.importKeyJwk(json.parse(env.ensureConf('auth-public-key')))
-// const wsServerPrivateKey = await ecdsa.importKeyJwk(json.parse(env.ensureConf('auth-private-key')))
+const log = logging.createModuleLogger('@y/hub/ws')
 
-class YWebsocketServer {
+class YHubServer {
   /**
+   * @param {import('./hub.js').YHub} yhub
+   * @param {t.YHubConfig} conf
    * @param {uws.TemplatedApp} app
    */
-  constructor (app) {
-    this.app = app
+  constructor (yhub, conf, app) {
+    this.yhub = yhub
+    this.conf = conf
+    this.uwsApp = app
   }
 
   async destroy () {
-    this.app.close()
+    this.uwsApp.close()
   }
 }
 
 /**
- * @param {Object} opts
- * @param {number} opts.port
- * @param {import('./storage.js').Storage} opts.store
- * @param {string} [opts.redisPrefix]
- * @param {string} opts.checkPermCallbackUrl
- * @param {(room:string,docname:string,client:import('./api.js').Api)=>void} [opts.initDocCallback] -
- * this is called when a doc is accessed, but it doesn't exist. You could populate the doc here.
- * However, this function could be called several times, until some content exists. So you need to
- * handle concurrent calls.
+ * @param {import('./hub.js').YHub} yhub
+ * @param {t.YHubConfig} conf
  */
-export const createYWebsocketServer = async ({
-  redisPrefix = 'y',
-  port,
-  store,
-  checkPermCallbackUrl,
-  initDocCallback = () => {}
-}) => {
-  checkPermCallbackUrl += checkPermCallbackUrl.slice(-1) !== '/' ? '/' : ''
+export const createYHubServer = async (yhub, conf) => {
   const app = uws.App({})
-  await registerYWebsocketServer(app, '/ws/:room', store, redisPrefix, async (req) => {
-    const room = /** @type {string} */ (req.getParameter(0))
-    const headerWsProtocol = req.getHeader('sec-websocket-protocol')
-    const [, , token] = /(^|,)yauth-(((?!,).)*)/.exec(headerWsProtocol) ?? [null, null, req.getQuery('yauth')]
-    // Parse gc and branch query parameters BEFORE any await
-    const gc = req.getQuery('gc') !== 'false' // default to true unless explicitly set to 'false'
-    const branch = req.getQuery('branch') || 'main'
-    if (token == null) {
-      throw new Error('Missing Token')
-    }
-    // verify that the user has a valid token
-    const { payload: userToken } = await jwt.verifyJwt(wsServerPublicKey, token)
-    if (userToken.yuserid == null) {
-      throw new Error('Missing userid in user token!')
-    }
-    const permUrl = new URL(`${room}/${userToken.yuserid}`, checkPermCallbackUrl)
-    try {
-      const perm = await fetch(permUrl).then(req => req.json())
-      return { hasWriteAccess: perm.yaccess === 'rw', room, userid: perm.yuserid || '', gc, branch }
-    } catch (e) {
-      console.error('Failed to pull permissions from', { permUrl })
-      throw e
-    }
-  }, { initDocCallback })
-
-  const yhubApi = await api.createApiClient(store, redisPrefix)
-
-  /**
-   * @param {Y.ContentMap} contentMap
-   * @param {number|undefined?} from
-   * @param {number|undefined?} to
-   * @param {string|undefined?} by
-   * @param {Y.ContentIds|undefined} requestedIds
-   */
-  const filterContentMapHelper = (contentMap, from, to, by, requestedIds) => {
-    if (requestedIds != null) {
-      contentMap = Y.intersectContentMap(contentMap, requestedIds)
-    }
-    if (from || to || by) {
-      /**
-       * @param {Array<Y.ContentAttribute<any>>} attrs
-       */
-      const attrFilter = attrs => {
-        if ((from || to) && !attrs.some(attr => (attr.name === 'insertAt' || attr.name === 'deleteAt') && (from == null || attr.val >= from) && (to == null || attr.val <= to))) {
-          return false
-        }
-        if (by != null && !attrs.some(attr => (attr.name === 'insert' || attr.name === 'delete') && /** @type {string} */ (attr.val).split(',').includes(by))) {
-          return false
-        }
-        return true
-      }
-      contentMap = Y.filterContentMap(
-        contentMap,
-        attrFilter,
-        attrFilter
-      )
-    }
-    return contentMap
-  }
-
+  const yhubServer = new YHubServer(yhub, conf, app)
+  yhub.server = yhubServer
+  registerWebsocketServer(yhub, app)
   // The REST API defined in `API.md`
 
   /**
@@ -136,8 +62,8 @@ export const createYWebsocketServer = async ({
   })
 
   // POST /rollback/{guid} - Rollback changes matching the pattern
-  app.post('/rollback/:room', (res, req) => {
-    const room = /** @type {string} */ (req.getParameter(0))
+  app.post('/rollback/:org/:docid', (res, req) => {
+    const room = reqToRoom(req)
     let buffer = Buffer.allocUnsafe(0)
     let aborted = false
     res.onAborted(() => {
@@ -155,15 +81,17 @@ export const createYWebsocketServer = async ({
         if (s.$object({ from: s.$number.optional, to: s.$number.optional, by: s.$string.optional, contentIds: s.$uint8Array.optional }).check(decodedBody)) {
           const { from, to, by, contentIds: contentIdsBin } = decodedBody
           const contentIds = contentIdsBin && Y.decodeContentIds(contentIdsBin)
-          const { attributions, ydoc } = await yhubApi.getDoc(room, 'index', { gc: false, attributions: true })
-          const reducedAttributions = filterContentMapHelper(attributions, from, to, by, contentIds)
+          const { contentmap: contentmapBin, nongcDoc: nongcDocBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
+          const contentmap = Y.decodeContentMap(contentmapBin)
+          const ydoc = Y.createDocFromUpdate(nongcDocBin)
+          const reducedAttributions = filterContentMapHelper(contentmap, from, to, by, contentIds)
           const revertIds = Y.createContentIdsFromContentMap(reducedAttributions)
           ydoc.once('update', update => {
             const now = time.getUnixTime()
-            yhubApi.addMessage(room, 'index', {
-              type: 'update:v1',
+            yhub.stream.addMessage(room, {
+              type: 'ydoc:update:v1',
               update,
-              attributions: Y.encodeContentMap(Y.createContentMapFromContentIds(Y.createContentIdsFromUpdate(update), [Y.createContentAttribute('insert', 'system'), Y.createContentAttribute('insertAt', now)], [Y.createContentAttribute('delete', 'system'), Y.createContentAttribute('deleteAt', now)]))
+              contentmap: Y.encodeContentMap(Y.createContentMapFromContentIds(Y.createContentIdsFromUpdate(update), [Y.createContentAttribute('insert', 'system'), Y.createContentAttribute('insertAt', now)], [Y.createContentAttribute('delete', 'system'), Y.createContentAttribute('deleteAt', now)]))
             })
           })
           Y.undoContentIds(ydoc, revertIds)
@@ -179,6 +107,7 @@ export const createYWebsocketServer = async ({
               res.end(response)
             })
           }
+          ydoc.destroy()
           return
         }
         // couldn't parse correctly. throw error
@@ -207,8 +136,8 @@ export const createYWebsocketServer = async ({
   })
 
   // GET /changeset/{guid} - Get attributed changes and document states
-  app.get('/changeset/:room', async (res, req) => {
-    const room = req.getParameter(0) || ''
+  app.get('/changeset/:org/:docid', async (res, req) => {
+    const room = reqToRoom(req)
     const by = req.getQuery('by')
     const _from = req.getQuery('from')
     const _to = req.getQuery('to')
@@ -222,11 +151,13 @@ export const createYWebsocketServer = async ({
       aborted = true
       console.log('Request aborted')
     })
-    const hubDoc = await yhubApi.getDoc(room, 'index', { gc: false, attributions: true })
-    const filteredAttributions = filterContentMapHelper(hubDoc.attributions, from, to, by, undefined)
-    const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(hubDoc.attributions, 0, from != null ? from - 1 : null, undefined, undefined))
-    const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(hubDoc.attributions, 0, to, undefined, undefined))
-    const docUpdate = Y.encodeStateAsUpdate(hubDoc.ydoc)
+    const { nongcDoc: nongcDocBin, contentmap: contentmapBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
+    const ydoc = Y.createDocFromUpdate(nongcDocBin)
+    const contentmap = Y.decodeContentMap(contentmapBin)
+    const filteredAttributions = filterContentMapHelper(contentmap, from, to, by, undefined)
+    const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, from != null ? from - 1 : null, undefined, undefined))
+    const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, to, undefined, undefined))
+    const docUpdate = Y.encodeStateAsUpdate(ydoc)
     const prevDocUpdate = Y.intersectUpdateWithContentIds(docUpdate, beforeContentIds)
     const nextDocUpdate = Y.intersectUpdateWithContentIds(docUpdate, afterContentIds)
     /**
@@ -264,8 +195,8 @@ export const createYWebsocketServer = async ({
   })
 
   // GET /activity/{guid} - Get all editing timestamps for a document
-  app.get('/activity/:room', async (res, req) => {
-    const room = req.getParameter(0) || ''
+  app.get('/activity/:org/:docid', async (res, req) => {
+    const room = reqToRoom(req)
     const from = number.parseInt(req.getQuery('from') || '0')
     const to = number.parseInt(req.getQuery('to') || number.MAX_SAFE_INTEGER.toString())
     const includeDelta = req.getQuery('delta') === 'true'
@@ -277,8 +208,10 @@ export const createYWebsocketServer = async ({
       aborted = true
       console.log('Request aborted')
     })
-    const hubDoc = await yhubApi.getDoc(room, 'index', { gc: false, attributions: true })
-    const filteredAttributions = filterContentMapHelper(hubDoc.attributions, from, to, undefined, undefined)
+    const { contentmap: contentmapBin, nongcDoc: nongcDocBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
+    const contentmap = Y.decodeContentMap((contentmapBin))
+    const ydoc = Y.createDocFromUpdate(nongcDocBin)
+    const filteredAttributions = filterContentMapHelper(contentmap, from, to, undefined, undefined)
     /**
      * @type {Array<{ from: number, to: number, by: string|null }>}
      */
@@ -354,9 +287,9 @@ export const createYWebsocketServer = async ({
     if (includeDelta) {
       activityResult.forEach(act => {
         const actAttributions = filterContentMapHelper(filteredAttributions, act.from, act.to, undefined, undefined)
-        const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(hubDoc.attributions, 0, act.from != null ? act.from - 1 : null, undefined, undefined))
-        const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(hubDoc.attributions, 0, act.to, undefined, undefined))
-        const docUpdate = Y.encodeStateAsUpdate(hubDoc.ydoc)
+        const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, act.from != null ? act.from - 1 : null, undefined, undefined))
+        const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, act.to, undefined, undefined))
+        const docUpdate = Y.encodeStateAsUpdate(ydoc)
         const prevDocUpdate = Y.intersectUpdateWithContentIds(docUpdate, beforeContentIds)
         const nextDocUpdate = Y.intersectUpdateWithContentIds(docUpdate, afterContentIds)
         const prevDoc = new Y.Doc()
@@ -383,6 +316,7 @@ export const createYWebsocketServer = async ({
   })
 
   await promise.create((resolve, reject) => {
+    const port = conf.server?.port || 4000
     app.listen(port, (token) => {
       if (token) {
         logging.print(logging.GREEN, '[y-redis] Listening to port ', port)
@@ -394,5 +328,251 @@ export const createYWebsocketServer = async ({
       }
     })
   })
-  return new YWebsocketServer(app)
+  return new YHubServer(yhub, conf, app)
 }
+
+let _idCnt = 0
+
+/**
+ * @typedef {import('./stream.js').StreamSubscriber} SSubscriber
+ */
+
+/**
+ * @implements SSubscriber
+ */
+class WSUser {
+  /**
+   * @param {yhub.YHub} yhub
+   * @param {uws.WebSocket<WSUser>|null} ws
+   * @param {t.Room} room
+   * @param {boolean} hasWriteAccess
+   * @param {{ userid: string }} authInfo
+   * @param {boolean} gc
+   */
+  constructor (yhub, ws, room, hasWriteAccess, authInfo, gc) {
+    this.yhub = yhub
+    /**
+     * @type {uws.WebSocket<WSUser>|null}
+     */
+    this.ws = ws
+    this.room = room
+    this.hasWriteAccess = hasWriteAccess
+    this.gc = gc
+    /**
+     * @type {string}
+     */
+    this.initialRedisSubId = '0'
+    this.subs = new Set()
+    /**
+     * This is just an identifier to keep track of the user for logging purposes.
+     */
+    this.id = _idCnt++
+    this.authInfo = authInfo
+    /**
+     * Identifies the User globally.
+     * Note that several clients can have the same userid (e.g. if a user opened several browser
+     * windows)
+     */
+    this.userid = authInfo.userid
+    /**
+     * @type {number|null}
+     */
+    this.awarenessId = null
+    this.awarenessLastClock = 0
+    this.isClosed = false
+    this.lastReceivedClock = '0'
+  }
+
+  /**
+   * @param {t.Room} _room
+   * @param {Array<t.Message>} ms
+   */
+  onStreamMessage (_room, ms) {
+    const encoder = encoding.createEncoder()
+    ms.forEach(message => {
+      switch (message.type) {
+        case 'ydoc:update:v1': {
+          protocol.writeSyncUpdate(encoder, message.update)
+          break
+        }
+        case 'awareness:v1': {
+          protocol.writeAwarenessUpdate(encoder, message.update)
+          break
+        }
+        default: {
+          s.$never.expect(message)
+        }
+      }
+    })
+    const m = encoding.toUint8Array(encoder)
+    if (this.ws == null) console.log('Client tried to send a message, but it isn\'t connected yet')
+    this.ws?.send(m)
+  }
+
+  destroy () {
+    this.yhub.stream.unsubscribe(this.room, this)
+  }
+}
+
+/**
+ * @param {uws.HttpRequest} req
+ */
+export const reqToRoom = req => {
+  const org = /** @type {string} */ (req.getParameter(0))
+  const docid = /** @type {string} */ (req.getParameter(1))
+  const branch = /** @type {string} */ (req.getQuery('branch')) ?? 'main'
+  return { org, docid, branch }
+}
+
+/**
+ * @param {yhub.YHub} yhub
+ * @param {uws.TemplatedApp} app
+ */
+export const registerWebsocketServer = (yhub, app) => {
+  app.ws('/ws/:org/:docid', /** @type {uws.WebSocketBehavior<WSUser>} */ ({
+    compression: uws.SHARED_COMPRESSOR,
+    maxPayloadLength: 100 * 1024 * 1024,
+    idleTimeout: 60,
+    sendPingsAutomatically: true,
+    upgrade: async (res, req, context) => {
+      const url = req.getUrl()
+      const headerWsKey = req.getHeader('sec-websocket-key')
+      const headerWsProtocol = req.getHeader('sec-websocket-protocol')
+      const headerWsExtensions = req.getHeader('sec-websocket-extensions')
+      let aborted = false
+      res.onAborted(() => {
+        console.log('Upgrading client aborted', { url })
+        aborted = true
+      })
+      try {
+        const room = reqToRoom(req)
+        const gc = req.getQuery('gc') !== 'false' // default to true unless explicitly set to 'false'
+        const authInfo = await yhub.conf.server?.authPlugin.readAuthInfo(req)
+        s.$string.expect(authInfo.userid)
+        const accessType = authInfo && await yhub.conf.server?.authPlugin.getAccessType(authInfo, room)
+        if (authInfo == null || !t.hasReadAccess(accessType)) {
+          res.cork(() => {
+            res.writeStatus('401 Unauthorized').end('Unauthorized')
+          })
+          return
+        }
+        if (aborted) return
+        res.cork(() => {
+          res.upgrade(
+            new WSUser(yhub, null, room, t.hasWriteAccess(accessType), authInfo, gc),
+            headerWsKey,
+            headerWsProtocol,
+            headerWsExtensions,
+            context
+          )
+        })
+      } catch (err) {
+        console.log(`Failed to auth to endpoint ${url}`, err)
+        if (aborted) return
+        res.cork(() => {
+          res.writeStatus('401 Unauthorized').end('Unauthorized')
+        })
+      }
+    },
+    open: async (ws) => {
+      const user = ws.getUserData()
+      log(() => ['client connected (uid=', user.id, ', ip=', Buffer.from(ws.getRemoteAddressAsText()).toString(), ')'])
+      const doctable = await yhub.getDoc(user.room, { gc: user.gc, nongc: !user.gc, awareness: true })
+      const ydoc = doctable.gcDoc || doctable.nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
+      if (user.isClosed) return
+      ws.cork(() => {
+        ws.send(protocol.encodeSyncStep1(Y.encodeStateVectorFromUpdate(ydoc)), true, false)
+        ws.send(protocol.encodeSyncStep2(ydoc), true, true)
+        const aw = doctable.awareness
+        if (aw.states.size > 0) {
+          ws.send(protocol.encodeAwareness(aw, array.from(aw.states.keys())), true, false)
+        }
+      })
+      user.lastReceivedClock = doctable.lastClock
+      yhub.stream.subscribe(user.room, user)
+    },
+    message: (ws, messageBuffer) => {
+      const user = ws.getUserData()
+      // don't read any messages from users without write access
+      if (!user.hasWriteAccess) return
+      // It is important to copy the data here
+      const message = Buffer.from(messageBuffer.slice(0, messageBuffer.byteLength))
+      const decoder = decoding.createDecoder(message)
+      switch (decoding.readVarUint(decoder)) {
+        case 0: { // sync message
+          const syncMessageType = decoding.readVarUint(decoder)
+          if (syncMessageType === protocol.messageSyncUpdate || syncMessageType === protocol.messageSyncStep2) {
+            const update = decoding.readVarUint8Array(decoder)
+            if (update.byteLength > 3) {
+              const now = time.getUnixTime()
+              const contentmap = Y.encodeContentMap(Y.createContentMapFromContentIds(
+                Y.createContentIdsFromUpdate(update),
+                [Y.createContentAttribute('insert', user.userid), Y.createContentAttribute('insertAt', now)],
+                [Y.createContentAttribute('delete', user.userid), Y.createContentAttribute('deleteAt', now)]
+              ))
+              yhub.stream.addMessage(user.room, { type: 'ydoc:update:v1', contentmap, update })
+            }
+          } else if (syncMessageType === protocol.messageSyncStep1) {
+            // can be safely ignored because we send the full initial state at the beginning
+          } else {
+            console.warn('Unknown sync message type', syncMessageType)
+          }
+          break
+        }
+        case 1: { // awareness message
+          const update = decoding.readVarUint8Array(decoder)
+          const awDecoder = decoding.createDecoder(update)
+          const alen = decoding.readVarUint(awDecoder) // number of awareness updates
+          const awId = decoding.readVarUint(awDecoder)
+          if (alen === 1 && (user.awarenessId === null || user.awarenessId === awId)) { // only update awareness if len=1
+            user.awarenessId = awId
+            user.awarenessLastClock = decoding.readVarUint(awDecoder)
+          }
+          yhub.stream.addMessage(user.room, { type: 'awareness:v1', update })
+          break
+        }
+      }
+    },
+    close: (ws, code, message) => {
+      const user = ws.getUserData()
+      user.awarenessId && yhub.stream.addMessage(user.room, { type: 'awareness:v1', update: protocol.encodeAwarenessUserDisconnected(user.awarenessId, user.awarenessLastClock) })
+      user.isClosed = true
+      log(() => ['client connection closed (uid=', user.id, ', code=', code, ', message="', Buffer.from(message).toString(), '")'])
+      user.destroy()
+    }
+  }))
+}
+
+/**
+ * @param {Y.ContentMap} contentMap
+ * @param {number|undefined?} from
+ * @param {number|undefined?} to
+ * @param {string|undefined?} by
+ * @param {Y.ContentIds|undefined} requestedIds
+ */
+const filterContentMapHelper = (contentMap, from, to, by, requestedIds) => {
+  if (requestedIds != null) {
+    contentMap = Y.intersectContentMap(contentMap, requestedIds)
+  }
+  if (from || to || by) {
+    /**
+     * @param {Array<Y.ContentAttribute<any>>} attrs
+     */
+    const attrFilter = attrs => {
+      if ((from || to) && !attrs.some(attr => (attr.name === 'insertAt' || attr.name === 'deleteAt') && (from == null || attr.val >= from) && (to == null || attr.val <= to))) {
+        return false
+      }
+      if (by != null && !attrs.some(attr => (attr.name === 'insert' || attr.name === 'delete') && /** @type {string} */ (attr.val).split(',').includes(by))) {
+        return false
+      }
+      return true
+    }
+    contentMap = Y.filterContentMap(
+      contentMap,
+      attrFilter,
+      attrFilter
+    )
+  }
+  return contentMap
+}
+

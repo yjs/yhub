@@ -10,7 +10,7 @@ import * as map from 'lib0/map'
 
 /**
  * @typedef {object} StreamSubscriber
- * @property {(room: t.Room, ms:Array<t.Message & { redisClock: string }>)=>any} onMessage
+ * @property {(room: t.Room, ms:Array<t.Message & { redisClock: string }>)=>any} onStreamMessage
  * @property {()=>void} destroy
  * @property {string} lastReceivedClock
  */
@@ -60,25 +60,22 @@ export const maxRedisClock = (a, b) => isSmallerRedisClock(a, b) ? b : a
  */
 export const minRedisClock = (a, b) => isSmallerRedisClock(a, b) ? a : b
 
-/**
- * 
- */
-export class YHubStream {
+export class Stream {
   /**
-   * @param {import('./config.js').RedisConfig} config
+   * @param {import('./types.js').YHubConfig} config
    */
   constructor (config) {
-    this.config = config
-    this.prefix = config.prefix || 'yhub'
+    this.redisConfig = config.redis
+    this.prefix = config.redis.prefix || 'yhub'
     this.consumername = random.uuidv4()
     /**
      * After this timeout, a worker will pick up a task and clean up a stream.
      */
-    this.taskDebounce = config.taskDebounce
+    this.taskDebounce = config.redis.taskDebounce
     /**
      * Minimum lifetime of y* update messages in redis streams.
      */
-    this.minMessageLifetime = config.minMessageLifetime
+    this.minMessageLifetime = config.redis.minMessageLifetime
     this.workerStreamName = this.prefix + ':worker'
     this.workerGroupName = this.prefix + ':worker'
     this._destroyed = false
@@ -86,17 +83,17 @@ export class YHubStream {
      * lastReceivedId: the last id we received. Next time we fetch we will request lastReceivedId+1.
      * A sub doesn't receive subs that are smaller/equal to lastReceivedId.
      *
-     * @type {Map<string, { lastReceivedClock: string, subs: StreamSubscriber[] }>}
+     * @type {Map<string, { lastReceivedClock: string, subs: Set<StreamSubscriber> }>}
      */
     this.subs = new Map()
     /**
      * Will be merged into subs on the next sub iteration.
      *
-     * @type {Map<string, { lastReceivedClock: string, subs: StreamSubscriber[] }>}
+     * @type {Map<string, { lastReceivedClock: string, subs: Set<StreamSubscriber> }>}
      */
     this.subUpdates = new Map()
     this.redis = redis.createClient({
-      url: config.url,
+      url: config.redis.url,
       // scripting: https://github.com/redis/node-redis/#lua-scripts
       scripts: {
         addMessage: redis.defineScript({
@@ -125,9 +122,13 @@ export class YHubStream {
         trimMessages: redis.defineScript({
           NUMBER_OF_KEYS: 1,
           SCRIPT: `
-            redis.call("XDEL", "${this.workerStreamName}", ARGV[2])
-            local minid = (redis.call("TIME")[1] * 1000) - tonumber(ARGV[1])
-            redis.call("XTRIM", KEYS[1], "MINID", minid)
+            redis.call("XDEL", "${this.workerStreamName}", ARGV[3])
+            local minidLifetime = (redis.call("TIME")[1] * 1000) - tonumber(ARGV[2])
+            local minid = ARGV[1]
+            if minid ~= "" and tonumber(minid) < minidLifetime then
+              minidLifetime = tonumber(minid)
+            end
+            redis.call("XTRIM", KEYS[1], "MINID", minidLifetime)
             if redis.call("XLEN", KEYS[1]) == 0 then
               redis.call("DEL", KEYS[1])
             else
@@ -137,11 +138,12 @@ export class YHubStream {
           `,
           /**
            * @param {string} streamName
+           * @param {string} minId
            * @param {number} maxAgeMs
            * @param {string} taskId
            */
-          transformArguments (streamName, maxAgeMs, taskId) {
-            return [streamName, maxAgeMs.toString(), taskId]
+          transformArguments (streamName, minId, maxAgeMs, taskId) {
+            return [streamName, minId, maxAgeMs.toString(), taskId]
           },
           /**
            * @param {null} x
@@ -165,16 +167,16 @@ export class YHubStream {
     if (!this._subRunning) {
       this._subRunning = true
       if (this.redisSubscriptions === null) {
-        this.redisSubscriptions = redis.createClient({ url: this.config.url })
+        this.redisSubscriptions = redis.createClient({ url: this.redisConfig.url })
       }
       while (this.subs.size > 0 || this.subUpdates.size > 0) {
         // update subs
         this.subUpdates.forEach((update, streamName) => {
-          const s = map.setIfUndefined(this.subs, streamName, () => ({ lastReceivedClock: update.lastReceivedClock, subs: /** @type {StreamSubscriber[]} */ ([]) }))
+          const s = map.setIfUndefined(this.subs, streamName, () => ({ lastReceivedClock: update.lastReceivedClock, subs: /** @type {Set<StreamSubscriber>} */ (new Set()) }))
           if (isSmallerRedisClock(update.lastReceivedClock, s.lastReceivedClock)) {
             s.lastReceivedClock = update.lastReceivedClock
           }
-          s.subs.push(...update.subs)
+          update.subs.forEach(sub => s.subs.add(sub))
         })
         this.subUpdates.clear()
         try {
@@ -190,7 +192,7 @@ export class YHubStream {
                   s.lastReceivedClock = m.lastClock
                   nsubCounter++
                 }
-                s.onMessage(m.room, filteredMessages)
+                s.onStreamMessage(m.room, filteredMessages)
               })
               sub.lastReceivedClock = m.lastClock
             }
@@ -259,9 +261,28 @@ export class YHubStream {
    */
   subscribe (room, subscriber) {
     const streamName = encodeRoomName(room, this.prefix)
-    const s = map.setIfUndefined(this.subUpdates, streamName, () => ({ lastReceivedClock: subscriber.lastReceivedClock, subs: /** @type {StreamSubscriber[]} */ ([]) }))
-    s.subs.push(subscriber)
+    const s = map.setIfUndefined(this.subUpdates, streamName, () => ({ lastReceivedClock: subscriber.lastReceivedClock, subs: /** @type {Set<StreamSubscriber>} */ (new Set()) }))
+    s.lastReceivedClock = minRedisClock(s.lastReceivedClock, subscriber.lastReceivedClock)
+    s.subs.add(subscriber)
     this._runSub()
+  }
+
+  /**
+   * @param {t.Room} room
+   * @param {StreamSubscriber} subscriber
+   */
+  unsubscribe (room, subscriber) {
+    const streamName = encodeRoomName(room, this.prefix)
+    const subUpdates = this.subUpdates.get(streamName)
+    const subs = this.subs.get(streamName)
+    subUpdates?.subs.delete(subscriber)
+    subs?.subs.delete(subscriber)
+    if (subUpdates?.subs.size === 0) {
+      this.subUpdates.delete(streamName)
+    }
+    if (subs?.subs.size === 0) {
+      this.subs.delete(streamName)
+    }
   }
 
   /**
@@ -286,11 +307,14 @@ export class YHubStream {
   }
 
   /**
+   * Trim messages with minId. Also ensure that we only trim messages that are older than maxAgeMs.
+   *
    * @param {t.Room} room
+   * @param {string} minId
    * @param {number} maxAgeMs
    * @param {string?} taskid
    */
-  async trimMessages (room, maxAgeMs, taskid) {
-    await this.redis.trimMessages(encodeRoomName(room, this.prefix), maxAgeMs, taskid || '')
+  async trimMessages (room, minId, maxAgeMs, taskid) {
+    await this.redis.trimMessages(encodeRoomName(room, this.prefix), minId, maxAgeMs, taskid || '')
   }
 }

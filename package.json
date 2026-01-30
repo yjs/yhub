@@ -39,17 +39,9 @@
       "default": "./src/index.js",
       "types": "./dist/src/index.d.ts"
     },
-    "./storage/memory": {
-      "default": "./src/storage/memory.js",
-      "types": "./dist/src/storage/memory.d.ts"
-    },
-    "./storage/s3": {
-      "default": "./src/storage/s3.js",
+    "./plugins/s3": {
+      "default": "./src/plugins/s3.js",
       "types": "./dist/src/storage/s3.d.ts"
-    },
-    "./storage/postgres": {
-      "default": "./src/storage/postgres.js",
-      "types": "./dist/src/storage/postgres.d.ts"
     }
   },
   "repository": {

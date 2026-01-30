@@ -3,7 +3,6 @@ import postgres from 'postgres'
 import * as s from 'lib0/schema'
 import * as buffer from 'lib0/buffer'
 import * as promise from 'lib0/promise'
-import * as config from './config.js'
 import * as t from './types.js'
 import * as map from 'lib0/map'
 import * as set from 'lib0/set'
@@ -13,7 +12,7 @@ import * as object from 'lib0/object'
 
 /**
  * @param {string} postgresUrl - postgres://username:password@host:port/database
- * @param {config.PersistencePlugin[]} plugins
+ * @param {t.PersistencePlugin[]} plugins
  */
 export const createPersistence = async (postgresUrl, plugins) => {
   // If a specific database is requested, ensure it exists
@@ -28,7 +27,7 @@ export const createPersistence = async (postgresUrl, plugins) => {
 
 /**
  * @template {t.Asset} ASSET
- * @param {config.PersistencePlugin[]} plugins
+ * @param {t.PersistencePlugin[]} plugins
  * @param {t.AssetId} assetId
  * @param {ASSET} asset
  * @return {Promise<ASSET | t.RetrievableAsset>}
@@ -45,7 +44,7 @@ const tryPersistencePluginStore = async (plugins, assetId, asset) => {
 
 /**
  * @template {t.Asset} ASSET
- * @param {config.PersistencePlugin[]} plugins
+ * @param {t.PersistencePlugin[]} plugins
  * @param {t.AssetId} assetId
  * @param {ASSET} asset
  * @return {Promise<Exclude<ASSET,t.RetrievableAsset>>}
@@ -63,7 +62,7 @@ const tryPersistencePluginRetrieve = async (plugins, assetId, asset) => {
 }
 
 /**
- * @param {config.PersistencePlugin[]} plugins
+ * @param {t.PersistencePlugin[]} plugins
  * @param {t.AssetId} assetId
  * @param {t.Asset} asset
  */
@@ -83,12 +82,12 @@ const tryPersistencePluginDelete = (plugins, assetId, asset) => {
 export class Persistence {
   /**
    * @param {postgres.Sql} sql
-   * @param {config.PersistencePlugin[]} plugins
+   * @param {t.PersistencePlugin[]} plugins
    */
   constructor (sql, plugins) {
     this.sql = sql
     /**
-     * @type {config.PersistencePlugin[]}
+     * @type {t.PersistencePlugin[]}
      */
     this.plugins = plugins
   }

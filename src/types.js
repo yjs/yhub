@@ -1,7 +1,5 @@
 import * as Y from '@y/y'
 import * as s from 'lib0/schema'
-import * as buffer from 'lib0/buffer'
-import { Client as S3Client } from 'minio'
 
 export const $accessType = s.$union(s.$literal('r'), s.$literal('rw') , s.$null)
 
@@ -200,7 +198,7 @@ export const $task = $compactTask
 
 /**
  * @typedef {object} PersistencePlugin
- * @property {null|((api: import('./hub.js').YHub)=>Promise<any>?)} [PersistPlugin.init]
+ * @property {null|((api: import('./index.js').YHub)=>Promise<any>?)} [PersistPlugin.init]
  * @property {null|((assetId: AssetId, asset: Asset)=>Promise<RetrievableAsset?>)} [PersistPlugin.store]
  * @property {null|((assetId: AssetId, assetInfo: Asset)=>Promise<Asset?>)} [PersistPlugin.retrieve]
  * @property {null|((assetId: AssetId, assetInfo: Asset)=>Promise<boolean>)} [PersistPlugin.delete]
@@ -218,7 +216,7 @@ export const $persistencePlugin = s.$object({
 /**
  * @type {s.Schema<AuthPlugin<any>>}
  */
-export const authPlugin = s.$({
+export const $authPlugin = s.$({
   readAuthInfo: /** @type {any} */ (s.$function),
   getAccessType: /** @type {any} */ (s.$function)
 })
@@ -240,7 +238,7 @@ export const authPlugin = s.$({
  */
 export const createAuthPlugin = authDef => authDef 
 
-export const $config = s.$({
+export const $config = s.$object({
   redis: s.$object({
     url: s.$string,
     prefix: s.$string,
@@ -257,105 +255,19 @@ export const $config = s.$({
   persistence: s.$array($persistencePlugin),
   events: s.$object({
     docUpdate: s.$lambda(s.$any, s.$instanceOf(Y.Doc), s.$instanceOf(Y.Attributions), s.$undefined),
-  }),
-  worker: s.$({
+  }).optional,
+  worker: s.$object({
     taskConcurrency: s.$number,
-    events: {
-      docUpdate: /** @type {s.Schema<(doctable:DocTable<{ gc: true, nongc: true, contentmap: true, contentids: true }>) => void>} */ (s.$function)
-    }
+    events: s.$object({
+      docUpdate: /** @type {s.$Optional<s.Schema<(doctable:DocTable<{ gc: true, nongc: true, contentmap: true, contentids: true }>) => void>>} */ (s.$function.optional)
+    }).optional
   }).nullable.optional,
   server: s.$({ 
     port: s.$number,
-    authPlugin: authPlugin 
+    authPlugin: $authPlugin 
   }).nullable.optional
 })
 
 /**
  * @typedef {s.Unwrap<typeof $config>} YHubConfig
  */
-
-/**
- * @typedef {{ bucket: string, endPoint: string, port: number, useSSL: boolean, accessKey: string, secretKey: string }} S3Conf
- */
-
-/**
- * @implements {PersistencePlugin}
- */
-export class S3PersistenceV1 {
-  /**
-   * @param {S3Conf} s3conf
-   */
-  constructor (s3conf) {
-    this.bucket = s3conf.bucket
-    this.s3client = new S3Client(s3conf)
-  }
-
-  get pluginid () {
-    return 'S3Persistence:v1'
-  }
-
-  async init () {
-    console.log(`[init ${this.pluginid}] Checking if S3 bucket '${this.bucket}' exists...`)
-    const exists = await this.s3client.bucketExists(this.bucket)
-    if (!exists) {
-      console.log(`[init ${this.pluginid}] Creating S3 bucket '${this.bucket}'...`)
-      await this.s3client.makeBucket(this.bucket)
-      console.log(`[init ${this.pluginid}] ✓ S3 bucket '${this.bucket}' created`)
-    } else {
-      console.log(`[init ${this.pluginid}] ✓ S3 bucket '${this.bucket}' already exists`)
-    }
-  }
-
-  /**
-   * @param {AssetId} assetId
-   * @param {Asset} asset
-   * @return {Promise<RetrievableAsset?>}
-   */
-  async store (assetId, asset) {
-    if (assetId.branch === 'main') {
-      const path = assetIdToString(assetId)
-      const file = buffer.encodeAny(asset)
-      await this.s3client.putObject(this.bucket, path, Buffer.from(file))
-      return {
-        type: 'asset:retrievable:v1',
-        plugin: this.pluginid
-      }
-    }
-    return null
-  }
-
-  /**
-   * @param {AssetId} assetId
-   * @param {Asset} assetInfo
-   * @return {Promise<Asset?>}
-   */
-  async retrieve (assetId, assetInfo) {
-    if (assetInfo.type === 'asset:retrievable:v1' && assetInfo.plugin === this.pluginid) {
-      const path = assetIdToString(assetId)
-      const stream = await this.s3client.getObject(this.bucket, path)
-      const chunks = []
-      for await (const chunk of stream) {
-        chunks.push(chunk)
-      }
-      const data = Buffer.concat(chunks)
-      const decoded = $asset.expect(buffer.decodeAny(data))
-      return decoded
-    }
-    return null
-  }
-
-  /**
-   * @param {AssetId} assetId
-   * @param {Asset} assetInfo
-   * @return {Promise<boolean>}
-   */
-  async delete (assetId, assetInfo) {
-    if (assetInfo.type !== 'asset:retrievable:v1' || assetInfo.plugin !== this.pluginid) {
-      return false
-    }
-    const path = assetIdToString(assetId)
-    await this.s3client.removeObject(this.bucket, path)
-    return true
-  }
-}
-

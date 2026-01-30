@@ -8,16 +8,15 @@ import * as Y from '@y/y'
 import * as s from 'lib0/schema'
 import * as time from 'lib0/time'
 import * as number from 'lib0/number'
-import * as yhub from './hub.js'
 import * as t from './types.js'
 import * as protocol from './protocol.js'
 import * as array from 'lib0/array'
 
 const log = logging.createModuleLogger('@y/hub/ws')
 
-class YHubServer {
+export class YHubServer {
   /**
-   * @param {import('./hub.js').YHub} yhub
+   * @param {import('./index.js').YHub} yhub
    * @param {t.YHubConfig} conf
    * @param {uws.TemplatedApp} app
    */
@@ -33,7 +32,7 @@ class YHubServer {
 }
 
 /**
- * @param {import('./hub.js').YHub} yhub
+ * @param {import('./index.js').YHub} yhub
  * @param {t.YHubConfig} conf
  */
 export const createYHubServer = async (yhub, conf) => {
@@ -342,7 +341,7 @@ let _idCnt = 0
  */
 class WSUser {
   /**
-   * @param {yhub.YHub} yhub
+   * @param {import('./index.js').YHub} yhub
    * @param {uws.WebSocket<WSUser>|null} ws
    * @param {t.Room} room
    * @param {boolean} hasWriteAccess
@@ -417,7 +416,7 @@ class WSUser {
 /**
  * @param {uws.HttpRequest} req
  */
-export const reqToRoom = req => {
+const reqToRoom = req => {
   const org = /** @type {string} */ (req.getParameter(0))
   const docid = /** @type {string} */ (req.getParameter(1))
   const branch = /** @type {string} */ (req.getQuery('branch')) ?? 'main'
@@ -425,10 +424,10 @@ export const reqToRoom = req => {
 }
 
 /**
- * @param {yhub.YHub} yhub
+ * @param {import('./index.js').YHub} yhub
  * @param {uws.TemplatedApp} app
  */
-export const registerWebsocketServer = (yhub, app) => {
+const registerWebsocketServer = (yhub, app) => {
   app.ws('/ws/:org/:docid', /** @type {uws.WebSocketBehavior<WSUser>} */ ({
     compression: uws.SHARED_COMPRESSOR,
     maxPayloadLength: 100 * 1024 * 1024,

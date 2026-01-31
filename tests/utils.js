@@ -21,7 +21,7 @@ const tableExists = await sql`
   );
 `
 if (tableExists?.[0]?.exists) {
-  await sql`DELETE from yhub_updates_v1`
+  await sql`DELETE from yhub_ydoc_v1`
 }
 
 const yhubPort = number.parseInt(env.getConf('port') || '9999')
@@ -60,10 +60,11 @@ export const yhub = await createYHub({
 })
 {
   const redis = yhub.stream.redis
-  const redisKeys = await redis.keys('yhub:testing:*')
+  const redisKeys = await redis.keys('yhub:testing:room:*')
   if (redisKeys.length > 0) {
     await redis.del(redisKeys)
   }
+  redis.xTrim(yhub.stream.workerStreamName, 'MAXLEN', 0)
 }
 
 /**
@@ -101,6 +102,10 @@ const createWsClient = (tc, { docid = 'index', branch = 'main', gc = true, syncA
   const guid = testPrefix + '-' + docid
   const ydoc = new Y.Doc({ gc, guid })
   const provider = new WebsocketProvider(_wsUrl, guid, ydoc, { WebSocketPolyfill: /** @type {any} */ (WebSocket), disableBc: true, params: { branch, gc: gc.toString(), ...wsParams } })
+  // @todo this should be part of @y/websocket
+  provider.once('sync', () => {
+    ydoc.emit('sync', [true, ydoc])
+  })
   if (!syncAwareness) {
     provider.awareness.destroy()
   }
@@ -114,14 +119,13 @@ const createWsClient = (tc, { docid = 'index', branch = 'main', gc = true, syncA
  * @param {t.TestCase} tc
  */
 export const createTestCase = async tc => {
-  const org = 'testorg'
-  const defaultRoom = { org, docid: tc.testName + '-index', branch: 'main' }
+  const defaultRoom = { org: defaultOrg, docid: tc.testName + '-index', branch: 'main' }
   return {
     // this must match with the default values in createWsClient
     defaultRoom,
     defaultStream: encodeRoomName(defaultRoom, yhub.stream.prefix),
     yhub,
-    org,
+    org: defaultOrg,
     /**
      * @template {boolean} [WaitForSync=false]
      * @param {object} [params]

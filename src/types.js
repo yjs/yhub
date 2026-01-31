@@ -209,9 +209,9 @@ export const $task = $compactTask
  * @type {s.Schema<PersistencePlugin>}
  */
 export const $persistencePlugin = s.$object({
-  init: s.$lambda(s.$any, s.$any),
-  store: s.$lambda(s.$any).nullable.optional,
-  retrieve: s.$lambda(s.$any).nullable.optional
+  init: /** @type {s.Schema<()=>any>} */ (s.$function),
+  store: /** @type {s.Schema<()=>any>} */ (s.$function).nullable.optional,
+  retrieve: /** @type {s.Schema<()=>any>} */ (s.$function).nullable.optional
 })
 
 export const $authPlugin = /** @type {s.Schema<AuthPlugin<any>>} */ (s.$object({

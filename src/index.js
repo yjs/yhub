@@ -44,6 +44,7 @@ export class YHub {
             // execute compact task
             const d = await this.getDoc(task.room, { gc: true, nongc: true, contentmap: true, contentids: true, references: true })
             if (!strm.isSmallerRedisClock(d.lastPersistedClock, d.lastClock)) {
+              await this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
               return null
             }
             this.conf.worker?.events?.docUpdate?.(object.assign({}, d, { references: null }))
@@ -59,6 +60,7 @@ export class YHub {
         }
       } catch (err) {
         console.error('[yhub-worker] error processing task: ', err)
+        await promise.wait(3000)
       }
     }
   }
@@ -97,8 +99,8 @@ export class YHub {
     return {
       gcDoc: /** @type {Include['gc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (gcDoc ? mergeUpdatesAndGc(gcDoc) : null),
       nongcDoc: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (nongcDoc ? Y.mergeUpdates(nongcDoc) : null),
-      contentmap: /** @type {Include['contentmap'] extends true ? Uint8Array<ArrayBuffer> : null} */ (contentmap ? Y.mergeContentMaps(contentmap.map(Y.decodeContentMap)) : null),
-      contentids: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (contentids ? Y.mergeContentIds(contentids.map(Y.decodeContentIds)) : null),
+      contentmap: /** @type {Include['contentmap'] extends true ? Uint8Array<ArrayBuffer> : null} */ (contentmap ? Y.encodeContentMap(Y.mergeContentMaps(contentmap.map(Y.decodeContentMap))) : null),
+      contentids: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (contentids ? Y.encodeContentIds(Y.mergeContentIds(contentids.map(Y.decodeContentIds))) : null),
       lastClock,
       lastPersistedClock: persistedDoc.lastClock,
       references,
@@ -124,11 +126,15 @@ const mergeUpdatesAndGc = updates => {
  */
 export const createYHub = async conf => {
   t.$config.expect(conf)
-  const stream = new strm.Stream(conf)
+  const stream = await strm.createStream(conf)
   const pers = await p.createPersistence(conf.postgres, conf.persistence)
   const yhub = new YHub(conf, stream, pers)
+  await promise.all(conf.persistence.map(p => p.init?.(yhub)))
   if (conf.server != null) {
     yhub.server = /** @type {any} */ (await server.createYHubServer(yhub, conf))
   }
+  yhub.startWorker()
+  // @todo start workers _after_ persistence plugin is done. Otherwise, workers might use
+  // persistence.
   return yhub
 }

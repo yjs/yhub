@@ -8,6 +8,10 @@ import * as promise from 'lib0/promise'
 import * as buffer from 'lib0/buffer'
 import * as array from 'lib0/array'
 import * as map from 'lib0/map'
+import * as math from 'lib0/math'
+import * as logging from 'lib0/logging'
+
+const log = logging.createModuleLogger('@y/hub/stream')
 
 /**
  * @typedef {object} StreamSubscriber
@@ -93,16 +97,31 @@ export class Stream {
      * @type {Map<string, { lastReceivedClock: string, subs: Set<StreamSubscriber> }>}
      */
     this.subUpdates = new Map()
-    this.redis = redis.createClient({
+    this.redisClientConf = {
       url: config.redis.url,
+      socket: {
+        /**
+         * @param {number} retries
+         */
+        reconnectStrategy: retries => {
+          if (retries > 1000) {
+            console.error('Unable to connect to redis, max attempts reached, closing yhub')
+            process.exit(1)
+          }
+          return math.min(retries * 10, 3000)
+        }
+      },
+    }
+    this.redis = redis.createClient({
+      ...this.redisClientConf,
       // scripting: https://github.com/redis/node-redis/#lua-scripts
       scripts: {
         addMessage: redis.defineScript({
           NUMBER_OF_KEYS: 1,
           SCRIPT: `
             if redis.call("EXISTS", KEYS[1]) == 0 then
-              local id = redis.call("XADD", "${this.workerStreamName}", "*", "compact", KEYS[1])
-              redis.call("XCLAIM", "${this.workerStreamName}", "${this.workerGroupName}", "pending", 0, id)
+              redis.call("XADD", "${this.workerStreamName}", "*", "compact", KEYS[1])
+              redis.call("XREADGROUP", "GROUP", "${this.workerGroupName}", "pending", "COUNT", 1, "STREAMS", "${this.workerStreamName}", ">")
             end
             redis.call("XADD", KEYS[1], "*", "m", ARGV[1])
           `,
@@ -111,6 +130,7 @@ export class Stream {
            * @param {Buffer} message
            */
           transformArguments (key, message) {
+            log('adding message ', { key, message })
             return [key, message]
           },
           /**
@@ -123,24 +143,30 @@ export class Stream {
         trimMessages: redis.defineScript({
           NUMBER_OF_KEYS: 1,
           SCRIPT: `
+            local function incStreamId(id)
+              local ts, seq = string.match(id, "^(%d+)-?(%d*)$")
+              if seq == "" then seq = "0" end
+              return ts .. "-" .. (tonumber(seq) + 1)
+            end
             redis.call("XDEL", "${this.workerStreamName}", ARGV[3])
             local minidLifetime = (redis.call("TIME")[1] * 1000) - tonumber(ARGV[2])
             local minid = ARGV[1]
-            if minid ~= "" and tonumber(minid) < minidLifetime then
-              minidLifetime = tonumber(minid)
+            local minidTs = tonumber(string.match(minid, "^(%d+)"))
+            if minidTs < minidLifetime then
+              minidLifetime = incStreamId(minid)
             end
             redis.call("XTRIM", KEYS[1], "MINID", minidLifetime)
             if redis.call("XLEN", KEYS[1]) == 0 then
               redis.call("DEL", KEYS[1])
             else
-              local id = redis.call("XADD", "${this.workerStreamName}", "*", "compact", KEYS[1])
-              redis.call("XCLAIM", "${this.workerStreamName}", "${this.workerGroupName}", "pending", 0, id)
+              redis.call("XADD", "${this.workerStreamName}", "*", "compact", KEYS[1])
+              redis.call("XREADGROUP", "GROUP", "${this.workerGroupName}", "pending", "COUNT", 1, "STREAMS", "${this.workerStreamName}", ">")
             end
           `,
           /**
            * @param {string} streamName
            * @param {string} minId
-           * @param {number} maxAgeMs
+           * @param {number} maxAgeMs - in milliseconds
            * @param {string} taskId
            */
           transformArguments (streamName, minId, maxAgeMs, taskId) {
@@ -168,7 +194,8 @@ export class Stream {
     if (!this._subRunning) {
       this._subRunning = true
       if (this.redisSubscriptions === null) {
-        this.redisSubscriptions = redis.createClient({ url: this.redisConfig.url })
+        this.redisSubscriptions = redis.createClient(this.redisClientConf)
+        await this.redisSubscriptions.connect()
       }
       while (this.subs.size > 0 || this.subUpdates.size > 0) {
         // update subs
@@ -203,6 +230,7 @@ export class Stream {
           }
         } catch (e) {
           console.error(e)
+          await promise.wait(3000)
         }
       }
       this._subRunning = false
@@ -222,6 +250,7 @@ export class Stream {
       return []
     }
     const streams = rooms.map(asset => ({ key: s.$string.check(asset.room) ? asset.room : encodeRoomName(asset.room, this.prefix), id: asset.clock || '0' }))
+    log('retrieving messages: ', streams)
     const reads = await redisClient.xRead(
       redis.commandOptions({ returnBuffers: true }),
       streams,
@@ -239,11 +268,12 @@ export class Stream {
         lastClock: array.last(stream.messages).id.toString(),
         messages: stream.messages.filter(m => m.message.m != null).map(message => {
           const dm = buffer.decodeAny(/** @type {Uint8Array<ArrayBuffer>} */ (message.message.m))
-          dm.redisClock = message.id
+          dm.redisClock = message.id.toString()
           return dm
         })
       })
     })
+    log('retrieved messages: ', res)
     return res
   }
 
@@ -261,6 +291,7 @@ export class Stream {
    */
   subscribe (room, subscriber) {
     const streamName = encodeRoomName(room, this.prefix)
+    log('subscribing: ', { room, streamName })
     const s = map.setIfUndefined(this.subUpdates, streamName, () => ({ lastReceivedClock: subscriber.lastReceivedClock, subs: /** @type {Set<StreamSubscriber>} */ (new Set()) }))
     s.lastReceivedClock = minRedisClock(s.lastReceivedClock, subscriber.lastReceivedClock)
     s.subs.add(subscriber)
@@ -317,4 +348,24 @@ export class Stream {
   async trimMessages (room, minId, maxAgeMs, taskid) {
     await this.redis.trimMessages(encodeRoomName(room, this.prefix), minId, maxAgeMs, taskid || '')
   }
+}
+
+/**
+ * @param {import('./types.js').YHubConfig} config
+ */
+export const createStream = async config => {
+  const ystream = new Stream(config)
+  await ystream.redis.connect()
+  // Initialize worker stream and consumer group if they don't exist
+  try {
+    await ystream.redis.xGroupCreate(ystream.workerStreamName, ystream.workerGroupName, '0', { MKSTREAM: true })
+  } catch (e) {
+    // BUSYGROUP means the group already exists, which is fine
+    if (/** @type {any} */ (e).message?.includes('BUSYGROUP')) {
+      // ignore
+    } else {
+      throw e
+    }
+  }
+  return ystream
 }

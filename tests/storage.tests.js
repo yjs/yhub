@@ -12,7 +12,7 @@ let currClock = 0
 const storeDoc = (org, docid, ydoc) => {
   const encDoc = Y.encodeStateAsUpdate(ydoc)
   const contentids = Y.createContentIdsFromDoc(ydoc)
-  return yhub.persistence.store({ org, docid, branch: 'main' }, { lastClock: (currClock++) + '', gcDoc: encDoc, nongcDoc: encDoc, contentids: Y.encodeContentIds(contentids), contentmap: Y.encodeContentMap(Y.createContentMapFromContentIds(contentids, [], [])) })
+  return yhub.persistence.store({ org, docid, branch: 'main' }, { lastClock: (++currClock) + '', gcDoc: encDoc, nongcDoc: encDoc, contentids: Y.encodeContentIds(contentids), contentmap: Y.encodeContentMap(Y.createContentMapFromContentIds(contentids, [], [])) })
 }
 
 /**

@@ -160,7 +160,7 @@ export class Persistence {
     const includeNongc = includeContent.nongc === true
     const includeReferences = includeContent.references === true
     /**
-     * @type {Array<{ t: string, gcDoc?: Buffer, nongcDoc?: Buffer, contentmap?: Buffer, contentids?: Buffer }>}
+     * @type {Array<{ t: string, gcdoc?: Buffer, nongcdoc?: Buffer, contentmap?: Buffer, contentids?: Buffer }>}
      */
     const rows = await this.sql`
       SELECT 
@@ -188,15 +188,15 @@ export class Persistence {
       references?.push({ assetId, asset: contentidsAsset })
       return tryPersistencePluginRetrieve(this.plugins, assetId, contentidsAsset)
     }))
-    const gcUpdates = await promise.all(rows.filter(row => row.gcDoc != null).map(row => {
+    const gcUpdates = await promise.all(rows.filter(row => row.gcdoc != null).map(row => {
       const assetId = object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), t: row.t, gc: true }, room)
-      const gcDocAsset = /** @type {s.Unwrap<typeof t.$ydocAsset> | t.RetrievableAsset} */ (buffer.decodeAny(/** @type {Buffer} */ (row.gcDoc)))
+      const gcDocAsset = /** @type {s.Unwrap<typeof t.$ydocAsset> | t.RetrievableAsset} */ (buffer.decodeAny(/** @type {Buffer} */ (row.gcdoc)))
       references?.push({ assetId, asset: gcDocAsset })
       return tryPersistencePluginRetrieve(this.plugins, assetId, gcDocAsset)
     }))
-    const nongcUpdates = await promise.all(rows.filter(row => row.nongcDoc != null).map(row => {
+    const nongcUpdates = await promise.all(rows.filter(row => row.nongcdoc != null).map(row => {
       const assetId = object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), t: row.t, gc: false }, room)
-      const nongcDocAsset = /** @type {s.Unwrap<typeof t.$ydocAsset> | t.RetrievableAsset} */ (buffer.decodeAny(/** @type {Buffer} */ (row.nongcDoc)))
+      const nongcDocAsset = /** @type {s.Unwrap<typeof t.$ydocAsset> | t.RetrievableAsset} */ (buffer.decodeAny(/** @type {Buffer} */ (row.nongcdoc)))
       references?.push({ assetId, asset: nongcDocAsset })
       return tryPersistencePluginRetrieve(this.plugins, assetId, nongcDocAsset)
     }))

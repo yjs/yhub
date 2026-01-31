@@ -16,6 +16,7 @@ async function init (postgresUrl) {
   if (database !== '') {
     // Step 1: Create database if URL includes one
     console.log(`[init-db] Ensuring database '${database}' exists...`)
+    console.log('[init-db] postgres url', postgresUrl)
     // Connect to default 'postgres' database for admin operations
     // Preserve query parameters (like ssl=require) when switching database
     const url = new URL(postgresUrl)

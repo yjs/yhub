@@ -21,6 +21,7 @@ const authHubPort = 9009
  * to hide the auth info from logging tools.
  */
 utils.createTestHub({
+  worker: null,
   server: {
     port: authHubPort,
     auth: types.createAuthPlugin({

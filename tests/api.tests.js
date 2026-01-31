@@ -12,9 +12,13 @@ import * as stream from '../src/stream.js'
  */
 const fetchYhubResponse = async path => {
   const response = await fetch(`http://${utils.yhubHost}${path}`)
-  const data = await response.arrayBuffer()
-  const decoder = decoding.createDecoder(new Uint8Array(data))
-  return decoding.readAny(decoder)
+  if (response.ok) {
+    const data = await response.arrayBuffer()
+    const decoder = decoding.createDecoder(new Uint8Array(data))
+    return decoding.readAny(decoder)
+  } else {
+    throw new Error('Unexpected error reading from the api: ' + await response.text())
+  }
 }
 
 /**
@@ -37,26 +41,30 @@ const postYhubRequest = async (path, body) => {
 /**
  * @param {t.TestCase} tc
  */
-export const testHistoryRestApi = async tc => {
+export const testChangesetRestApi = async tc => {
   const { org, createWsClient } = await utils.createTestCase(tc)
   const { ydoc } = createWsClient()
   ydoc.get().applyDelta(delta.create().insert('hello world')) // change time: 1
+  await promise.wait(100)
   ydoc.get().applyDelta(delta.create().delete(6).retain(5).insert('!')) // change time: 2
+  await promise.wait(100)
   ydoc.get().applyDelta(delta.create().insert('hi ')) // change time: 3
   await promise.wait(3000)
   // fetch timestamps
-  const { timestamps } = await fetchYhubResponse(`/timestamps/${org}/${ydoc.guid}`)
-  console.log('RECEIVED TIMESTAMPS!!', timestamps)
-  t.assert(timestamps.length === 3)
+  const activity = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)
+  console.log('RECEIVED ACTIVITY!!', activity)
+  t.assert(activity.length === 3)
   {
-    const history = await fetchYhubResponse(`/history/${org}/${ydoc.guid}?from=2&to=2&ydoc=true&delta=true&attributions=true`)
-    console.log(history)
-    console.log('prevDoc: ', JSON.stringify(Y.createDocFromUpdate(history.prevDoc).toJSON()))
-    console.log('nextDoc: ', JSON.stringify(Y.createDocFromUpdate(history.nextDoc).toJSON()))
-    console.log('delta: ', JSON.stringify(history.delta))
+    const changeset = await fetchYhubResponse(`/changeset/${org}/${ydoc.guid}?from=${activity[1].from}&to=${activity[1].to}&ydoc=true&delta=true&attributions=true`)
+    console.log(changeset)
+    console.log('prevDoc: ', JSON.stringify(Y.createDocFromUpdate(changeset.prevDoc).toJSON()))
+    console.log('nextDoc: ', JSON.stringify(Y.createDocFromUpdate(changeset.nextDoc).toJSON()))
+    console.log('delta: ', JSON.stringify(changeset.delta))
+    // @ts-ignore
+    t.assert(changeset.delta.children.map(c => c.insert).join('') === 'hello world!')
   }
   { // rollback
-    const rollbackResult = await postYhubRequest(`/rollback/${org}/${ydoc.guid}`, { from: timestamps[1], to: timestamps[1] }) // undo (delete "hello" & insert "!")
+    const rollbackResult = await postYhubRequest(`/rollback/${org}/${ydoc.guid}`, { from: activity[1].from, to: activity[1].to }) // undo (delete "hello" & insert "!")
     console.log(rollbackResult)
     await promise.wait(3000)
     const { ydoc: xdoc } = await createWsClient({ waitForSync: true })
@@ -84,15 +92,21 @@ export const testUpdateApiMessages = async tc => {
  */
 export const testWorker = async tc => {
   const { yhub, createWsClient, org } = await utils.createTestCase(tc)
-  const { ydoc } = createWsClient()
+  debugger
+  const { ydoc, provider } = await createWsClient({ waitForSync: true, syncAwareness: false })
   ydoc.get().setAttr('key1', 'val1')
   ydoc.get().setAttr('key2', 'val2')
+  await promise.wait(1000)
+  provider.destroy()
+  ydoc.destroy()
+  debugger
   let streamexists = true
   const streamName = stream.encodeRoomName({ org, docid: ydoc.guid, branch: 'main' }, yhub.stream.prefix)
   while (streamexists) {
     streamexists = (await yhub.stream.redis.exists(streamName)) === 1
   }
-  const { ydoc: loadedDoc } = await createWsClient({ waitForSync: true })
+  debugger
+  const { ydoc: loadedDoc } = await createWsClient({ waitForSync: true, syncAwareness: false })
   t.assert(loadedDoc.get().getAttr('key1') === 'val1')
   t.assert(loadedDoc.get().getAttr('key2') === 'val2')
   let workertasksEmpty = false

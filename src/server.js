@@ -82,7 +82,8 @@ export const createYHubServer = async (yhub, conf) => {
           const contentIds = contentIdsBin && Y.decodeContentIds(contentIdsBin)
           const { contentmap: contentmapBin, nongcDoc: nongcDocBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
           const contentmap = Y.decodeContentMap(contentmapBin)
-          const ydoc = Y.createDocFromUpdate(nongcDocBin)
+          const ydoc = new Y.Doc({gc: false})
+          Y.applyUpdate(ydoc, nongcDocBin)
           const reducedAttributions = filterContentMapHelper(contentmap, from, to, by, contentIds)
           const revertIds = Y.createContentIdsFromContentMap(reducedAttributions)
           ydoc.once('update', update => {
@@ -151,14 +152,12 @@ export const createYHubServer = async (yhub, conf) => {
       console.log('Request aborted')
     })
     const { nongcDoc: nongcDocBin, contentmap: contentmapBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
-    const ydoc = Y.createDocFromUpdate(nongcDocBin)
     const contentmap = Y.decodeContentMap(contentmapBin)
     const filteredAttributions = filterContentMapHelper(contentmap, from, to, by, undefined)
     const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, from != null ? from - 1 : null, undefined, undefined))
     const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, to, undefined, undefined))
-    const docUpdate = Y.encodeStateAsUpdate(ydoc)
-    const prevDocUpdate = Y.intersectUpdateWithContentIds(docUpdate, beforeContentIds)
-    const nextDocUpdate = Y.intersectUpdateWithContentIds(docUpdate, afterContentIds)
+    const prevDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, beforeContentIds)
+    const nextDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, afterContentIds)
     /**
      * @type {any}
      */
@@ -209,7 +208,6 @@ export const createYHubServer = async (yhub, conf) => {
     })
     const { contentmap: contentmapBin, nongcDoc: nongcDocBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
     const contentmap = Y.decodeContentMap((contentmapBin))
-    const ydoc = Y.createDocFromUpdate(nongcDocBin)
     const filteredAttributions = filterContentMapHelper(contentmap, from, to, undefined, undefined)
     /**
      * @type {Array<{ from: number, to: number, by: string|null }>}
@@ -288,9 +286,8 @@ export const createYHubServer = async (yhub, conf) => {
         const actAttributions = filterContentMapHelper(filteredAttributions, act.from, act.to, undefined, undefined)
         const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, act.from != null ? act.from - 1 : null, undefined, undefined))
         const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, act.to, undefined, undefined))
-        const docUpdate = Y.encodeStateAsUpdate(ydoc)
-        const prevDocUpdate = Y.intersectUpdateWithContentIds(docUpdate, beforeContentIds)
-        const nextDocUpdate = Y.intersectUpdateWithContentIds(docUpdate, afterContentIds)
+        const prevDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, beforeContentIds)
+        const nextDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, afterContentIds)
         const prevDoc = new Y.Doc()
         const nextDoc = new Y.Doc()
         Y.applyUpdate(prevDoc, prevDocUpdate)
@@ -342,7 +339,7 @@ let _idCnt = 0
 class WSUser {
   /**
    * @param {import('./index.js').YHub} yhub
-   * @param {uws.WebSocket<WSUser>|null} ws
+   * @param {uws.WebSocket<{ user: WSUser }>|null} ws
    * @param {t.Room} room
    * @param {boolean} hasWriteAccess
    * @param {{ userid: string }} authInfo
@@ -351,7 +348,7 @@ class WSUser {
   constructor (yhub, ws, room, hasWriteAccess, authInfo, gc) {
     this.yhub = yhub
     /**
-     * @type {uws.WebSocket<WSUser>|null}
+     * @type {uws.WebSocket<{ user: WSUser }>|null}
      */
     this.ws = ws
     this.room = room
@@ -428,7 +425,7 @@ const reqToRoom = req => {
  * @param {uws.TemplatedApp} app
  */
 const registerWebsocketServer = (yhub, app) => {
-  app.ws('/ws/:org/:docid', /** @type {uws.WebSocketBehavior<WSUser>} */ ({
+  app.ws('/ws/:org/:docid', /** @type {uws.WebSocketBehavior<{ user: WSUser }>} */ ({
     compression: uws.SHARED_COMPRESSOR,
     maxPayloadLength: 100 * 1024 * 1024,
     idleTimeout: 60,
@@ -458,7 +455,7 @@ const registerWebsocketServer = (yhub, app) => {
         if (aborted) return
         res.cork(() => {
           res.upgrade(
-            new WSUser(yhub, null, room, t.hasWriteAccess(accessType), authInfo, gc),
+            { user: new WSUser(yhub, null, room, t.hasWriteAccess(accessType), authInfo, gc) },
             headerWsKey,
             headerWsProtocol,
             headerWsExtensions,
@@ -474,14 +471,20 @@ const registerWebsocketServer = (yhub, app) => {
       }
     },
     open: async (ws) => {
-      const user = ws.getUserData()
+      const user = ws.getUserData().user
       log(() => ['client connected (uid=', user.id, ', ip=', Buffer.from(ws.getRemoteAddressAsText()).toString(), ')'])
       const doctable = await yhub.getDoc(user.room, { gc: user.gc, nongc: !user.gc, awareness: true })
       const ydoc = doctable.gcDoc || doctable.nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
       if (user.isClosed) return
       ws.cork(() => {
         ws.send(protocol.encodeSyncStep1(Y.encodeStateVectorFromUpdate(ydoc)), true, false)
-        ws.send(protocol.encodeSyncStep2(ydoc), true, true)
+        if (ws.send(protocol.encodeSyncStep2(ydoc), true, false) !== 1) {
+          // @todo handle backpressure properly
+          log('failed because too much backpressure')
+          debugger
+          ws.end(400)
+        }
+        log('sent syncstep2 to client')
         const aw = doctable.awareness
         if (aw.states.size > 0) {
           ws.send(protocol.encodeAwareness(aw, array.from(aw.states.keys())), true, false)
@@ -491,7 +494,7 @@ const registerWebsocketServer = (yhub, app) => {
       yhub.stream.subscribe(user.room, user)
     },
     message: (ws, messageBuffer) => {
-      const user = ws.getUserData()
+      const user = ws.getUserData().user
       // don't read any messages from users without write access
       if (!user.hasWriteAccess) return
       // It is important to copy the data here
@@ -533,7 +536,7 @@ const registerWebsocketServer = (yhub, app) => {
       }
     },
     close: (ws, code, message) => {
-      const user = ws.getUserData()
+      const user = ws.getUserData().user
       user.awarenessId && yhub.stream.addMessage(user.room, { type: 'awareness:v1', update: protocol.encodeAwarenessUserDisconnected(user.awarenessId, user.awarenessLastClock) })
       user.isClosed = true
       log(() => ['client connection closed (uid=', user.id, ', code=', code, ', message="', Buffer.from(message).toString(), '")'])

@@ -18,6 +18,7 @@
     "@types/express": "^4.17.21",
     "@types/formidable": "^3.4.5",
     "@y/codemirror": "^0.0.0-3",
+    "@y/hub": "file:../..",
     "@y/websocket": "^4.0.0-3",
     "@y/y": "^14.0.0-22",
     "codemirror": "^6.0.1",

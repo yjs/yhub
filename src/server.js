@@ -402,7 +402,7 @@ class WSUser {
     })
     const m = encoding.toUint8Array(encoder)
     if (this.ws == null) console.log('Client tried to send a message, but it isn\'t connected yet')
-    this.ws?.send(m)
+    this.ws?.send(m, true, false)
   }
 
   destroy () {
@@ -472,6 +472,7 @@ const registerWebsocketServer = (yhub, app) => {
     },
     open: async (ws) => {
       const user = ws.getUserData().user
+      user.ws = ws
       log(() => ['client connected (uid=', user.id, ', ip=', Buffer.from(ws.getRemoteAddressAsText()).toString(), ')'])
       const doctable = await yhub.getDoc(user.room, { gc: user.gc, nongc: !user.gc, awareness: true })
       const ydoc = doctable.gcDoc || doctable.nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())

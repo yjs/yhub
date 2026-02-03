@@ -7,6 +7,8 @@ import * as object from 'lib0/object'
 import * as protocol from './protocol.js'
 import * as server from './server.js'
 
+export { createAuthPlugin } from './types.js'
+
 /**
  * @template {t.YHubConfig} [Conf=t.YHubConfig]
  */

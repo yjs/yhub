@@ -241,13 +241,13 @@ export const $config = s.$object({
     url: s.$string,
     prefix: s.$string,
     /**
-     * After this timeout, a worker will pick up a task and clean up a stream. (default: 10 seconds)
+     * After this timeout, a worker will pick up a task and clean up a stream. (default: 60 seconds)
      */
-    taskDebounce: s.$number,
+    taskDebounce: s.$number.optional,
     /**
-     * Minimum lifetime of y* update messages in redis streams. (default: 1 minute)
+     * Minimum lifetime of y* update messages in redis streams. (default: 60 seconds)
      */
-    minMessageLifetime: s.$number
+    minMessageLifetime: s.$number.optional
   }),
   postgres: s.$string,
   persistence: s.$array($persistencePlugin),

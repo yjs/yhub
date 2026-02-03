@@ -29,7 +29,8 @@ export const usercolors = [
 
 export const userColor = usercolors[random.uint32() % usercolors.length]
 
-const roomName = 'codemirror-activity-demo-7'
+const org = 'activity-demo'
+const docid = 'codemirror-activity-demo-7'
 
 /*
  * # Logic for toggling connection & suggestion mode
@@ -112,7 +113,7 @@ elemToggleRenderVersion.addEventListener('change', () => {
   }
 })
 
-const yhubUrl = 'ws://localhost:3002/ws'
+const yhubUrl = 'ws://localhost:3002/ws/' + org
 
 // request an auth token before trying to connect
 const authToken = await fetch(`http://${location.host}/auth/token`).then(request => request.text())
@@ -139,10 +140,10 @@ _updateAuthToken()
  */
 
 const ydoc = new Y.Doc()
-const providerYdoc = new WebsocketProvider(yhubUrl, roomName, ydoc, { params: { yauth: authToken } })
+const providerYdoc = new WebsocketProvider(yhubUrl, docid, ydoc, { params: { yauth: authToken } })
 elemToggleConnect.checked && providerYdoc.connectBc()
 const suggestionDoc = new Y.Doc({ isSuggestionDoc: true })
-const providerYdocSuggestions = new WebsocketProvider(yhubUrl, roomName + '--suggestions', suggestionDoc,  { params: { yauth: authToken, branch: 'suggestions' } })
+const providerYdocSuggestions = new WebsocketProvider(yhubUrl, docid + '--suggestions', suggestionDoc,  { params: { yauth: authToken, branch: 'suggestions' } })
 elemToggleConnect.checked && providerYdocSuggestions.connectBc()
 const attributionManager = Y.createAttributionManagerFromDiff(ydoc, suggestionDoc)
 
@@ -226,7 +227,7 @@ let currentVersionRange = null
  */
 const renderVersions = async (from, to) => {
   try {
-    const response = await fetch(`${yhubApiUrl}/changeset/${roomName}?yauth=${authToken}&from=${from}&to=${to}&ydoc=true&attributions=true`)
+    const response = await fetch(`${yhubApiUrl}/changeset/${org}/${docid}?yauth=${authToken}&from=${from}&to=${to}&ydoc=true&attributions=true`)
     if (response.ok) {
       const arrayBuffer = await response.arrayBuffer()
       const history = buffer.decodeAny(new Uint8Array(arrayBuffer))
@@ -258,7 +259,7 @@ const renderVersions = async (from, to) => {
 const rollback = async () => {
   if (currentVersionRange === null) return
   try {
-    const response = await fetch(`${yhubApiUrl}/rollback/${roomName}?yauth=${authToken}`, {
+    const response = await fetch(`${yhubApiUrl}/rollback/${org}/${docid}?yauth=${authToken}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/octet-stream'
@@ -375,7 +376,7 @@ const renderVersionList = () => {
  */
 const fetchActivity = async () => {
   try {
-    const response = await fetch(`${yhubApiUrl}/activity/${roomName}?yauth=${authToken}&delta=true`)
+    const response = await fetch(`${yhubApiUrl}/activity/${org}/${docid}?yauth=${authToken}&delta=true`)
     if (response.ok) {
       const arrayBuffer = await response.arrayBuffer()
       const data = buffer.decodeAny(new Uint8Array(arrayBuffer))

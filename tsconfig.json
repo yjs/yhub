@@ -21,7 +21,6 @@
     }
   },
   "exclude": [
-    "**/dist",
-    "./demos/"
+    "**/dist"
   ]
 }

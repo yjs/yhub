@@ -74,13 +74,13 @@ export class Stream {
     this.prefix = config.redis.prefix || 'yhub'
     this.consumername = random.uuidv4()
     /**
-     * After this timeout, a worker will pick up a task and clean up a stream.
+     * After this timeout, a worker will pick up a task and clean up a stream. (default: 60 seconds)
      */
-    this.taskDebounce = config.redis.taskDebounce
+    this.taskDebounce = config.redis.taskDebounce ?? 60000
     /**
-     * Minimum lifetime of y* update messages in redis streams.
+     * Minimum lifetime of y* update messages in redis streams. (default: 60 seconds)
      */
-    this.minMessageLifetime = config.redis.minMessageLifetime
+    this.minMessageLifetime = config.redis.minMessageLifetime ?? 60000
     this.workerStreamName = this.prefix + ':worker'
     this.workerGroupName = this.prefix + ':worker'
     this._destroyed = false

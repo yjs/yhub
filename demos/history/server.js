@@ -8,16 +8,11 @@ import * as env from 'lib0/environment'
 import * as fs from 'fs/promises'
 import * as promise from 'lib0/promise'
 import * as random from 'lib0/random'
+import { createYHub, createAuthPlugin } from '@y/hub'
 
 const app = express()
 const port = 5173
-
-// Read the AUTH_PRIVATE_KEY environment variable and import the JWK
-export const authPrivateKey = await ecdsa.importKeyJwk(JSON.parse(env.ensureConf('auth-private-key')))
-// Read the AUTH_PUBLIC_KEY environment variable and import the JWK
-export const authPublicKey = await ecdsa.importKeyJwk(JSON.parse(env.ensureConf('auth-public-key')))
-
-const appName = 'my-express-app'
+const yhubPort = 3002
 
 const userIdChoices = [
   'Calvin Hobbes',
@@ -25,6 +20,39 @@ const userIdChoices = [
   'Dilbert Adams',
   'Garfield'
 ]
+
+const yhub = createYHub({
+  redis: {
+    url: env.ensureConf('redis'),
+    prefix: 'yhub:testing',
+    taskDebounce: 1000,
+    minMessageLifetime: 6000
+  },
+  postgres: env.ensureConf('postgres'),
+  persistence: [
+  ],
+  server: {
+    port: yhubPort,
+    auth: createAuthPlugin({
+      // pick a "unique" userid
+      async readAuthInfo (req) {
+        return { userid: random.oneOf(userIdChoices) }
+      },
+      // always grant rw access
+      async getAccessType () { return 'rw' }
+    })
+  },
+  worker: {
+    taskConcurrency: 5
+  }
+})
+
+// Read the AUTH_PRIVATE_KEY environment variable and import the JWK
+export const authPrivateKey = await ecdsa.importKeyJwk(JSON.parse(env.ensureConf('auth-private-key')))
+// Read the AUTH_PUBLIC_KEY environment variable and import the JWK
+export const authPublicKey = await ecdsa.importKeyJwk(JSON.parse(env.ensureConf('auth-public-key')))
+
+const appName = 'my-express-app'
 
 // This endpoint is called in regular intervals when the document changes.
 // The request contains a multi-part formdata field that can be read, for example, with formidable:

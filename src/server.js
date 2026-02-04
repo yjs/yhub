@@ -465,7 +465,7 @@ const registerWebsocketServer = (yhub, app) => {
           )
         })
       } catch (err) {
-        console.log(`Failed to auth to endpoint ${url}`, err)
+        log(`User failed to auth to endpoint ${url}`, err)
         if (aborted) return
         res.cork(() => {
           res.writeStatus('401 Unauthorized').end('Unauthorized')
@@ -484,7 +484,6 @@ const registerWebsocketServer = (yhub, app) => {
         if (ws.send(protocol.encodeSyncStep2(ydoc), true, false) !== 1) {
           // @todo handle backpressure properly
           log('failed because too much backpressure')
-          debugger
           ws.end(400)
         }
         log('sent syncstep2 to client')

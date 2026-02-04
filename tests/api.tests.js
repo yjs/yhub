@@ -92,20 +92,17 @@ export const testUpdateApiMessages = async tc => {
  */
 export const testWorker = async tc => {
   const { yhub, createWsClient, org } = await utils.createTestCase(tc)
-  debugger
   const { ydoc, provider } = await createWsClient({ waitForSync: true, syncAwareness: false })
   ydoc.get().setAttr('key1', 'val1')
   ydoc.get().setAttr('key2', 'val2')
   await promise.wait(1000)
   provider.destroy()
   ydoc.destroy()
-  debugger
   let streamexists = true
   const streamName = stream.encodeRoomName({ org, docid: ydoc.guid, branch: 'main' }, yhub.stream.prefix)
   while (streamexists) {
     streamexists = (await yhub.stream.redis.exists(streamName)) === 1
   }
-  debugger
   const { ydoc: loadedDoc } = await createWsClient({ waitForSync: true, syncAwareness: false })
   t.assert(loadedDoc.get().getAttr('key1') === 'val1')
   t.assert(loadedDoc.get().getAttr('key2') === 'val2')

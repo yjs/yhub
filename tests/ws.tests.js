@@ -42,7 +42,6 @@ export const testSyncAndCleanup = async tc => {
   t.info('docs synced (3)')
   t.assert(doc3.get().getAttr('a') === 1)
   const { references } = await yhub.getDoc(defaultRoom, { references: true, gc: true })
-  debugger
   t.assert(references.length === 1)
   t.info('doc retrieved')
   // now write another updates that the worker will collect

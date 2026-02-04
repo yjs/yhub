@@ -219,8 +219,8 @@ export class Stream {
                 if (filteredMessages.length > 0) {
                   s.lastReceivedClock = m.lastClock
                   nsubCounter++
+                  s.onStreamMessage(m.room, filteredMessages)
                 }
-                s.onStreamMessage(m.room, filteredMessages)
               })
               sub.lastReceivedClock = m.lastClock
             }

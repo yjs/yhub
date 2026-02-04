@@ -38,34 +38,3 @@ utils.createTestHub({
     })
   }
 })
-
-/**
- * This is a function the server would use to create a jwt. Note that the private key must be kept
- * private. The authenticated client should only know about the jwt.
- */
-const createJwtAccessToken = async () => {
-  const token = await jwt.encodeJwt(authPrivateKey, {
-    iss: 'yhub-demo',
-    exp: time.getUnixTime() + 60 * 60 * 1000, // token expires in one hour
-    yuserid: 'testUser' // associate the client with a unique id that can will be used to check permissions
-  })
-  return token
-}
-
-/**
- * @param {t.TestCase} tc
- */
-export const testSampleAuthServer = async tc => {
-  const myAuthToken = await createJwtAccessToken()
-  const { createWsClient } = await utils.createTestCase(tc)
-  const { ydoc: ydoc0 } = await createWsClient({ waitForSync: true })
-  ydoc0.get().setAttr('a', 42)
-  await promise.wait(500)
-  const { ydoc: ydoc1 } = await createWsClient({ wsUrl: utils.wsUrlFromPort(authHubPort), waitForSync: true, wsParams: { auth: myAuthToken } })
-  t.assert(ydoc1.get().getAttr('a') === 42)
-  await t.groupAsync('should not sync if unauthenticated', async () => {
-    const { ydoc: ydocUnauthenticated } = createWsClient({ wsUrl: utils.wsUrlFromPort(authHubPort) })
-    await promise.wait(1000)
-    t.assert(ydocUnauthenticated.get().getAttr('a') == null)
-  })
-}

@@ -384,25 +384,27 @@ class WSUser {
    * @param {Array<t.Message>} ms
    */
   onStreamMessage (_room, ms) {
-    const encoder = encoding.createEncoder()
-    ms.forEach(message => {
-      switch (message.type) {
-        case 'ydoc:update:v1': {
-          protocol.writeSyncUpdate(encoder, message.update)
-          break
+    if (ms.length > 0) {
+      const encoder = encoding.createEncoder()
+      ms.forEach(message => {
+        switch (message.type) {
+          case 'ydoc:update:v1': {
+            protocol.writeSyncUpdate(encoder, message.update)
+            break
+          }
+          case 'awareness:v1': {
+            protocol.writeAwarenessUpdate(encoder, message.update)
+            break
+          }
+          default: {
+            s.$never.expect(message)
+          }
         }
-        case 'awareness:v1': {
-          protocol.writeAwarenessUpdate(encoder, message.update)
-          break
-        }
-        default: {
-          s.$never.expect(message)
-        }
-      }
-    })
-    const m = encoding.toUint8Array(encoder)
-    if (this.ws == null) console.log('Client tried to send a message, but it isn\'t connected yet')
-    this.ws?.send(m, true, false)
+      })
+      const m = encoding.toUint8Array(encoder)
+      if (this.ws == null) console.log('Client tried to send a message, but it isn\'t connected yet')
+      this.ws?.send(m, true, false)
+    }
   }
 
   destroy () {

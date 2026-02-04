@@ -40,7 +40,8 @@ export class YHub {
     while (ctx.shouldRun) {
       try {
         const tasks = await this.stream.claimTasks(this.conf.worker.taskConcurrency)
-        tasks.length && console.info('[yhub-worker] picked up ' + tasks.length + ' tasks. Working on it..')
+        tasks.length && console.info('[yhub-worker] picked up ' + tasks.length + ' tasks. Working on it..', tasks)
+        if (tasks.length) { debugger }
         await promise.all(tasks.map(async task => {
           if (task.type === 'compact') {
             // execute compact task

@@ -102,6 +102,8 @@ const createWsClient = (tc, { docid = 'index', branch = 'main', gc = true, syncA
   const guid = testPrefix + '-' + docid
   const ydoc = new Y.Doc({ gc, guid })
   const provider = new WebsocketProvider(_wsUrl, guid, ydoc, { WebSocketPolyfill: /** @type {any} */ (WebSocket), disableBc: true, params: { branch, gc: gc.toString(), ...wsParams } })
+  previousClients.push(ydoc)
+  previousClients.push(provider)
   // @todo this should be part of @y/websocket
   provider.once('sync', () => {
     ydoc.emit('sync', [true, ydoc])
@@ -116,10 +118,17 @@ const createWsClient = (tc, { docid = 'index', branch = 'main', gc = true, syncA
 }
 
 /**
+ * @type {Array<{destroy: () => any}>}
+ */
+const previousClients = []
+
+/**
  * @param {t.TestCase} tc
  */
 export const createTestCase = async tc => {
   const defaultRoom = { org: defaultOrg, docid: tc.testName + '-index', branch: 'main' }
+  previousClients.forEach(client => client.destroy())
+  previousClients.length = 0
   return {
     // this must match with the default values in createWsClient
     defaultRoom,

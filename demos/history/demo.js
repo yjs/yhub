@@ -264,7 +264,7 @@ const rollback = async () => {
       headers: {
         'Content-Type': 'application/octet-stream'
       },
-      body: buffer.encodeAny({ from: currentVersionRange.from, to: currentVersionRange.to })
+      body: Buffer.from(buffer.encodeAny({ from: currentVersionRange.from, to: currentVersionRange.to }))
     })
     if (response.ok) {
       console.log('Rollback successful')
@@ -282,7 +282,7 @@ const rollback = async () => {
 elemRollbackBtn.addEventListener('click', rollback)
 
 /**
- * @type {Array<{ from: number, to: number, by: string }>}
+ * @type {Array<{ from: number, to: number, by: string, delta: delta.DeltaAny }>}
  */
 let activity = []
 

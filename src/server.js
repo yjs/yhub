@@ -82,7 +82,7 @@ export const createYHubServer = async (yhub, conf) => {
           const contentIds = contentIdsBin && Y.decodeContentIds(contentIdsBin)
           const { contentmap: contentmapBin, nongcDoc: nongcDocBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
           const contentmap = Y.decodeContentMap(contentmapBin)
-          const ydoc = new Y.Doc({gc: false})
+          const ydoc = new Y.Doc({ gc: false })
           Y.applyUpdate(ydoc, nongcDocBin)
           const reducedAttributions = filterContentMapHelper(contentmap, from, to, by, contentIds)
           const revertIds = Y.createContentIdsFromContentMap(reducedAttributions)

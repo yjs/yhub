@@ -110,7 +110,7 @@ export class Stream {
           }
           return math.min(retries * 10, 3000)
         }
-      },
+      }
     }
     this.redis = redis.createClient({
       ...this.redisClientConf,

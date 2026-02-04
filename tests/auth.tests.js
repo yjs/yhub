@@ -8,7 +8,7 @@ import * as f from 'lib0/function'
 import * as time from 'lib0/time'
 import * as promise from 'lib0/promise'
 
-const authPrivateKey = await ecdsa.importKeyJwk({"key_ops":["sign"],"ext":true,"kty":"EC","x":"96pShK8Z3iJ8UZpN4tuyv9CuPuzwWgC_I72N6ZUNWOSBDflVxwYPtL3PcCgCF2aE","y":"Q39u2jtATgoBd9D8Tx744v6KljwE3iOZr30Rf8yuVT3UgGEi0bcKufUGVSeKls8s","crv":"P-384","d":"BS_hqq6UMpuqS10oIWzEyTUt7RRQrysUMUdlwUyVimV_CTTNEpxXFW9_D0NA9rHt"})
+const authPrivateKey = await ecdsa.importKeyJwk({ key_ops: ['sign'], ext: true, kty: 'EC', x: '96pShK8Z3iJ8UZpN4tuyv9CuPuzwWgC_I72N6ZUNWOSBDflVxwYPtL3PcCgCF2aE', y: 'Q39u2jtATgoBd9D8Tx744v6KljwE3iOZr30Rf8yuVT3UgGEi0bcKufUGVSeKls8s', crv: 'P-384', d: 'BS_hqq6UMpuqS10oIWzEyTUt7RRQrysUMUdlwUyVimV_CTTNEpxXFW9_D0NA9rHt' })
 const authPublicKey = await ecdsa.importKeyJwk({ key_ops: ['verify'], ext: true, kty: 'EC', x: '96pShK8Z3iJ8UZpN4tuyv9CuPuzwWgC_I72N6ZUNWOSBDflVxwYPtL3PcCgCF2aE', y: 'Q39u2jtATgoBd9D8Tx744v6KljwE3iOZr30Rf8yuVT3UgGEi0bcKufUGVSeKls8s', crv: 'P-384' })
 
 const authHubPort = 9009
@@ -51,7 +51,7 @@ const createJwtAccessToken = async (accessType = 'rw') => {
     iss: 'yhub-demo',
     exp: time.getUnixTime() + 60 * 60 * 1000, // token expires in one hour
     userid: 'testUser', // associate the client with a unique id that can will be used to check permissions
-    rooms: [{ room: { org: 'testOrg', docid: 'testSampleAuthServer-index', branch: 'main'  }, accessType }]
+    rooms: [{ room: { org: 'testOrg', docid: 'testSampleAuthServer-index', branch: 'main' }, accessType }]
   })
   return token
 }

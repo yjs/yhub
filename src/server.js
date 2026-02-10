@@ -48,8 +48,54 @@ export const createYHubServer = async (yhub, conf) => {
    */
   const setCorsHeaders = (res) => {
     res.writeHeader('Access-Control-Allow-Origin', '*')
-    res.writeHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    res.writeHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS')
     res.writeHeader('Access-Control-Allow-Headers', 'Content-Type')
+  }
+
+  /**
+   * @param {uws.HttpResponse} res
+   * @param {string} status
+   * @param {{ error: string }} body
+   */
+  const sendErrorResponse = (res, status, body) => {
+    const encoder = encoding.createEncoder()
+    encoding.writeAny(encoder, body)
+    const response = encoding.toUint8Array(encoder)
+    res.cork(() => {
+      setCorsHeaders(res)
+      res.writeStatus(status)
+      res.writeHeader('Content-Type', 'application/octet-stream')
+      res.end(response)
+    })
+  }
+
+  /**
+   * @param {uws.HttpRequest} req
+   * @param {t.Room} room
+   * @param {'r' | 'rw'} requiredAccess
+   * @returns {Promise<{ authInfo: { userid: string }, accessType: t.AccessType } | { error: string, status: string }>}
+   */
+  const authenticateRequest = async (req, room, requiredAccess) => {
+    // If no auth module is defined, no auth is required
+    if (yhub.conf.server?.auth == null) {
+      return { authInfo: { userid: 'anonymous' }, accessType: 'rw' }
+    }
+    try {
+      const authInfo = await yhub.conf.server.auth.readAuthInfo(req)
+      if (authInfo == null) {
+        return { error: 'Unauthorized', status: '401 Unauthorized' }
+      }
+      const accessType = await yhub.conf.server.auth.getAccessType(authInfo, room)
+      if (requiredAccess === 'rw' && !t.hasWriteAccess(accessType)) {
+        return { error: 'Forbidden', status: '403 Forbidden' }
+      }
+      if (requiredAccess === 'r' && !t.hasReadAccess(accessType)) {
+        return { error: 'Forbidden', status: '403 Forbidden' }
+      }
+      return { authInfo, accessType }
+    } catch (_err) {
+      return { error: 'Unauthorized', status: '401 Unauthorized' }
+    }
   }
 
   // Handle CORS preflight requests
@@ -69,6 +115,11 @@ export const createYHubServer = async (yhub, conf) => {
     res.onAborted(() => {
       aborted = true
     })
+    const authResult = await authenticateRequest(req, room, 'r')
+    if ('error' in authResult) {
+      if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
+      return
+    }
     try {
       const { gcDoc, nongcDoc } = await yhub.getDoc(room, { gc, nongc: !gc })
       const ydoc = gcDoc || nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
@@ -84,32 +135,16 @@ export const createYHubServer = async (yhub, conf) => {
       })
     } catch (err) {
       if (aborted) return
-      const encoder = encoding.createEncoder()
-      encoding.writeAny(encoder, { error: 'Failed to retrieve document' })
-      const response = encoding.toUint8Array(encoder)
-      res.cork(() => {
-        setCorsHeaders(res)
-        res.writeStatus('500 Internal Server Error')
-        res.writeHeader('Content-Type', 'application/octet-stream')
-        res.end(response)
-      })
+      sendErrorResponse(res, '500 Internal Server Error', { error: 'Failed to retrieve document' })
     }
   })
 
   // PATCH /ydoc/{org}/{docid} - Update the Yjs document
   app.patch('/ydoc/:org/:docid', (res, req) => {
     const room = reqToRoom(req)
+    const authPromise = authenticateRequest(req, room, 'rw')
     let buffer = Buffer.allocUnsafe(0)
     let aborted = false
-    /**
-     * @type {{ userid: string } | null}
-     */
-    let authInfo = null
-    const authPromise = yhub.conf.server?.auth.readAuthInfo(req).then(info => {
-      authInfo = info
-    }).catch(() => {
-      authInfo = null
-    })
     res.onAborted(() => {
       aborted = true
     })
@@ -117,31 +152,10 @@ export const createYHubServer = async (yhub, conf) => {
      * @param {Buffer} buffer
      */
     const handleUpdateRequest = async buffer => {
-      await authPromise
+      const authResult = await authPromise
       if (aborted) return
-      if (authInfo == null) {
-        const encoder = encoding.createEncoder()
-        encoding.writeAny(encoder, { error: 'Unauthorized' })
-        const response = encoding.toUint8Array(encoder)
-        res.cork(() => {
-          setCorsHeaders(res)
-          res.writeStatus('401 Unauthorized')
-          res.writeHeader('Content-Type', 'application/octet-stream')
-          res.end(response)
-        })
-        return
-      }
-      const accessType = await yhub.conf.server?.auth.getAccessType(authInfo, room)
-      if (!t.hasWriteAccess(accessType)) {
-        const encoder = encoding.createEncoder()
-        encoding.writeAny(encoder, { error: 'Forbidden' })
-        const response = encoding.toUint8Array(encoder)
-        res.cork(() => {
-          setCorsHeaders(res)
-          res.writeStatus('403 Forbidden')
-          res.writeHeader('Content-Type', 'application/octet-stream')
-          res.end(response)
-        })
+      if ('error' in authResult) {
+        sendErrorResponse(res, authResult.status, { error: authResult.error })
         return
       }
       try {
@@ -160,8 +174,8 @@ export const createYHubServer = async (yhub, conf) => {
             const now = time.getUnixTime()
             const contentmap = Y.encodeContentMap(Y.createContentMapFromContentIds(
               Y.createContentIdsFromUpdate(diffedUpdate),
-              [Y.createContentAttribute('insert', authInfo.userid), Y.createContentAttribute('insertAt', now)],
-              [Y.createContentAttribute('delete', authInfo.userid), Y.createContentAttribute('deleteAt', now)]
+              [Y.createContentAttribute('insert', authResult.authInfo.userid), Y.createContentAttribute('insertAt', now)],
+              [Y.createContentAttribute('delete', authResult.authInfo.userid), Y.createContentAttribute('deleteAt', now)]
             ))
             yhub.stream.addMessage(room, { type: 'ydoc:update:v1', contentmap, update: diffedUpdate })
           }
@@ -182,15 +196,7 @@ export const createYHubServer = async (yhub, conf) => {
         console.warn('[ydoc api] error parsing update request')
       }
       if (!aborted) {
-        const encoder = encoding.createEncoder()
-        encoding.writeAny(encoder, { error: 'Invalid request body' })
-        const response = encoding.toUint8Array(encoder)
-        res.cork(() => {
-          setCorsHeaders(res)
-          res.writeStatus('400 Bad Request')
-          res.writeHeader('Content-Type', 'application/octet-stream')
-          res.end(response)
-        })
+        sendErrorResponse(res, '400 Bad Request', { error: 'Invalid request body' })
       }
     }
     res.onData((chunk, isLast) => {
@@ -205,6 +211,7 @@ export const createYHubServer = async (yhub, conf) => {
   // POST /rollback/{guid} - Rollback changes matching the pattern
   app.post('/rollback/:org/:docid', (res, req) => {
     const room = reqToRoom(req)
+    const authPromise = authenticateRequest(req, room, 'rw')
     let buffer = Buffer.allocUnsafe(0)
     let aborted = false
     res.onAborted(() => {
@@ -214,7 +221,12 @@ export const createYHubServer = async (yhub, conf) => {
      * @param {Buffer} buffer
      */
     const handleRollbackRequest = async buffer => {
+      const authResult = await authPromise
       if (aborted) return
+      if ('error' in authResult) {
+        sendErrorResponse(res, authResult.status, { error: authResult.error })
+        return
+      }
       try {
         const decoder = decoding.createDecoder(buffer)
         // body structure: { from?: number, to?: number, by?: string, contentIds?: buffer }
@@ -233,7 +245,7 @@ export const createYHubServer = async (yhub, conf) => {
             yhub.stream.addMessage(room, {
               type: 'ydoc:update:v1',
               update,
-              contentmap: Y.encodeContentMap(Y.createContentMapFromContentIds(Y.createContentIdsFromUpdate(update), [Y.createContentAttribute('insert', 'system'), Y.createContentAttribute('insertAt', now)], [Y.createContentAttribute('delete', 'system'), Y.createContentAttribute('deleteAt', now)]))
+              contentmap: Y.encodeContentMap(Y.createContentMapFromContentIds(Y.createContentIdsFromUpdate(update), [Y.createContentAttribute('insert', authResult.authInfo.userid), Y.createContentAttribute('insertAt', now)], [Y.createContentAttribute('delete', authResult.authInfo.userid), Y.createContentAttribute('deleteAt', now)]))
             })
           })
           Y.undoContentIds(ydoc, revertIds)
@@ -257,15 +269,7 @@ export const createYHubServer = async (yhub, conf) => {
         console.warn('[rollback api] error parsing request')
       }
       if (!aborted) {
-        const encoder = encoding.createEncoder()
-        encoding.writeAny(encoder, { error: 'error consuming request' })
-        const response = encoding.toUint8Array(encoder)
-        res.cork(() => {
-          setCorsHeaders(res)
-          res.writeStatus('400 Bad Request')
-          res.writeHeader('Content-Type', 'application/octet-stream')
-          res.end(response)
-        })
+        sendErrorResponse(res, '400 Bad Request', { error: 'error consuming request' })
       }
     }
     res.onData((chunk, isLast) => {
@@ -293,6 +297,11 @@ export const createYHubServer = async (yhub, conf) => {
       aborted = true
       console.log('Request aborted')
     })
+    const authResult = await authenticateRequest(req, room, 'r')
+    if ('error' in authResult) {
+      if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
+      return
+    }
     const { nongcDoc: nongcDocBin, contentmap: contentmapBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
     const contentmap = Y.decodeContentMap(contentmapBin)
     const filteredAttributions = filterContentMapHelper(contentmap, from, to, by, undefined)
@@ -348,6 +357,11 @@ export const createYHubServer = async (yhub, conf) => {
       aborted = true
       console.log('Request aborted')
     })
+    const authResult = await authenticateRequest(req, room, 'r')
+    if ('error' in authResult) {
+      if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
+      return
+    }
     const { contentmap: contentmapBin, nongcDoc: nongcDocBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
     const contentmap = Y.decodeContentMap((contentmapBin))
     const filteredAttributions = filterContentMapHelper(contentmap, from, to, undefined, undefined)

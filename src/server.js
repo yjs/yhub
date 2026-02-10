@@ -193,7 +193,7 @@ export const createYHubServer = async (yhub, conf) => {
           return
         }
       } catch (_err) {
-        console.warn('[ydoc api] error parsing update request')
+        console.warn('[@y/hub/server] error parsing update request', _err)
       }
       if (!aborted) {
         sendErrorResponse(res, '400 Bad Request', { error: 'Invalid request body' })
@@ -295,7 +295,7 @@ export const createYHubServer = async (yhub, conf) => {
     let aborted = false
     res.onAborted(() => {
       aborted = true
-      console.log('Request aborted')
+      log('Request aborted')
     })
     const authResult = await authenticateRequest(req, room, 'r')
     if ('error' in authResult) {
@@ -355,7 +355,7 @@ export const createYHubServer = async (yhub, conf) => {
     let aborted = false
     res.onAborted(() => {
       aborted = true
-      console.log('Request aborted')
+      log('Request aborted')
     })
     const authResult = await authenticateRequest(req, room, 'r')
     if ('error' in authResult) {
@@ -558,7 +558,7 @@ class WSUser {
         }
       })
       const m = encoding.toUint8Array(encoder)
-      if (this.ws == null) console.log('Client tried to send a message, but it isn\'t connected yet')
+      if (this.ws == null) log('Tried to send a message to client, but it isn\'t connected yet')
       this.ws?.send(m, true, false)
     }
   }
@@ -597,7 +597,7 @@ const registerWebsocketServer = (yhub, app) => {
       const headerWsExtensions = req.getHeader('sec-websocket-extensions')
       let aborted = false
       res.onAborted(() => {
-        console.log('Upgrading client aborted', { url })
+        log(() => ['Upgrading client aborted', { url }])
         aborted = true
       })
       try {

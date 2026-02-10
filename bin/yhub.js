@@ -10,6 +10,7 @@ import * as number from 'lib0/number'
 import * as env from 'lib0/environment'
 import * as yhub from '@y/hub'
 import * as random from 'lib0/random'
+import * as logging from 'lib0/logging'
 
 const userIdChoices = [
   'Calvin Hobbes',
@@ -18,7 +19,9 @@ const userIdChoices = [
   'Garfield'
 ]
 
-console.log('starting server')
+const port = number.parseInt(env.getConf('port') || '3002')
+
+logging.print(logging.GREEN, 'starting server on port ' + port)
 
 yhub.createYHub({
   redis: {
@@ -30,7 +33,7 @@ yhub.createYHub({
   postgres: env.ensureConf('postgres'),
   persistence: [],
   server: {
-    port: number.parseInt(env.getConf('port') || '3002'),
+    port,
     auth: {
       // pick a "unique" userid
       async readAuthInfo (req) {

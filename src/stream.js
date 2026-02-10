@@ -225,9 +225,7 @@ export class Stream {
               sub.lastReceivedClock = m.lastClock
             }
           }
-          if (ms.length > 0) {
-            console.info('pulled', ms.length, ' messages and notified ', nsubCounter, 'subscribers')
-          }
+          ms.length > 0 && log(() => ['pulled', ms.length, ' messages and notified ', nsubCounter, 'subscribers'])
         } catch (e) {
           console.error(e)
           await promise.wait(3000)

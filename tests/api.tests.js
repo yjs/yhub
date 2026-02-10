@@ -69,7 +69,7 @@ export const testChangesetRestApi = async tc => {
   await promise.wait(3000)
   // fetch timestamps
   const activity = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)
-  console.log('RECEIVED ACTIVITY!!', activity)
+  console.log('received activity', activity)
   t.assert(activity.length === 3)
   {
     const changeset = await fetchYhubResponse(`/changeset/${org}/${ydoc.guid}?from=${activity[1].from}&to=${activity[1].to}&ydoc=true&delta=true&attributions=true`)

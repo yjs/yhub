@@ -6,8 +6,11 @@ import * as Y from '@y/y'
 import * as object from 'lib0/object'
 import * as protocol from './protocol.js'
 import * as server from './server.js'
+import * as logging from 'lib0/logging'
 
 export { createAuthPlugin } from './types.js'
+
+const log = logging.createModuleLogger('@y/hub/worker')
 
 /**
  * @template {t.YHubConfig} [Conf=t.YHubConfig]
@@ -40,7 +43,7 @@ export class YHub {
     while (ctx.shouldRun) {
       try {
         const tasks = await this.stream.claimTasks(this.conf.worker.taskConcurrency)
-        tasks.length && console.info('[yhub-worker] picked up ' + tasks.length + ' tasks. Working on it..', tasks)
+        tasks.length && log(() => ['picked up ' + tasks.length + ' tasks. Working on it..', tasks])
         await promise.all(tasks.map(async task => {
           if (task.type === 'compact') {
             // execute compact task

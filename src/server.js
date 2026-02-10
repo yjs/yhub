@@ -431,7 +431,9 @@ const registerWebsocketServer = (yhub, app) => {
   app.ws('/ws/:org/:docid', /** @type {uws.WebSocketBehavior<{ user: WSUser }>} */ ({
     compression: uws.SHARED_COMPRESSOR,
     maxPayloadLength: number.parseInt(env.getConf('uws-max-payload-length') || (200 * 1024 * 1024).toString()), // max websocket payload default is 200mb
-    idleTimeout: 60,
+    maxBackpressure: number.parseInt(env.getConf('uws-max-backpressure') || (200 * 1024 * 1024).toString()), // 200MB buffer to handle large initial syncs
+    closeOnBackpressureLimit: true,
+    idleTimeout: 120,
     sendPingsAutomatically: true,
     upgrade: async (res, req, context) => {
       const url = req.getUrl()

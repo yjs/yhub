@@ -24,6 +24,65 @@ version as well.
   * `branch="main"`: (default) The default branch-name if not specified otherwise.
   * `branch=string`: Optionally, define a custom branch. Changes won't be automatically synced with other branches.
 
+## Ydoc
+
+Retrieve and update the Yjs document via REST API.
+
+### GET /ydoc/{org}/{docid}
+
+Retrieve the current state of the Yjs document.
+
+* `GET /ydoc/{org}/{docid}` parameters: `{ gc?: boolean, branch?: string }`
+  * `gc=true` (default): retrieve the garbage-collected document
+  * `gc=false`: retrieve the full document history (non-gc version)
+  * `branch="main"` (default): the branch to retrieve
+  * Returns `{ doc: Uint8Array }` - the encoded Yjs document update
+
+### PATCH /ydoc/{org}/{docid}
+
+Update the Yjs document with new changes. Requires write access.
+
+* `PATCH /ydoc/{org}/{docid}` body: `{ update: Uint8Array }` parameters: `{ branch?: string }`
+  * `update`: a Yjs update (encoded via `Y.encodeStateAsUpdate` or similar)
+  * `branch="main"` (default): the branch to update
+  * The update is diffed against the current document state - only new content is applied and attributed
+  * Attributions are automatically assigned to the authenticated user
+  * Changes are distributed to connected WebSocket clients
+  * Returns `{ success: true, message: string }` on success
+
+### Example
+
+```javascript
+import * as Y from 'yjs'
+import * as encoding from 'lib0/encoding'
+import * as decoding from 'lib0/decoding'
+
+// Retrieve the current document
+const getResponse = await fetch('/ydoc/my-org/my-doc-id')
+const getBuffer = await getResponse.arrayBuffer()
+const getDecoder = decoding.createDecoder(new Uint8Array(getBuffer))
+const { doc } = decoding.readAny(getDecoder)
+
+// Apply the remote state to a local document
+const ydoc = new Y.Doc()
+Y.applyUpdate(ydoc, doc)
+
+// Make local changes
+ydoc.getText('content').insert(0, 'Hello World')
+
+// Encode the update and send it
+const update = Y.encodeStateAsUpdate(ydoc)
+const encoder = encoding.createEncoder()
+encoding.writeAny(encoder, { update })
+const body = encoding.toUint8Array(encoder)
+
+const patchResponse = await fetch('/ydoc/my-org/my-doc-id', {
+  method: 'PATCH',
+  headers: { 'Content-Type': 'application/octet-stream' },
+  body
+})
+```
+
 ## Rollback
 
 Rollback all changes that match the pattern. The changes will be distributed via

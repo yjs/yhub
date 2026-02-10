@@ -8,12 +8,12 @@ export const $accessType = s.$union(s.$literal('r'), s.$literal('rw'), s.$null)
  */
 
 /**
- * @param {AccessType} accessType
+ * @param {AccessType} [accessType]
  */
 export const hasReadAccess = accessType => accessType === 'r' || accessType === 'rw'
 
 /**
- * @param {AccessType} accessType
+ * @param {AccessType} [accessType]
  */
 export const hasWriteAccess = accessType => accessType === 'rw'
 

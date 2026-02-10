@@ -39,6 +39,23 @@ const postYhubRequest = async (path, body) => {
 }
 
 /**
+ * @param {string} path
+ * @param {any} body
+ */
+const patchYhubRequest = async (path, body) => {
+  const encoder = encoding.createEncoder()
+  encoding.writeAny(encoder, body)
+  const response = await fetch(`http://${utils.yhubHost}${path}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: encoding.toUint8Array(encoder)
+  })
+  const data = await response.arrayBuffer()
+  const decoder = decoding.createDecoder(new Uint8Array(data))
+  return decoding.readAny(decoder)
+}
+
+/**
  * @param {t.TestCase} tc
  */
 export const testChangesetRestApi = async tc => {
@@ -110,4 +127,38 @@ export const testWorker = async tc => {
   while (!workertasksEmpty) {
     workertasksEmpty = await yhub.stream.redis.xLen(yhub.stream.workerStreamName) === 0
   }
+}
+
+/**
+ * @param {t.TestCase} tc
+ */
+export const testYdocRestApi = async tc => {
+  const { org, createWsClient } = await utils.createTestCase(tc)
+  // Create initial document via websocket
+  const { ydoc: initialDoc, provider } = await createWsClient({ waitForSync: true })
+  initialDoc.get().applyDelta(delta.create().insert('initial content'))
+  await promise.wait(100)
+  provider.destroy()
+
+  // Retrieve the document via GET
+  const getResponse = await fetchYhubResponse(`/ydoc/${org}/${initialDoc.guid}`)
+  t.assert(getResponse.doc instanceof Uint8Array, 'GET response should contain doc as Uint8Array')
+
+  // Apply remote state to a local document and make changes
+  const localDoc = new Y.Doc()
+  Y.applyUpdate(localDoc, getResponse.doc)
+  t.compare(localDoc.get().toDelta(), delta.create().insert('initial content'), 'Local doc should have initial content')
+
+  // Make local changes
+  localDoc.get().applyDelta(delta.create().retain(8).insert('new '))
+  const update = Y.encodeStateAsUpdate(localDoc)
+
+  // Send update via PATCH
+  const patchResponse = await patchYhubRequest(`/ydoc/${org}/${initialDoc.guid}`, { update })
+  t.assert(patchResponse.success === true, 'PATCH should return success')
+
+  // Wait for changes to propagate and verify via websocket
+  await promise.wait(500)
+  const { ydoc: verifyDoc } = await createWsClient({ docid: initialDoc.guid.split('-').pop(), waitForSync: true })
+  t.compare(verifyDoc.get().toDelta(), delta.create().insert('initial new content'), 'Document should have updated content')
 }

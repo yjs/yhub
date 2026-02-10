@@ -61,6 +61,147 @@ export const createYHubServer = async (yhub, conf) => {
     })
   })
 
+  // GET /ydoc/{org}/{docid} - Retrieve the Yjs document
+  app.get('/ydoc/:org/:docid', async (res, req) => {
+    const room = reqToRoom(req)
+    const gc = req.getQuery('gc') !== 'false'
+    let aborted = false
+    res.onAborted(() => {
+      aborted = true
+    })
+    try {
+      const { gcDoc, nongcDoc } = await yhub.getDoc(room, { gc, nongc: !gc })
+      const ydoc = gcDoc || nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
+      if (aborted) return
+      const encoder = encoding.createEncoder()
+      encoding.writeAny(encoder, { doc: ydoc })
+      const response = encoding.toUint8Array(encoder)
+      res.cork(() => {
+        setCorsHeaders(res)
+        res.writeStatus('200 OK')
+        res.writeHeader('Content-Type', 'application/octet-stream')
+        res.end(response)
+      })
+    } catch (err) {
+      if (aborted) return
+      const encoder = encoding.createEncoder()
+      encoding.writeAny(encoder, { error: 'Failed to retrieve document' })
+      const response = encoding.toUint8Array(encoder)
+      res.cork(() => {
+        setCorsHeaders(res)
+        res.writeStatus('500 Internal Server Error')
+        res.writeHeader('Content-Type', 'application/octet-stream')
+        res.end(response)
+      })
+    }
+  })
+
+  // PATCH /ydoc/{org}/{docid} - Update the Yjs document
+  app.patch('/ydoc/:org/:docid', (res, req) => {
+    const room = reqToRoom(req)
+    let buffer = Buffer.allocUnsafe(0)
+    let aborted = false
+    /**
+     * @type {{ userid: string } | null}
+     */
+    let authInfo = null
+    const authPromise = yhub.conf.server?.auth.readAuthInfo(req).then(info => {
+      authInfo = info
+    }).catch(() => {
+      authInfo = null
+    })
+    res.onAborted(() => {
+      aborted = true
+    })
+    /**
+     * @param {Buffer} buffer
+     */
+    const handleUpdateRequest = async buffer => {
+      await authPromise
+      if (aborted) return
+      if (authInfo == null) {
+        const encoder = encoding.createEncoder()
+        encoding.writeAny(encoder, { error: 'Unauthorized' })
+        const response = encoding.toUint8Array(encoder)
+        res.cork(() => {
+          setCorsHeaders(res)
+          res.writeStatus('401 Unauthorized')
+          res.writeHeader('Content-Type', 'application/octet-stream')
+          res.end(response)
+        })
+        return
+      }
+      const accessType = await yhub.conf.server?.auth.getAccessType(authInfo, room)
+      if (!t.hasWriteAccess(accessType)) {
+        const encoder = encoding.createEncoder()
+        encoding.writeAny(encoder, { error: 'Forbidden' })
+        const response = encoding.toUint8Array(encoder)
+        res.cork(() => {
+          setCorsHeaders(res)
+          res.writeStatus('403 Forbidden')
+          res.writeHeader('Content-Type', 'application/octet-stream')
+          res.end(response)
+        })
+        return
+      }
+      try {
+        const decoder = decoding.createDecoder(buffer)
+        const decodedBody = decoding.readAny(decoder)
+        if (s.$object({ update: s.$uint8Array }).check(decodedBody)) {
+          const { update } = decodedBody
+          // Get current document state to diff against
+          const { gcDoc, nongcDoc } = await yhub.getDoc(room, { gc: true, nongc: false })
+          const currentDoc = gcDoc || nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
+          const currentContentIds = Y.createContentIdsFromUpdate(currentDoc)
+          const newContentIds = Y.excludeContentIds(Y.createContentIdsFromUpdate(update), currentContentIds)
+          // only attribute "new" content
+          const diffedUpdate = /** @type {Uint8Array<ArrayBuffer>} */ (Y.intersectUpdateWithContentIds(update, newContentIds))
+          if (diffedUpdate.byteLength > 3) {
+            const now = time.getUnixTime()
+            const contentmap = Y.encodeContentMap(Y.createContentMapFromContentIds(
+              Y.createContentIdsFromUpdate(diffedUpdate),
+              [Y.createContentAttribute('insert', authInfo.userid), Y.createContentAttribute('insertAt', now)],
+              [Y.createContentAttribute('delete', authInfo.userid), Y.createContentAttribute('deleteAt', now)]
+            ))
+            yhub.stream.addMessage(room, { type: 'ydoc:update:v1', contentmap, update: diffedUpdate })
+          }
+          if (!aborted) {
+            const encoder = encoding.createEncoder()
+            encoding.writeAny(encoder, { success: true, message: 'Document updated' })
+            const response = encoding.toUint8Array(encoder)
+            res.cork(() => {
+              setCorsHeaders(res)
+              res.writeStatus('200 OK')
+              res.writeHeader('Content-Type', 'application/octet-stream')
+              res.end(response)
+            })
+          }
+          return
+        }
+      } catch (_err) {
+        console.warn('[ydoc api] error parsing update request')
+      }
+      if (!aborted) {
+        const encoder = encoding.createEncoder()
+        encoding.writeAny(encoder, { error: 'Invalid request body' })
+        const response = encoding.toUint8Array(encoder)
+        res.cork(() => {
+          setCorsHeaders(res)
+          res.writeStatus('400 Bad Request')
+          res.writeHeader('Content-Type', 'application/octet-stream')
+          res.end(response)
+        })
+      }
+    }
+    res.onData((chunk, isLast) => {
+      const chunkBuffer = Buffer.from(chunk)
+      buffer = Buffer.concat([buffer, chunkBuffer])
+      if (isLast) {
+        handleUpdateRequest(buffer)
+      }
+    })
+  })
+
   // POST /rollback/{guid} - Rollback changes matching the pattern
   app.post('/rollback/:org/:docid', (res, req) => {
     const room = reqToRoom(req)

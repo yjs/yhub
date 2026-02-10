@@ -11,6 +11,7 @@ import * as number from 'lib0/number'
 import * as t from './types.js'
 import * as protocol from './protocol.js'
 import * as array from 'lib0/array'
+import * as env from 'lib0/environment'
 
 const log = logging.createModuleLogger('@y/hub/ws')
 
@@ -429,7 +430,7 @@ const reqToRoom = req => {
 const registerWebsocketServer = (yhub, app) => {
   app.ws('/ws/:org/:docid', /** @type {uws.WebSocketBehavior<{ user: WSUser }>} */ ({
     compression: uws.SHARED_COMPRESSOR,
-    maxPayloadLength: 100 * 1024 * 1024,
+    maxPayloadLength: number.parseInt(env.getConf('uws-max-payload-length') || (200 * 1024 * 1024).toString()), // max websocket payload default is 200mb
     idleTimeout: 60,
     sendPingsAutomatically: true,
     upgrade: async (res, req, context) => {

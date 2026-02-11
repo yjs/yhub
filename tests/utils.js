@@ -29,19 +29,19 @@ export const yhub = await createYHub({
   redis: {
     url: env.ensureConf('redis'),
     prefix: 'yhub:testing',
-    taskDebounce: 500,
+    taskDebounce: 10000,
     minMessageLifetime: 3000
   },
   postgres: env.ensureConf('postgres'),
   persistence: [
-    // new S3PersistenceV1({
-    //   bucket: env.ensureConf('S3_YHUB_TEST_BUCKET'),
-    //   endPoint: env.ensureConf('S3_ENDPOINT'),
-    //   port: parseInt(env.ensureConf('S3_PORT'), 10),
-    //   useSSL: env.ensureConf('S3_SSL') === 'true',
-    //   accessKey: env.ensureConf('S3_ACCESS_KEY'),
-    //   secretKey: env.ensureConf('S3_SECRET_KEY')
-    // })
+    new S3PersistenceV1({
+      bucket: env.ensureConf('S3_YHUB_TEST_BUCKET'),
+      endPoint: env.ensureConf('S3_ENDPOINT'),
+      port: parseInt(env.ensureConf('S3_PORT'), 10),
+      useSSL: env.ensureConf('S3_SSL') === 'true',
+      accessKey: env.ensureConf('S3_ACCESS_KEY'),
+      secretKey: env.ensureConf('S3_SECRET_KEY')
+    })
   ],
   server: {
     port: yhubPort,
@@ -55,7 +55,7 @@ export const yhub = await createYHub({
     })
   },
   worker: {
-    taskConcurrency: 5
+    taskConcurrency: 500
   }
 })
 {

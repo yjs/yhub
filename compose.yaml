@@ -45,15 +45,18 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-  s3mock:
-    image: adobe/s3mock:latest
+  minio:
+    image: minio/minio:latest
     profiles: ["all", "db"]
     ports:
-      - 9090:9090
+      - "9000:9000"
+      - "9001:9001"
+    command: server /data --console-address ":9001"
     environment:
-      - initialBuckets=yhub,yhub-testing
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -70,5 +73,5 @@ services:
         condition: service_healthy
       valkey:
         condition: service_healthy
-      s3mock:
+      minio:
         condition: service_healthy

@@ -76,7 +76,7 @@ export class Stream {
     /**
      * After this timeout, a worker will pick up a task and clean up a stream. (default: 60 seconds)
      */
-    this.taskDebounce = config.redis.taskDebounce ?? 60000
+    this.taskDebounce = config.redis.taskDebounce ?? 120000
     /**
      * Minimum lifetime of y* update messages in redis streams. (default: 60 seconds)
      */
@@ -100,6 +100,7 @@ export class Stream {
     this.redisClientConf = {
       url: config.redis.url,
       socket: {
+        connectTimeout: 20000,
         /**
          * @param {number} retries
          */
@@ -181,6 +182,7 @@ export class Stream {
         })
       }
     })
+    this.redis.on('error', /** @param {Error} err */ err => log('Redis client error: ', { err }))
     /**
      * Second instance to fetch things concurrent to the other connection.
      *
@@ -190,11 +192,20 @@ export class Stream {
     this._subRunning = false
   }
 
+  async getPendingTasksSize () {
+    return this.redis.xLen(this.workerStreamName)
+  }
+
+  async getActiveStreams () {
+    return this.redis.keys(`${this.prefix}:room:*`)
+  }
+
   async _runSub () {
     if (!this._subRunning) {
       this._subRunning = true
       if (this.redisSubscriptions === null) {
         this.redisSubscriptions = redis.createClient(this.redisClientConf)
+        this.redisSubscriptions.on('error', /** @param {Error} err */ err => log('Redis subscription client error: ', { err }))
         await this.redisSubscriptions.connect()
       }
       while (this.subs.size > 0 || this.subUpdates.size > 0) {

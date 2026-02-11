@@ -90,7 +90,7 @@ export class YHub {
     const contentmap = persistedDoc.contentmap
     const contentids = persistedDoc.contentids
     const references = persistedDoc.references
-    const awareness = /** @type {Include['awareness'] extends true ? import('@y/protocols/awareness').Awareness : null} */ (includeContent.awareness ? protocol.mergeAwarenessUpdates(cachedMessages.messages.filter(m => m.type === 'awareness:v1').map(m => m.update)) : null)
+    const awareness = /** @type {Include['awareness'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.awareness ? protocol.mergeAwarenessUpdates(cachedMessages.messages.filter(m => m.type === 'awareness:v1').map(m => m.update)) : null)
     const lastClock = strm.maxRedisClock(persistedDoc.lastClock, cachedMessages.lastClock)
     cachedMessages.messages.forEach(m => {
       // only add update messages that are newer that what we currently know

@@ -6,6 +6,8 @@ import * as encoding from 'lib0/encoding'
 import * as utils from './utils.js'
 import * as delta from 'lib0/delta'
 import * as stream from '../src/stream.js'
+import * as array from 'lib0/array'
+import * as math from 'lib0/math'
 
 /**
  * @param {string} path
@@ -61,6 +63,7 @@ const patchYhubRequest = async (path, body) => {
 export const testChangesetRestApi = async tc => {
   const { org, createWsClient } = await utils.createTestCase(tc)
   const { ydoc } = createWsClient()
+  console.log('creating documents')
   ydoc.get().applyDelta(delta.create().insert('hello world')) // change time: 1
   await promise.wait(100)
   ydoc.get().applyDelta(delta.create().delete(6).retain(5).insert('!')) // change time: 2
@@ -68,6 +71,7 @@ export const testChangesetRestApi = async tc => {
   ydoc.get().applyDelta(delta.create().insert('hi ')) // change time: 3
   await promise.wait(3000)
   // fetch timestamps
+  console.log('finished creating documents - fetching activity')
   const activity = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)
   console.log('received activity', activity)
   t.assert(activity.length === 3)
@@ -113,17 +117,18 @@ export const testWorker = async tc => {
   ydoc.get().setAttr('key1', 'val1')
   ydoc.get().setAttr('key2', 'val2')
   await promise.wait(1000)
+  t.info('created doc')
   provider.destroy()
   ydoc.destroy()
-  let streamexists = true
   const streamName = stream.encodeRoomName({ org, docid: ydoc.guid, branch: 'main' }, yhub.stream.prefix)
-  while (streamexists) {
-    streamexists = (await yhub.stream.redis.exists(streamName)) === 1
-  }
+  console.info('waiting for stream to be deleted', { conf: yhub.conf.redis, streamName })
+  await promise.untilAsync(async () => ((await yhub.stream.redis.exists(streamName)) === 1), yhub.conf.redis.minMessageLifetime * 9)
+  t.info('stream deleted')
   const { ydoc: loadedDoc } = await createWsClient({ waitForSync: true, syncAwareness: false })
   t.assert(loadedDoc.get().getAttr('key1') === 'val1')
   t.assert(loadedDoc.get().getAttr('key2') === 'val2')
   let workertasksEmpty = false
+  t.info('waiting for tasks to be empty')
   while (!workertasksEmpty) {
     workertasksEmpty = await yhub.stream.redis.xLen(yhub.stream.workerStreamName) === 0
   }
@@ -160,5 +165,54 @@ export const testYdocRestApi = async tc => {
   // Wait for changes to propagate and verify via websocket
   await promise.wait(500)
   const { ydoc: verifyDoc } = await createWsClient({ docid: initialDoc.guid.split('-').pop(), waitForSync: true })
-  t.compare(verifyDoc.get().toDelta(), delta.create().insert('initial new content'), 'Document should have updated content')
+  t.compare(verifyDoc.get().toDelta(), delta.create(delta.$deltaAny).insert('initial new content'), 'Document should have updated content')
+}
+
+const logMemoryUsed = (prefix = '') => {
+  const heapUsed = process.memoryUsage().heapUsed
+  console.log(`${prefix.length === 0 ? '' : `[${prefix}] `}Heap used: ${(heapUsed / 1024 / 1024).toFixed(2)} MB`)
+  return heapUsed
+}
+
+/**
+ * @param {t.TestCase} tc
+ */
+export const testManyConnectionsMemoryDebug = async tc => {
+  const Iterations = 1
+  const NDocs = 5000
+  const gc = global.gc
+  t.skip(gc == null)
+  t.assert(gc)
+  const { createWsClient, yhub } = await utils.createTestCase(tc)
+  const beforeTaskConcurrency = yhub.conf.worker.taskConcurrency
+  yhub.conf.worker.taskConcurrency = 500
+  gc()
+  let maxMemory = 0
+  const beforeMemory = logMemoryUsed('before memory')
+  try {
+    for (let i = 0; i < Iterations; i++) {
+      const docs = await promise.all(array.unfold(NDocs, async (i) => {
+        const r = await createWsClient({ waitForSync: true, syncAwareness: false, docid: 'doc-' + i })
+        r.ydoc.get().insert(0, [i])
+        return r
+      }))
+      await promise.wait(300)
+      const afterMemory = logMemoryUsed('after updates memory')
+      maxMemory = math.max(maxMemory, afterMemory)
+      docs.length = 0
+      utils.cleanPreviousClients()
+      await promise.wait(100)
+      gc()
+      logMemoryUsed('cleaning up memory - iteration #' + i)
+    }
+    await promise.wait(yhub.conf.redis.minMessageLifetime)
+    await utils.waitTasksProcessed(yhub)
+    gc()
+    const cleanedUpMemory = logMemoryUsed('cleaned up memory')
+    console.log({ maxMemory: maxMemory / 1000 / 1000, beforeMemory: beforeMemory / 1000 / 1000, cleanedUpMemory: cleanedUpMemory / 1000 / 1000, diff: (cleanedUpMemory - beforeMemory) / 1000 / 1000 })
+    const heapSizeIncrease = cleanedUpMemory - beforeMemory
+    t.assert(heapSizeIncrease < (maxMemory - beforeMemory) * 0.2) // memory increased by max 20%
+  } finally {
+    yhub.conf.worker.taskConcurrency = beforeTaskConcurrency
+  }
 }

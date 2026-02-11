@@ -1,6 +1,7 @@
 import * as Y from '@y/y'
 import * as encoding from 'lib0/encoding'
 import * as awarenessProtocol from '@y/protocols/awareness'
+import * as array from 'lib0/array'
 
 export const messageSync = 0
 export const messageAwareness = 1
@@ -19,7 +20,10 @@ export const mergeAwarenessUpdates = ms => {
   ms.forEach(m => {
     awarenessProtocol.applyAwarenessUpdate(aw, m, null)
   })
-  return aw
+  const awBin = encodeAwareness(aw, array.from(aw.states.keys()))
+  aw.doc.destroy()
+  aw.destroy()
+  return awBin
 }
 
 /**

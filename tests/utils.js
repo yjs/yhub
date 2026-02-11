@@ -29,19 +29,19 @@ export const yhub = await createYHub({
   redis: {
     url: env.ensureConf('redis'),
     prefix: 'yhub:testing',
-    taskDebounce: 1000,
-    minMessageLifetime: 6000
+    taskDebounce: 500,
+    minMessageLifetime: 3000
   },
   postgres: env.ensureConf('postgres'),
   persistence: [
-    new S3PersistenceV1({
-      bucket: env.ensureConf('S3_YHUB_TEST_BUCKET'),
-      endPoint: env.ensureConf('S3_ENDPOINT'),
-      port: parseInt(env.ensureConf('S3_PORT'), 10),
-      useSSL: env.ensureConf('S3_SSL') === 'true',
-      accessKey: env.ensureConf('S3_ACCESS_KEY'),
-      secretKey: env.ensureConf('S3_SECRET_KEY')
-    })
+    // new S3PersistenceV1({
+    //   bucket: env.ensureConf('S3_YHUB_TEST_BUCKET'),
+    //   endPoint: env.ensureConf('S3_ENDPOINT'),
+    //   port: parseInt(env.ensureConf('S3_PORT'), 10),
+    //   useSSL: env.ensureConf('S3_SSL') === 'true',
+    //   accessKey: env.ensureConf('S3_ACCESS_KEY'),
+    //   secretKey: env.ensureConf('S3_SECRET_KEY')
+    // })
   ],
   server: {
     port: yhubPort,
@@ -104,6 +104,7 @@ const createWsClient = (tc, { docid = 'index', branch = 'main', gc = true, syncA
   const provider = new WebsocketProvider(_wsUrl, guid, ydoc, { WebSocketPolyfill: /** @type {any} */ (WebSocket), disableBc: true, params: { branch, gc: gc.toString(), ...wsParams } })
   previousClients.push(ydoc)
   previousClients.push(provider)
+  previousClients.push(provider.awareness)
   // @todo this should be part of @y/websocket
   provider.once('sync', () => {
     ydoc.emit('sync', [true, ydoc])
@@ -122,13 +123,18 @@ const createWsClient = (tc, { docid = 'index', branch = 'main', gc = true, syncA
  */
 const previousClients = []
 
+export const cleanPreviousClients = () => {
+  previousClients.forEach(client => client.destroy())
+  previousClients.length = 0
+}
+
 /**
  * @param {t.TestCase} tc
  */
 export const createTestCase = async tc => {
   const defaultRoom = { org: defaultOrg, docid: tc.testName + '-index', branch: 'main' }
-  previousClients.forEach(client => client.destroy())
-  previousClients.length = 0
+  cleanPreviousClients()
+  await waitTasksProcessed(yhub)
   return {
     // this must match with the default values in createWsClient
     defaultRoom,
@@ -169,3 +175,16 @@ export const waitDocsSynced = (ydoc1, ydoc2) => {
     promise.resolve(err)
   })
 }
+
+/**
+ * @param {import('../src/index.js').YHub} yhub
+ */
+export const waitTasksProcessed = async yhub =>
+  t.groupAsync('waiting for all tasks to be processed', () => promise.untilAsync(async () => {
+    const [pendingTasksSize, activeStreams] = await promise.all([yhub.stream.getPendingTasksSize(), yhub.stream.getActiveStreams().then(as => as.length)])
+    console.log({ pendingTasksSize, activeStreams })
+    if (pendingTasksSize > 0) {
+      await promise.wait(1000)
+    }
+    return pendingTasksSize === 0 && activeStreams === 0
+  }, (yhub.conf.redis.minMessageLifetime ?? 10000) * 50))

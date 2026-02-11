@@ -193,7 +193,7 @@ export const $task = $compactTask
  *   contentmap: IfHasConf<Include, 'contentmap', Uint8Array<ArrayBuffer>>,
  *   references: IfHasConf<Include, 'references', Array<{ assetId: AssetId, asset: Asset }>>,
  *   contentids: IfHasConf<Include, 'contentids', Uint8Array<ArrayBuffer>>,
- *   awareness: IfHasConf<Include, 'awareness', import('@y/protocols/awareness').Awareness>
+ *   awareness: IfHasConf<Include, 'awareness', Uint8Array<ArrayBuffer>>
  * }, 1>} DocTable
  */
 

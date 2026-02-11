@@ -10,7 +10,6 @@ import * as time from 'lib0/time'
 import * as number from 'lib0/number'
 import * as t from './types.js'
 import * as protocol from './protocol.js'
-import * as array from 'lib0/array'
 import * as env from 'lib0/environment'
 
 const log = logging.createModuleLogger('@y/hub/ws')
@@ -646,8 +645,8 @@ const registerWebsocketServer = (yhub, app) => {
         }
         log('sent syncstep2 to client')
         const aw = doctable.awareness
-        if (aw.states.size > 0) {
-          ws.send(protocol.encodeAwareness(aw, array.from(aw.states.keys())), true, false)
+        if (aw.byteLength > 3) {
+          ws.send(aw, true, false)
         }
       })
       user.lastReceivedClock = doctable.lastClock

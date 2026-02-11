@@ -12,11 +12,11 @@ export const testSyncAndCleanup = async tc => {
   const { ydoc: doc1 } = createWsClient({ syncAwareness: false })
   // doc2: can retrieve changes propagated on stream
   const { ydoc: doc2 } = createWsClient({ syncAwareness: false })
-  await promise.wait(5000)
+  await promise.wait(1000)
   doc1.get().setAttr('a', 1)
   t.info('docs syncing (0)')
   await utils.waitDocsSynced(doc1, doc2)
-  await promise.wait(5000)
+  await promise.wait(1000)
   t.info('docs synced (1)')
   const docStreamExistsBefore = await redisClient.exists(defaultStream)
   console.log('a:', doc2.get().getAttr('a'))

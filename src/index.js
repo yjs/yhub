@@ -22,6 +22,9 @@ export class YHub {
    * @param {p.Persistence} pers
    */
   constructor (conf, str, pers) {
+    if (conf.server) {
+      conf.server.maxDocSize = 500 * 1024 * 1024
+    }
     this.conf = conf
     this.stream = str
     this.persistence = pers

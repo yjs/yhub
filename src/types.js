@@ -260,9 +260,14 @@ export const $config = s.$object({
       docUpdate: /** @type {s.$Optional<s.Schema<(doctable:DocTable<{ gc: true, nongc: true, contentmap: true, contentids: true }>) => void>>} */ (s.$function.optional)
     }).optional
   }).nullable.optional,
-  server: s.$({
+  server: s.$object({
     port: s.$number,
-    auth: $authPlugin
+    auth: $authPlugin,
+    /**
+     * Maximum expected Ydoc size in bytes. Used as baseline to calculate WebSocket
+     * maxPayloadLength and maxBackpressure. (default: 500MB)
+     */
+    maxDocSize: s.$number.optional
   }).nullable.optional
 })
 

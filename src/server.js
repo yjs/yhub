@@ -10,7 +10,7 @@ import * as time from 'lib0/time'
 import * as number from 'lib0/number'
 import * as t from './types.js'
 import * as protocol from './protocol.js'
-import * as env from 'lib0/environment'
+import * as math from 'lib0/math'
 
 const log = logging.createModuleLogger('@y/hub/ws')
 
@@ -556,9 +556,21 @@ class WSUser {
           }
         }
       })
-      const m = encoding.toUint8Array(encoder)
-      if (this.ws == null) log('Tried to send a message to client, but it isn\'t connected yet')
-      this.ws?.send(m, true, false)
+      this.sendData(encoding.toUint8Array(encoder))
+    }
+  }
+
+  /**
+   * @param {Uint8Array<ArrayBuffer>} m
+   */
+  sendData (m) {
+    if (this.ws == null) {
+      return log('Tried to send a message to client, but it isn\'t connected yet')
+    }
+    const sendResult = this.ws.send(m, true, false)
+    if (sendResult === 2) {
+      console.error(`Message to client=${this.id}, userid=${this.userid} dropped because of backpressure limit. socketBackpressure=${this.ws?.getBufferedAmount()} maxDocSize=${this.yhub.conf.server?.maxDocSize}`)
+      this.ws.end(400)
     }
   }
 
@@ -582,10 +594,11 @@ const reqToRoom = req => {
  * @param {uws.TemplatedApp} app
  */
 const registerWebsocketServer = (yhub, app) => {
+  const maxDocSize = s.$number.cast(yhub.conf.server?.maxDocSize)
   app.ws('/ws/:org/:docid', /** @type {uws.WebSocketBehavior<{ user: WSUser }>} */ ({
     compression: uws.SHARED_COMPRESSOR,
-    maxPayloadLength: number.parseInt(env.getConf('uws-max-payload-length') || (200 * 1024 * 1024).toString()), // max websocket payload default is 200mb
-    maxBackpressure: number.parseInt(env.getConf('uws-max-backpressure') || (200 * 1024 * 1024).toString()), // 200MB buffer to handle large initial syncs
+    maxPayloadLength: maxDocSize,
+    maxBackpressure: math.round(maxDocSize * 1.2),
     closeOnBackpressureLimit: true,
     idleTimeout: 120,
     sendPingsAutomatically: true,
@@ -637,16 +650,12 @@ const registerWebsocketServer = (yhub, app) => {
       const ydoc = doctable.gcDoc || doctable.nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
       if (user.isClosed) return
       ws.cork(() => {
-        ws.send(protocol.encodeSyncStep1(Y.encodeStateVectorFromUpdate(ydoc)), true, false)
-        if (ws.send(protocol.encodeSyncStep2(ydoc), true, false) !== 1) {
-          // @todo handle backpressure properly
-          log('failed because too much backpressure')
-          ws.end(400)
-        }
+        user.sendData(protocol.encodeSyncStep1(Y.encodeStateVectorFromUpdate(ydoc)))
+        user.sendData(protocol.encodeSyncStep2(ydoc))
         log('sent syncstep2 to client')
         const aw = doctable.awareness
         if (aw.byteLength > 3) {
-          ws.send(aw, true, false)
+          user.sendData(aw)
         }
       })
       user.lastReceivedClock = doctable.lastClock

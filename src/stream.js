@@ -282,7 +282,7 @@ export class Stream {
         })
       })
     })
-    log(() => ['retrieved message: ', { 'messages': res.map(r => ({ stream: r.streamName, ms: r.messages.map(m => ({ type: m.type, size: m.update.byteLength, rclock: m.redisClock})) }) )}])
+    log(() => ['retrieved message: ', { messages: res.map(r => ({ stream: r.streamName, ms: r.messages.map(m => ({ type: m.type, size: m.update.byteLength, rclock: m.redisClock })) })) }])
     return res
   }
 

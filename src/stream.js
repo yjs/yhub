@@ -131,7 +131,7 @@ export class Stream {
            * @param {Buffer} message
            */
           transformArguments (key, message) {
-            log('adding message ', { key, message })
+            log(() => ['adding message ', { key, messageSize: message.byteLength }])
             return [key, message]
           },
           /**
@@ -282,7 +282,7 @@ export class Stream {
         })
       })
     })
-    log('retrieved messages: ', res)
+    log(() => ['retrieved message: ', { 'messages': res.map(r => ({ stream: r.streamName, ms: r.messages.map(m => ({ type: m.type, size: m.update.byteLength, rclock: m.redisClock})) }) )}])
     return res
   }
 

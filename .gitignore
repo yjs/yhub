@@ -7,3 +7,4 @@ tmp
 .env.backup*
 .DS_Store
 .vscode
+*.test.ydoc

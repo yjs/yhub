@@ -18,8 +18,8 @@
     "dist": "npm run types",
     "types": "tsc --skipLibCheck",
     "lint": "standard && tsc --skipLibCheck",
-    "test": "node --expose-gc --env-file .env $(test -f .env.testing && echo '--env-file .env.testing') tests/index.js",
-    "debug:test": "node --expose-gc --env-file .env $(test -f .env.testing && echo '--env-file .env.testing') --inspect-brk tests/index.js",
+    "test": "node --expose-gc --max-old-space-size=8192 --env-file .env $(test -f .env.testing && echo '--env-file .env.testing') tests/index.js",
+    "debug:test": "node --expose-gc --max-old-space-size=8192 --env-file .env $(test -f .env.testing && echo '--env-file .env.testing') --inspect-brk tests/index.js",
     "preversion": "npm run lint && npm run dist",
     "clean": "rm -rf **/dist "
   },

@@ -8,6 +8,8 @@ import * as delta from 'lib0/delta'
 import * as stream from '../src/stream.js'
 import * as array from 'lib0/array'
 import * as math from 'lib0/math'
+import * as fs from 'node:fs'
+import * as prng from 'lib0/prng'
 
 /**
  * @param {string} path
@@ -214,5 +216,46 @@ export const testManyConnectionsMemoryDebug = async tc => {
     t.assert(heapSizeIncrease < (maxMemory - beforeMemory) * 0.2) // memory increased by max 20%
   } finally {
     yhub.conf.worker.taskConcurrency = beforeTaskConcurrency
+  }
+}
+
+/**
+ * @param {t.TestCase} tc
+ */
+export const testLargeDoc = async tc => {
+  const { createWsClient, yhub, org } = await utils.createTestCase(tc)
+  const prevMinMessageLifletime = yhub.conf.redis.minMessageLifetime
+  yhub.conf.redis.minMessageLifetime = 1000_000
+  try {
+    const c1 = await createWsClient({ waitForSync: true, syncAwareness: true, docid: 'large-doc' })
+    const largeDocPath = new URL('../large.test.ydoc', import.meta.url)
+    let largeDocBin
+    if (fs.existsSync(largeDocPath)) {
+      largeDocBin = new Uint8Array(fs.readFileSync(largeDocPath))
+    } else {
+      const tmpDoc = new Y.Doc()
+      for (let i = 0; i < 1000_000; i++) {
+        tmpDoc.get().insert(0, [{ i, somestring: prng.word(tc.prng, 30) }])
+      }
+      largeDocBin = Y.encodeStateAsUpdate(tmpDoc)
+      tmpDoc.destroy()
+    }
+    console.log(`binary encoded ydoc size: ${largeDocBin.byteLength}`)
+    t.measureTime('loading large doc to memory', () => {
+      Y.applyUpdate(c1.ydoc, largeDocBin)
+    })
+    await t.measureTimeAsync('syncing with remote client', async () => {
+      const c2 = await createWsClient({ waitForSync: true, syncAwareness: true, docid: 'large-doc' })
+      t.info('waiting for sync with other client')
+      await promise.until(360_000, () => c2.ydoc.store.clients.size > 0 || c2.ydoc.store.pendingStructs != null)
+      t.assert(c2.ydoc.store.clients.size > 0)
+    })
+    t.info('synced e2e two large ydocs')
+    await t.measureTimeAsync('fetching /activity from test api', async () => {
+      const activity = await fetchYhubResponse(`/activity/${org}/${c1.ydoc.guid}?group=true`)
+      console.log({ activity })
+    })
+  } finally {
+    yhub.conf.redis.minMessageLifetime = prevMinMessageLifletime
   }
 }

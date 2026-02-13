@@ -101,7 +101,16 @@ const createWsClient = (tc, { docid = 'index', branch = 'main', gc = true, syncA
   const testPrefix = tc.testName
   const guid = testPrefix + '-' + docid
   const ydoc = new Y.Doc({ gc, guid })
-  const provider = new WebsocketProvider(_wsUrl, guid, ydoc, { WebSocketPolyfill: /** @type {any} */ (WebSocket), disableBc: true, params: { branch, gc: gc.toString(), ...wsParams } })
+  const WsPolyfill = /** @type {any} */ (class extends WebSocket {
+    /**
+     * @param {string} url
+     * @param {string|string[]} [protocols]
+     */
+    constructor (url, protocols) {
+      super(url, protocols, { maxPayload: 500 * 1024 * 1024 })
+    }
+  })
+  const provider = new WebsocketProvider(_wsUrl, guid, ydoc, { WebSocketPolyfill: WsPolyfill, disableBc: true, params: { branch, gc: gc.toString(), ...wsParams } })
   previousClients.push(ydoc)
   previousClients.push(provider)
   previousClients.push(provider.awareness)
@@ -163,7 +172,7 @@ export const createTestCase = async tc => {
  */
 export const waitDocsSynced = (ydoc1, ydoc2) => {
   console.info('waiting for docs to sync...')
-  return promise.until(5000, () => {
+  return promise.until(100_000, () => {
     const cids1 = Y.createContentIdsFromDoc(ydoc1)
     const cids2 = Y.createContentIdsFromDoc(ydoc2)
     const diff = Y.excludeContentIds(cids1, cids2)

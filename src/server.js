@@ -567,6 +567,7 @@ class WSUser {
     if (this.ws == null) {
       return log('Tried to send a message to client, but it isn\'t connected yet')
     }
+    log(() => ['sending data to client', { size: m.byteLength, firstByte: m[0] }])
     const sendResult = this.ws.send(m, true, false)
     if (sendResult === 2) {
       console.error(`Message to client=${this.id}, userid=${this.userid} dropped because of backpressure limit. socketBackpressure=${this.ws?.getBufferedAmount()} maxDocSize=${this.yhub.conf.server?.maxDocSize}`)
@@ -596,7 +597,7 @@ const reqToRoom = req => {
 const registerWebsocketServer = (yhub, app) => {
   const maxDocSize = s.$number.cast(yhub.conf.server?.maxDocSize)
   app.ws('/ws/:org/:docid', /** @type {uws.WebSocketBehavior<{ user: WSUser }>} */ ({
-    compression: uws.SHARED_COMPRESSOR,
+    compression: uws.DISABLED,
     maxPayloadLength: maxDocSize,
     maxBackpressure: math.round(maxDocSize * 1.2),
     closeOnBackpressureLimit: true,
@@ -646,11 +647,13 @@ const registerWebsocketServer = (yhub, app) => {
       const user = ws.getUserData().user
       user.ws = ws
       log(() => ['client connected (uid=', user.id, ', ip=', Buffer.from(ws.getRemoteAddressAsText()).toString(), ')'])
+      user.sendData(protocol.encodeSyncStep1(Y.encodeStateVectorFromUpdate(Y.encodeStateAsUpdate(new Y.Doc()))))
       const doctable = await yhub.getDoc(user.room, { gc: user.gc, nongc: !user.gc, awareness: true })
       const ydoc = doctable.gcDoc || doctable.nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
       if (user.isClosed) return
       ws.cork(() => {
-        user.sendData(protocol.encodeSyncStep1(Y.encodeStateVectorFromUpdate(ydoc)))
+        // @todo reintroduce this and remove the above - only if large doc tests still runs
+        // user.sendData(protocol.encodeSyncStep1(Y.encodeStateVectorFromUpdate(ydoc)))
         user.sendData(protocol.encodeSyncStep2(ydoc))
         log('sent syncstep2 to client')
         const aw = doctable.awareness

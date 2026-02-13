@@ -18,7 +18,7 @@ import * as t from './types.js'
  */
 export const createPersistence = async (postgresUrl, plugins) => {
   // If a specific database is requested, ensure it exists
-  const sql = postgres(postgresUrl, {})
+  const sql = postgres(postgresUrl, { connect_timeout: 60 })
   try {
     await sql`SELECT 1 as connected`
   } catch (err) {

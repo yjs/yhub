@@ -20,7 +20,7 @@ const authHubPort = 9009
  * Alternatively, the auth info could also be stored in the protocol information of the websockets
  * to hide the auth info from logging tools.
  */
-utils.createTestHub({
+await utils.createTestHub({
   worker: null,
   server: {
     port: authHubPort,

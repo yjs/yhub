@@ -82,7 +82,11 @@ export class S3PersistenceV1 {
       return false
     }
     const path = t.assetIdToString(assetId)
-    await this.s3client.removeObject(this.bucket, path)
+    setTimeout(() => {
+      // delete at some point later, avoiding issues of clients pulling from stale data
+      // @todo it would be nice to implement a worker that finds unused s3 docs and deletes them
+      this.s3client.removeObject(this.bucket, path)
+    }, 10_000)
     return true
   }
 }

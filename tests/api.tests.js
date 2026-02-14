@@ -179,9 +179,9 @@ const logMemoryUsed = (prefix = '') => {
 /**
  * @param {t.TestCase} tc
  */
-export const testManyConnectionsMemoryDebug = async tc => {
-  const Iterations = 1
-  const NDocs = 5000
+export const testManyDistinctConnectionsMemoryDebug = async tc => {
+  const Iterations = 5
+  const NDocs = 500
   const gc = global.gc
   t.skip(gc == null)
   t.assert(gc)
@@ -192,23 +192,31 @@ export const testManyConnectionsMemoryDebug = async tc => {
   let maxMemory = 0
   const beforeMemory = logMemoryUsed('before memory')
   try {
-    for (let i = 0; i < Iterations; i++) {
-      const docs = await promise.all(array.unfold(NDocs, async (i) => {
-        const r = await createWsClient({ waitForSync: true, syncAwareness: false, docid: 'doc-' + i })
-        r.ydoc.get().insert(0, [i])
-        return r
-      }))
-      await promise.wait(300)
+    for (let currIteration = 0; currIteration < Iterations; currIteration++) {
+      t.info('starting iteration #' + currIteration)
+      await t.measureTimeAsync(`time to sync ${NDocs} docs`, async () => {
+        await promise.all(array.unfold(NDocs, async (i) => {
+          const r = await createWsClient({ waitForSync: true, syncAwareness: false, docid: 'doc-' + i })
+          r.ydoc.get().insert(0, [prng.utf16String(tc.prng)])
+          return r
+        }))
+        const docBase = createWsClient({ syncAwareness: false, docid: 'doc-' + (NDocs - 1) })
+        await promise.untilAsync(async () => {
+          // console.log('inserted elems', docBase.ydoc.get().length, docBase.ydoc.get().toJSON())
+          return docBase.ydoc.get().length === currIteration + 1
+        })
+      })
       const afterMemory = logMemoryUsed('after updates memory')
       maxMemory = math.max(maxMemory, afterMemory)
-      docs.length = 0
       utils.cleanPreviousClients()
       await promise.wait(100)
       gc()
-      logMemoryUsed('cleaning up memory - iteration #' + i)
+      logMemoryUsed('cleaning up memory - iteration #' + currIteration)
     }
     await promise.wait(yhub.conf.redis.minMessageLifetime)
-    await utils.waitTasksProcessed(yhub)
+    t.measureTimeAsync('time to process all tasks', async () => {
+      await utils.waitTasksProcessed(yhub)
+    })
     gc()
     const cleanedUpMemory = logMemoryUsed('cleaned up memory')
     console.log({ maxMemory: maxMemory / 1000 / 1000, beforeMemory: beforeMemory / 1000 / 1000, cleanedUpMemory: cleanedUpMemory / 1000 / 1000, diff: (cleanedUpMemory - beforeMemory) / 1000 / 1000 })

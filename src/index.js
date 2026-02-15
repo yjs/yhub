@@ -81,9 +81,11 @@ export class YHub {
    * @template {{ gc?: boolean, nongc?: boolean, contentmap?: boolean, references?: boolean, contentids?: boolean, awareness?: boolean }} Include
    * @param {t.Room} room
    * @param {Include} includeContent
+   * @param {object} opts
+   * @param {boolean} [opts.gcOnMerge] whether to gc when merging updates. (default: true)
    * @return {Promise<t.DocTable<Include>>}
    */
-  async getDoc (room, includeContent) {
+  async getDoc (room, includeContent, { gcOnMerge = true } = {}) {
     const [persistedDoc, cachedMessages] = await promise.all([
       this.persistence.retrieveDoc(room, includeContent),
       this.stream.getMessages([{ room, clock: '0' }]).then(ms => ms[0] || { messages: [], lastClock: '0' })
@@ -105,7 +107,7 @@ export class YHub {
       }
     })
     return {
-      gcDoc: /** @type {Include['gc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (gcDoc ? mergeUpdatesAndGc(gcDoc) : null),
+      gcDoc: /** @type {Include['gc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (gcDoc ? (gcOnMerge ? mergeUpdatesAndGc(gcDoc) : Y.mergeUpdates(gcDoc)) : null),
       nongcDoc: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (nongcDoc ? Y.mergeUpdates(nongcDoc) : null),
       contentmap: /** @type {Include['contentmap'] extends true ? Uint8Array<ArrayBuffer> : null} */ (contentmap ? Y.encodeContentMap(Y.mergeContentMaps(contentmap.map(Y.decodeContentMap))) : null),
       contentids: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (contentids ? Y.encodeContentIds(Y.mergeContentIds(contentids.map(Y.decodeContentIds))) : null),
@@ -121,6 +123,9 @@ export class YHub {
  * @param {Array<Uint8Array<ArrayBuffer>>} updates
  */
 const mergeUpdatesAndGc = updates => {
+  if (updates.length === 1) {
+    return updates[0]
+  }
   const ydoc = new Y.Doc()
   updates.forEach(update => {
     Y.applyUpdate(ydoc, update)

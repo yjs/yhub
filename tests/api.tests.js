@@ -247,34 +247,50 @@ export const testLargeDoc = async tc => {
   const { createWsClient, yhub, org } = await utils.createTestCase(tc)
   const prevMinMessageLifletime = yhub.conf.redis.minMessageLifetime
   yhub.conf.redis.minMessageLifetime = 1000_000
+  const docid = 'large-doc'
+  let docidFull = docid
   try {
-    const c1 = await createWsClient({ waitForSync: true, syncAwareness: true, docid: 'large-doc' })
-    const largeDocPath = new URL('../large.test.ydoc', import.meta.url)
-    let largeDocBin
-    if (fs.existsSync(largeDocPath)) {
-      largeDocBin = new Uint8Array(fs.readFileSync(largeDocPath))
-    } else {
-      const tmpDoc = new Y.Doc()
-      for (let i = 0; i < 1000_000; i++) {
-        tmpDoc.get().insert(0, [{ i, somestring: prng.word(tc.prng, 30) }])
+    {
+      const c1 = await createWsClient({ waitForSync: true, syncAwareness: true, docid })
+      docidFull = c1.ydoc.guid
+      const largeDocPath = new URL('../large.test.ydoc', import.meta.url)
+      let largeDocBin
+      if (fs.existsSync(largeDocPath)) {
+        largeDocBin = new Uint8Array(fs.readFileSync(largeDocPath))
+      } else {
+        const tmpDoc = new Y.Doc()
+        for (let i = 0; i < 1000_000; i++) {
+          tmpDoc.get().insert(0, [{ i, somestring: prng.word(tc.prng, 30) }])
+        }
+        largeDocBin = Y.encodeStateAsUpdate(tmpDoc)
+        tmpDoc.destroy()
       }
-      largeDocBin = Y.encodeStateAsUpdate(tmpDoc)
-      tmpDoc.destroy()
+      console.log(`binary encoded ydoc size: ${largeDocBin.byteLength}`)
+      t.measureTime('loading large doc to memory', () => {
+        const beforeMemory = logMemoryUsed('before loading large ydoc')
+        Y.applyUpdate(c1.ydoc, largeDocBin)
+        const afterMem = logMemoryUsed('after loading large ydoc')
+        console.info('memory used for large doc: ', (afterMem - beforeMemory) / 1000 / 1000, 'mb')
+      })
+      await t.measureTimeAsync('sync e2e with remote client', async () => {
+        const c2 = await createWsClient({ waitForSync: true, syncAwareness: true, docid })
+        t.info('waiting for sync with other client')
+        await promise.until(360_000, () => c2.ydoc.store.clients.size > 0)
+        c2.ydoc.store.clients.forEach((c, clientid) => {
+          console.log('c2 client len', { len: c.length, clientid })
+        })
+        console.log('c2 url', c2.provider.url)
+        t.assert(c2.ydoc.store.clients.size > 0)
+      })
+      logMemoryUsed('synced e2e two large ydocs')
     }
-    console.log(`binary encoded ydoc size: ${largeDocBin.byteLength}`)
-    t.measureTime('loading large doc to memory', () => {
-      Y.applyUpdate(c1.ydoc, largeDocBin)
-    })
-    await t.measureTimeAsync('syncing with remote client', async () => {
-      const c2 = await createWsClient({ waitForSync: true, syncAwareness: true, docid: 'large-doc' })
-      t.info('waiting for sync with other client')
-      await promise.until(360_000, () => c2.ydoc.store.clients.size > 0 || c2.ydoc.store.pendingStructs != null)
-      t.assert(c2.ydoc.store.clients.size > 0)
-    })
-    t.info('synced e2e two large ydocs')
+    utils.cleanPreviousClients()
+    await promise.wait(1000)
     await t.measureTimeAsync('fetching /activity from test api', async () => {
-      const activity = await fetchYhubResponse(`/activity/${org}/${c1.ydoc.guid}?group=true`)
+      const activity = await fetchYhubResponse(`/activity/${org}/${docidFull}?group=true`)
+      logMemoryUsed('fetched activity')
       console.log({ activity })
+      t.assert(activity.length > 0)
     })
   } finally {
     yhub.conf.redis.minMessageLifetime = prevMinMessageLifletime

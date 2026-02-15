@@ -20,7 +20,7 @@ const storeDoc = (org, docid, ydoc) => {
  * @param {string} docid
  */
 const retrieveDoc = async (org, docid) => {
-  const { gcDoc: ydocBin, references } = await yhub.getDoc({ org, docid, branch: 'main' }, { gc: true, references: true })
+  const { gcDoc: ydocBin, references } = await yhub.getDoc({ org, docid, branch: 'main' }, { gc: true, references: true }, { gcOnMerge: false })
   return { ydoc: Y.createDocFromUpdate(ydocBin), references }
 }
 

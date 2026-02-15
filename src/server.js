@@ -120,7 +120,7 @@ export const createYHubServer = async (yhub, conf) => {
       return
     }
     try {
-      const { gcDoc, nongcDoc } = await yhub.getDoc(room, { gc, nongc: !gc })
+      const { gcDoc, nongcDoc } = await yhub.getDoc(room, { gc, nongc: !gc }, { gcOnMerge: false })
       const ydoc = gcDoc || nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
       if (aborted) return
       const encoder = encoding.createEncoder()
@@ -163,7 +163,7 @@ export const createYHubServer = async (yhub, conf) => {
         if (s.$object({ update: s.$uint8Array }).check(decodedBody)) {
           const { update } = decodedBody
           // Get current document state to diff against
-          const { gcDoc, nongcDoc } = await yhub.getDoc(room, { gc: true, nongc: false })
+          const { gcDoc, nongcDoc } = await yhub.getDoc(room, { gc: true, nongc: false }, { gcOnMerge: false })
           const currentDoc = gcDoc || nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
           const currentContentIds = Y.createContentIdsFromUpdate(currentDoc)
           const newContentIds = Y.excludeContentIds(Y.createContentIdsFromUpdate(update), currentContentIds)
@@ -650,7 +650,7 @@ const registerWebsocketServer = (yhub, app) => {
       const user = ws.getUserData().user
       user.ws = ws
       log(() => ['client connected (uid=', user.id, ', ip=', Buffer.from(ws.getRemoteAddressAsText()).toString(), ')'])
-      const doctable = await yhub.getDoc(user.room, { gc: user.gc, nongc: !user.gc, awareness: true })
+      const doctable = await yhub.getDoc(user.room, { gc: user.gc, nongc: !user.gc, awareness: true }, { gcOnMerge: false })
       const ydoc = doctable.gcDoc || doctable.nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
       if (user.isClosed) return
       ws.cork(() => {

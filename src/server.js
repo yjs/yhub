@@ -650,13 +650,11 @@ const registerWebsocketServer = (yhub, app) => {
       const user = ws.getUserData().user
       user.ws = ws
       log(() => ['client connected (uid=', user.id, ', ip=', Buffer.from(ws.getRemoteAddressAsText()).toString(), ')'])
-      user.sendData(protocol.encodeSyncStep1(Y.encodeStateVectorFromUpdate(Y.encodeStateAsUpdate(new Y.Doc()))))
       const doctable = await yhub.getDoc(user.room, { gc: user.gc, nongc: !user.gc, awareness: true })
       const ydoc = doctable.gcDoc || doctable.nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
       if (user.isClosed) return
       ws.cork(() => {
-        // @todo reintroduce this and remove the above - only if large doc tests still runs
-        // user.sendData(protocol.encodeSyncStep1(Y.encodeStateVectorFromUpdate(ydoc)))
+        user.sendData(protocol.encodeSyncStep1(Y.encodeStateVectorFromUpdate(ydoc)))
         user.sendData(protocol.encodeSyncStep2(ydoc))
         log('sent syncstep2 to client')
         const aw = doctable.awareness

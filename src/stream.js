@@ -259,7 +259,7 @@ export class Stream {
       [redis.RESP_TYPES.BLOB_STRING]: Buffer
     }).xRead(
       streams,
-      blocking ? { BLOCK: 200, COUNT: 1000 } : {}
+      blocking ? { BLOCK: 200, COUNT: 5000 } : {}
     ))
     /**
      * @type {Array<{ room: t.Room, streamName: string, messages: Array<t.Message & { redisClock: string }>, lastClock: string }>}

@@ -176,12 +176,22 @@ const logMemoryUsed = (prefix = '') => {
   return heapUsed
 }
 
+const ydocBinLarge = (() => {
+  const ydoc = new Y.Doc()
+  for (let i = 0; i < 10_000; i++) {
+    ydoc.get('attrs').setAttr('' + i, i)
+  }
+  return Y.encodeStateAsUpdate(ydoc)
+})()
+
+console.log('size of large doc', ydocBinLarge.byteLength)
+
 /**
  * @param {t.TestCase} tc
  */
 export const testManyDistinctConnectionsMemoryDebug = async tc => {
   const Iterations = 5
-  const NDocs = 500
+  const NDocs = 100
   const gc = global.gc
   t.skip(gc == null)
   t.assert(gc)
@@ -197,13 +207,16 @@ export const testManyDistinctConnectionsMemoryDebug = async tc => {
       await t.measureTimeAsync(`time to sync ${NDocs} docs`, async () => {
         await promise.all(array.unfold(NDocs, async (i) => {
           const r = await createWsClient({ waitForSync: true, syncAwareness: false, docid: 'doc-' + i })
+          Y.applyUpdate(r.ydoc, ydocBinLarge)
           r.ydoc.get().insert(0, [prng.utf16String(tc.prng)])
           return r
         }))
-        const docBase = createWsClient({ syncAwareness: false, docid: 'doc-' + (NDocs - 1) })
-        await promise.untilAsync(async () => {
-          // console.log('inserted elems', docBase.ydoc.get().length, docBase.ydoc.get().toJSON())
-          return docBase.ydoc.get().length === currIteration + 1
+        await t.measureTimeAsync('time to pull last doc', async () => {
+          const docBase = createWsClient({ syncAwareness: false, docid: 'doc-' + (NDocs - 1) })
+          await promise.untilAsync(async () => {
+            // console.log('inserted elems', docBase.ydoc.get().length, docBase.ydoc.get().toJSON())
+            return docBase.ydoc.get().length === currIteration + 1
+          })
         })
       })
       const afterMemory = logMemoryUsed('after updates memory')

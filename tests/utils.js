@@ -114,7 +114,7 @@ const createWsClient = (tc, { docid = 'index', branch = 'main', gc = true, syncA
       super(url, protocols, { maxPayload: 500 * 1024 * 1024 })
     }
   })
-  const provider = new WebsocketProvider(_wsUrl, guid, ydoc, { WebSocketPolyfill: WsPolyfill, disableBc: true, params: { branch, gc: gc.toString(), ...wsParams } })
+  const provider = new WebsocketProvider(_wsUrl, guid, ydoc, { WebSocketPolyfill: WsPolyfill, socketTimeout: 1000_000, disableBc: true, params: { branch, gc: gc.toString(), ...wsParams } })
   previousClients.push(ydoc)
   previousClients.push(provider)
   previousClients.push(provider.awareness)

@@ -214,7 +214,7 @@ export const testManyDistinctConnectionsMemoryDebug = async tc => {
       logMemoryUsed('cleaning up memory - iteration #' + currIteration)
     }
     await promise.wait(yhub.conf.redis.minMessageLifetime)
-    t.measureTimeAsync('time to process all tasks', async () => {
+    await t.measureTimeAsync('time to process all tasks', async () => {
       await utils.waitTasksProcessed(yhub)
     })
     gc()

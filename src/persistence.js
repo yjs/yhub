@@ -11,6 +11,7 @@ import * as object from 'lib0/object'
 import * as s from 'lib0/schema'
 // eslint-disable-next-line
 import * as t from './types.js'
+import { isSmallerRedisClock } from './stream.js'
 
 /**
  * @param {string} postgresUrl - postgres://username:password@host:port/database
@@ -200,8 +201,9 @@ export class Persistence {
       references?.push({ assetId, asset: nongcDocAsset })
       return tryPersistencePluginRetrieve(this.plugins, assetId, nongcDocAsset)
     }))
+    const lastClock = array.last(rows.map(row => row.t).sort((a, b) => isSmallerRedisClock(a, b) ? -1 : 1)) || '0'
     return {
-      lastClock: array.last(rows)?.t || '0',
+      lastClock,
       gcDoc: /** @type {Include['gc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeGc ? gcUpdates.map(asset => asset.update) : null),
       nongcDoc: /** @type {Include['nongc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeNongc ? nongcUpdates.map(asset => asset.update) : null),
       contentmap: /** @type {Include['contentmap'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeContentmap ? contentmapAssets.map(asset => asset.contentmap) : null),

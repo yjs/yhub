@@ -60,11 +60,15 @@ export const yhub = await createYHub({
 })
 {
   const redis = yhub.stream.redis
-  const redisKeys = await redis.keys('yhub:testing:room:*')
+  const redisKeys = await redis.keys(`${yhub.stream.prefix}:room:*`)
   if (redisKeys.length > 0) {
     await redis.del(redisKeys)
   }
-  redis.xTrim(yhub.stream.workerStreamName, 'MAXLEN', 0)
+  try {
+    await redis.xGroupDestroy(yhub.stream.workerStreamName, yhub.stream.workerGroupName)
+  } catch (_) {}
+  await redis.xTrim(yhub.stream.workerStreamName, 'MAXLEN', 0)
+  await redis.xGroupCreate(yhub.stream.workerStreamName, yhub.stream.workerGroupName, '0', { MKSTREAM: true })
 }
 
 /**

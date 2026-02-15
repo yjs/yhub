@@ -176,7 +176,7 @@ export const createYHubServer = async (yhub, conf) => {
               [Y.createContentAttribute('insert', authResult.authInfo.userid), Y.createContentAttribute('insertAt', now)],
               [Y.createContentAttribute('delete', authResult.authInfo.userid), Y.createContentAttribute('deleteAt', now)]
             ))
-            yhub.stream.addMessage(room, { type: 'ydoc:update:v1', contentmap, update: diffedUpdate })
+            await yhub.stream.addMessage(room, { type: 'ydoc:update:v1', contentmap, update: diffedUpdate })
           }
           if (!aborted) {
             const encoder = encoding.createEncoder()
@@ -576,6 +576,9 @@ class WSUser {
   }
 
   destroy () {
+    if (!this.isClosed) {
+      this.ws?.close()
+    }
     this.yhub.stream.unsubscribe(this.room, this)
   }
 }
@@ -666,49 +669,60 @@ const registerWebsocketServer = (yhub, app) => {
     },
     message: (ws, messageBuffer) => {
       const user = ws.getUserData().user
+      /**
+       * @param {any} err
+       */
+      const handleErr = err => {
+        console.error('Error processing client message:', err)
+        user.destroy()
+      }
       // don't read any messages from users without write access
       if (!user.hasWriteAccess) return
-      // It is important to copy the data here
-      const message = Buffer.from(messageBuffer.slice(0, messageBuffer.byteLength))
-      const decoder = decoding.createDecoder(message)
-      switch (decoding.readVarUint(decoder)) {
-        case 0: { // sync message
-          const syncMessageType = decoding.readVarUint(decoder)
-          if (syncMessageType === protocol.messageSyncUpdate || syncMessageType === protocol.messageSyncStep2) {
-            const update = decoding.readVarUint8Array(decoder)
-            if (update.byteLength > 3) {
-              const now = time.getUnixTime()
-              const contentmap = Y.encodeContentMap(Y.createContentMapFromContentIds(
-                Y.createContentIdsFromUpdate(update),
-                [Y.createContentAttribute('insert', user.userid), Y.createContentAttribute('insertAt', now)],
-                [Y.createContentAttribute('delete', user.userid), Y.createContentAttribute('deleteAt', now)]
-              ))
-              yhub.stream.addMessage(user.room, { type: 'ydoc:update:v1', contentmap, update })
+      try {
+        // It is important to copy the data here
+        const message = Buffer.from(messageBuffer.slice(0, messageBuffer.byteLength))
+        const decoder = decoding.createDecoder(message)
+        switch (decoding.readVarUint(decoder)) {
+          case 0: { // sync message
+            const syncMessageType = decoding.readVarUint(decoder)
+            if (syncMessageType === protocol.messageSyncUpdate || syncMessageType === protocol.messageSyncStep2) {
+              const update = decoding.readVarUint8Array(decoder)
+              if (update.byteLength > 3) {
+                const now = time.getUnixTime()
+                const contentmap = Y.encodeContentMap(Y.createContentMapFromContentIds(
+                  Y.createContentIdsFromUpdate(update),
+                  [Y.createContentAttribute('insert', user.userid), Y.createContentAttribute('insertAt', now)],
+                  [Y.createContentAttribute('delete', user.userid), Y.createContentAttribute('deleteAt', now)]
+                ))
+                yhub.stream.addMessage(user.room, { type: 'ydoc:update:v1', contentmap, update }).catch(handleErr)
+              }
+            } else if (syncMessageType === protocol.messageSyncStep1) {
+              // can be safely ignored because we send the full initial state at the beginning
+            } else {
+              console.warn('Unknown sync message type', syncMessageType)
             }
-          } else if (syncMessageType === protocol.messageSyncStep1) {
-            // can be safely ignored because we send the full initial state at the beginning
-          } else {
-            console.warn('Unknown sync message type', syncMessageType)
+            break
           }
-          break
-        }
-        case 1: { // awareness message
-          const update = decoding.readVarUint8Array(decoder)
-          const awDecoder = decoding.createDecoder(update)
-          const alen = decoding.readVarUint(awDecoder) // number of awareness updates
-          const awId = decoding.readVarUint(awDecoder)
-          if (alen === 1 && (user.awarenessId === null || user.awarenessId === awId)) { // only update awareness if len=1
-            user.awarenessId = awId
-            user.awarenessLastClock = decoding.readVarUint(awDecoder)
+          case 1: { // awareness message
+            const update = decoding.readVarUint8Array(decoder)
+            const awDecoder = decoding.createDecoder(update)
+            const alen = decoding.readVarUint(awDecoder) // number of awareness updates
+            const awId = decoding.readVarUint(awDecoder)
+            if (alen === 1 && (user.awarenessId === null || user.awarenessId === awId)) { // only update awareness if len=1
+              user.awarenessId = awId
+              user.awarenessLastClock = decoding.readVarUint(awDecoder)
+            }
+            yhub.stream.addMessage(user.room, { type: 'awareness:v1', update }).catch(handleErr)
+            break
           }
-          yhub.stream.addMessage(user.room, { type: 'awareness:v1', update })
-          break
         }
+      } catch (err) {
+        handleErr(err)
       }
     },
     close: (ws, code, message) => {
       const user = ws.getUserData().user
-      user.awarenessId && yhub.stream.addMessage(user.room, { type: 'awareness:v1', update: protocol.encodeAwarenessUserDisconnected(user.awarenessId, user.awarenessLastClock) })
+      user.awarenessId && yhub.stream.addMessage(user.room, { type: 'awareness:v1', update: protocol.encodeAwarenessUserDisconnected(user.awarenessId, user.awarenessLastClock) }).catch(err => {})
       user.isClosed = true
       log(() => ['client connection closed (uid=', user.id, ', code=', code, ', message="', Buffer.from(message).toString(), '")'])
       user.destroy()

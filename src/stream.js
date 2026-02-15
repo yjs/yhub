@@ -149,6 +149,7 @@ export class Stream {
               if seq == "" then seq = "0" end
               return ts .. "-" .. (tonumber(seq) + 1)
             end
+            local acked = redis.call("XACK", "${this.workerStreamName}", "${this.workerGroupName}", ARGV[3])
             redis.call("XDEL", "${this.workerStreamName}", ARGV[3])
             local minidLifetime = (redis.call("TIME")[1] * 1000) - tonumber(ARGV[2])
             local minid = ARGV[1]
@@ -159,7 +160,7 @@ export class Stream {
             redis.call("XTRIM", KEYS[1], "MINID", minidLifetime)
             if redis.call("XLEN", KEYS[1]) == 0 then
               redis.call("DEL", KEYS[1])
-            else
+            elseif acked == 1 then
               redis.call("XADD", "${this.workerStreamName}", "*", "compact", KEYS[1])
               redis.call("XREADGROUP", "GROUP", "${this.workerGroupName}", "pending", "COUNT", 1, "STREAMS", "${this.workerStreamName}", ">")
             end
@@ -338,6 +339,9 @@ export class Stream {
           room: decodeRoomName(m.message.compact, this.prefix),
           redisClock: m?.id
         }
+      } else if (m === null) {
+        console.warn('[yhub-worker] deleting ghost task from stream')
+        return null
       } else {
         console.error('found unknown task type', m?.message)
         return null

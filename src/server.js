@@ -722,7 +722,9 @@ const registerWebsocketServer = (yhub, app) => {
     },
     close: (ws, code, message) => {
       const user = ws.getUserData().user
-      user.awarenessId && yhub.stream.addMessage(user.room, { type: 'awareness:v1', update: protocol.encodeAwarenessUserDisconnected(user.awarenessId, user.awarenessLastClock) }).catch(err => {})
+      user.awarenessId && yhub.stream.addMessage(user.room, { type: 'awareness:v1', update: protocol.encodeAwarenessUserDisconnected(user.awarenessId, user.awarenessLastClock) }).catch(err => {
+        console.error('Error adding message to redis', err)
+      })
       user.isClosed = true
       log(() => ['client connection closed (uid=', user.id, ', code=', code, ', message="', Buffer.from(message).toString(), '")'])
       user.destroy()

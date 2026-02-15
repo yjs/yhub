@@ -68,7 +68,7 @@
     "lib0": "^1.0.0-rc.1",
     "minio": "^8.0.6",
     "postgres": "^3.4.3",
-    "redis": "^4.6.12",
+    "redis": "^5.10.0",
     "uws": "github:uNetworking/uWebSockets.js#v20.57.0"
   },
   "engines": {

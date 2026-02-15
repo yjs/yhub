@@ -127,19 +127,16 @@ export class Stream {
             redis.call("XADD", KEYS[1], "*", "m", ARGV[1])
           `,
           /**
+           * @param {import('@redis/client').CommandParser} parser
            * @param {string} key
            * @param {Buffer} message
            */
-          transformArguments (key, message) {
+          parseCommand (parser, key, message) {
             log(() => ['adding message ', { key, messageSize: message.byteLength }])
-            return [key, message]
+            parser.pushKey(key)
+            parser.push(message)
           },
-          /**
-           * @param {null} x
-           */
-          transformReply (x) {
-            return x
-          }
+          transformReply (reply) { return reply }
         }),
         trimMessages: redis.defineScript({
           NUMBER_OF_KEYS: 1,
@@ -166,20 +163,17 @@ export class Stream {
             end
           `,
           /**
+           * @param {import('@redis/client').CommandParser} parser
            * @param {string} streamName
            * @param {string} minId
            * @param {number} maxAgeMs - in milliseconds
            * @param {string} taskId
            */
-          transformArguments (streamName, minId, maxAgeMs, taskId) {
-            return [streamName, minId, maxAgeMs.toString(), taskId]
+          parseCommand (parser, streamName, minId, maxAgeMs, taskId) {
+            parser.pushKey(streamName)
+            parser.push(minId, maxAgeMs.toString(), taskId)
           },
-          /**
-           * @param {null} x
-           */
-          transformReply (x) {
-            return x
-          }
+          transformReply (reply) { return reply }
         })
       }
     })
@@ -261,11 +255,12 @@ export class Stream {
     }
     const streams = rooms.map(asset => ({ key: s.$string.check(asset.room) ? asset.room : encodeRoomName(asset.room, this.prefix), id: asset.clock || '0' }))
     log('retrieving messages: ', streams)
-    const reads = await redisClient.xRead(
-      redis.commandOptions({ returnBuffers: true }),
+    const reads = /** @type {Array<{name: Buffer, messages: Array<{id: Buffer, message: Record<string, Buffer>}>}> | null} */ (await redisClient.withTypeMapping({
+      [redis.RESP_TYPES.BLOB_STRING]: Buffer
+    }).xRead(
       streams,
       blocking ? { BLOCK: 200, COUNT: 1000 } : {}
-    )
+    ))
     /**
      * @type {Array<{ room: t.Room, streamName: string, messages: Array<t.Message & { redisClock: string }>, lastClock: string }>}
      */
@@ -332,6 +327,15 @@ export class Stream {
    */
   async claimTasks (count) {
     const reclaimedTasks = await this.redis.xAutoClaim(this.workerStreamName, this.workerGroupName, this.consumername, this.taskDebounce, '0', { COUNT: count })
+    if (reclaimedTasks.deletedMessages.length > 0) {
+      console.warn('[yhub-worker] deleting ghost tasks from stream', reclaimedTasks.deletedMessages)
+      const multi = this.redis.multi()
+      for (const id of reclaimedTasks.deletedMessages) {
+        multi.xAck(this.workerStreamName, this.workerGroupName, id)
+        multi.xDel(this.workerStreamName, id)
+      }
+      multi.exec()
+    }
     const tasks = reclaimedTasks.messages.map(m => {
       if (m?.message.compact != null) {
         return {

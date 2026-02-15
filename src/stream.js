@@ -9,6 +9,7 @@ import * as buffer from 'lib0/buffer'
 import * as array from 'lib0/array'
 import * as map from 'lib0/map'
 import * as math from 'lib0/math'
+import * as time from 'lib0/time'
 import * as logging from 'lib0/logging'
 
 const log = logging.createModuleLogger('@y/hub/stream')
@@ -81,6 +82,11 @@ export class Stream {
      * Minimum lifetime of y* update messages in redis streams. (default: 60 seconds)
      */
     this.minMessageLifetime = config.redis.minMessageLifetime ?? 60000
+    /**
+     * TTL for cached API responses in seconds. (default: 5 seconds)
+     * Results are cached for `cacheTtl + computeTime * 2`.
+     */
+    this.cacheTtl = config.redis.cacheTtl ?? 5
     this.workerStreamName = this.prefix + ':worker'
     this.workerGroupName = this.prefix + ':worker'
     this._destroyed = false
@@ -364,6 +370,27 @@ export class Stream {
    */
   async trimMessages (room, minId, maxAgeMs, taskid) {
     await this.redis.trimMessages(encodeRoomName(room, this.prefix), minId, maxAgeMs, taskid || '')
+  }
+
+  /**
+   * Cache results for `cacheTtl + computeTime * 2`.
+   *
+   * @param {string} endpoint
+   * @param {Array<string>} args
+   * @param {() => Promise<Uint8Array>} computeResult
+   * @return {Promise<Uint8Array | Buffer>}
+   */
+  async cachedGet (endpoint, args, computeResult) {
+    const key = `${this.prefix}:cache:${endpoint}:${args.join(':')}`
+    const cached = await /** @type {Promise<Buffer | null>} */ (this.redis.withTypeMapping({
+      [redis.RESP_TYPES.BLOB_STRING]: Buffer
+    }).get(key))
+    if (cached != null) return cached
+    const startTime = time.getUnixTime()
+    const result = await computeResult()
+    const computeTime = math.floor((time.getUnixTime() - startTime) / 1000)
+    this.redis.set(key, Buffer.from(result), { EX: this.cacheTtl + computeTime * 2 })
+    return result
   }
 }
 

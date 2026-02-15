@@ -247,7 +247,11 @@ export const $config = s.$object({
     /**
      * Minimum lifetime of y* update messages in redis streams. (default: 60 seconds)
      */
-    minMessageLifetime: s.$number.optional
+    minMessageLifetime: s.$number.optional,
+    /**
+     * TTL for cached API responses in seconds. (default: 10 seconds)
+     */
+    cacheTtl: s.$number.optional
   }),
   postgres: s.$string,
   persistence: s.$array($persistencePlugin),

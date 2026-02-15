@@ -301,37 +301,38 @@ export const createYHubServer = async (yhub, conf) => {
       if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
       return
     }
-    const { nongcDoc: nongcDocBin, contentmap: contentmapBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
-    const contentmap = Y.decodeContentMap(contentmapBin)
-    const filteredAttributions = filterContentMapHelper(contentmap, from, to, by, undefined)
-    const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, from != null ? from - 1 : null, undefined, undefined))
-    const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, to, undefined, undefined))
-    const prevDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, beforeContentIds)
-    const nextDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, afterContentIds)
-    /**
-     * @type {any}
-     */
-    const response = {}
-    if (includeAttributions) {
-      response.attributions = Y.encodeContentMap(filteredAttributions)
-    }
-    if (includeYdoc || includeDelta) {
-      if (includeYdoc) {
-        response.prevDoc = prevDocUpdate
-        response.nextDoc = nextDocUpdate
+    const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeYdoc), String(includeDelta), String(includeAttributions)]
+    const responseData = await yhub.stream.cachedGet('changeset', cacheArgs, async () => {
+      const { nongcDoc: nongcDocBin, contentmap: contentmapBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
+      const contentmap = Y.decodeContentMap(contentmapBin)
+      const filteredAttributions = filterContentMapHelper(contentmap, from, to, by, undefined)
+      const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, from != null ? from - 1 : null, undefined, undefined))
+      const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, to, undefined, undefined))
+      const prevDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, beforeContentIds)
+      const nextDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, afterContentIds)
+      /** @type {any} */
+      const response = {}
+      if (includeAttributions) {
+        response.attributions = Y.encodeContentMap(filteredAttributions)
       }
-      if (includeDelta) {
-        const prevDoc = new Y.Doc()
-        const nextDoc = new Y.Doc()
-        Y.applyUpdate(prevDoc, prevDocUpdate)
-        Y.applyUpdate(nextDoc, nextDocUpdate)
-        const am = Y.createAttributionManagerFromDiff(prevDoc, nextDoc, { attrs: filteredAttributions })
-        response.delta = nextDoc.get().toDelta(am).toJSON()
+      if (includeYdoc || includeDelta) {
+        if (includeYdoc) {
+          response.prevDoc = prevDocUpdate
+          response.nextDoc = nextDocUpdate
+        }
+        if (includeDelta) {
+          const prevDoc = new Y.Doc()
+          const nextDoc = new Y.Doc()
+          Y.applyUpdate(prevDoc, prevDocUpdate)
+          Y.applyUpdate(nextDoc, nextDocUpdate)
+          const am = Y.createAttributionManagerFromDiff(prevDoc, nextDoc, { attrs: filteredAttributions })
+          response.delta = nextDoc.get().toDelta(am).toJSON()
+        }
       }
-    }
-    const encoder = encoding.createEncoder()
-    encoding.writeAny(encoder, response)
-    const responseData = encoding.toUint8Array(encoder)
+      const encoder = encoding.createEncoder()
+      encoding.writeAny(encoder, response)
+      return encoding.toUint8Array(encoder)
+    })
     if (!aborted) {
       res.cork(() => {
         setCorsHeaders(res)
@@ -361,101 +362,90 @@ export const createYHubServer = async (yhub, conf) => {
       if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
       return
     }
-    const { contentmap: contentmapBin, nongcDoc: nongcDocBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
-    const contentmap = Y.decodeContentMap((contentmapBin))
-    const filteredAttributions = filterContentMapHelper(contentmap, from, to, undefined, undefined)
-    /**
-     * @type {Array<{ from: number, to: number, by: string|null }>}
-     */
-    const activity = []
-    filteredAttributions.inserts.forEach(attrRange => {
+    const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), String(includeDelta), String(limit), reverse ? 'desc' : 'asc', String(group)]
+    const responseData = await yhub.stream.cachedGet('activity', cacheArgs, async () => {
+      const { contentmap: contentmapBin, nongcDoc: nongcDocBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
+      const contentmap = Y.decodeContentMap((contentmapBin))
+      const filteredAttributions = filterContentMapHelper(contentmap, from, to, undefined, undefined)
       /**
-       * @type {number?}
+       * @type {Array<{ from: number, to: number, by: string|null }>}
        */
-      let t = null
-      /**
-       * @type {string?}
-       */
-      let by = null
-      attrRange.attrs.forEach(attr => {
-        if (attr.name === 'insertAt') {
-          t = attr.val
-        } else if (attr.name === 'insert') {
-          by = attr.val
+      const activity = []
+      filteredAttributions.inserts.forEach(attrRange => {
+        /** @type {number?} */
+        let t = null
+        /** @type {string?} */
+        let by = null
+        attrRange.attrs.forEach(attr => {
+          if (attr.name === 'insertAt') {
+            t = attr.val
+          } else if (attr.name === 'insert') {
+            by = attr.val
+          }
+        })
+        if (t != null) {
+          activity.push({ from: t, to: t, by })
         }
       })
-      if (t != null) {
-        activity.push({
-          from: t, to: t, by
+      filteredAttributions.deletes.forEach(attrRange => {
+        /** @type {number?} */
+        let t = null
+        /** @type {string?} */
+        let by = null
+        attrRange.attrs.forEach(attr => {
+          if (attr.name === 'deleteAt') {
+            t = attr.val
+          } else if (attr.name === 'delete') {
+            by = attr.val
+          }
         })
-      }
-    })
-    filteredAttributions.deletes.forEach(attrRange => {
-      /**
-       * @type {number?}
-       */
-      let t = null
-      /**
-       * @type {string?}
-       */
-      let by = null
-      attrRange.attrs.forEach(attr => {
-        if (attr.name === 'deleteAt') {
-          t = attr.val
-        } else if (attr.name === 'delete') {
-          by = attr.val
+        if (t != null) {
+          activity.push({ from: t, to: t, by })
         }
       })
-      if (t != null) {
-        activity.push({
-          from: t, to: t, by
+      activity.sort((a, b) => a.from - b.from)
+      /**
+       * @type {Array<{ from: number, to: number, by: string?, delta?: any }>}
+       */
+      const activityResult = []
+      const groupDistance = group ? 1000 : 1
+      /** @type {{ from: number, to: number, by: string? }|null} */
+      let lastActivity = null
+      activity.forEach(act => {
+        if (lastActivity != null && lastActivity.by === act.by && act.from - lastActivity.to < groupDistance) {
+          lastActivity.to = act.to
+        } else {
+          activityResult.push(act)
+          lastActivity = act
+        }
+      })
+      if (reverse) {
+        activityResult.reverse()
+      }
+      if (limit > 0) {
+        activityResult.splice(limit)
+      }
+      if (includeDelta) {
+        activityResult.forEach(act => {
+          const actAttributions = filterContentMapHelper(filteredAttributions, act.from, act.to, undefined, undefined)
+          const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, act.from != null ? act.from - 1 : null, undefined, undefined))
+          const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, act.to, undefined, undefined))
+          const prevDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, beforeContentIds)
+          const nextDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, afterContentIds)
+          const prevDoc = new Y.Doc()
+          const nextDoc = new Y.Doc()
+          Y.applyUpdate(prevDoc, prevDocUpdate)
+          Y.applyUpdate(nextDoc, nextDocUpdate)
+          const attrs = Y.createContentMapFromContentIds(Y.createContentIdsFromContentMap(actAttributions), [Y.createContentAttribute('insert', act.by), Y.createContentAttribute('insertAt', act.from)], [Y.createContentAttribute('delete', act.by), Y.createContentAttribute('deleteAt', act.from)])
+          const am = Y.createAttributionManagerFromDiff(prevDoc, nextDoc, { attrs })
+          // we only include the delta for the first type we find on ydoc.
+          act.delta = nextDoc.get(nextDoc.share.keys().next().value || '').toDelta(am).toJSON()
         })
       }
+      const encoder = encoding.createEncoder()
+      encoding.writeAny(encoder, activityResult)
+      return encoding.toUint8Array(encoder)
     })
-    activity.sort((a, b) => a.from - b.from)
-    /**
-     * @type {Array<{ from: number, to: number, by: string?, delta?: any }>}
-     */
-    const activityResult = []
-    const groupDistance = group ? 1000 : 1
-    /**
-     * @type {{ from: number, to: number, by: string? }|null}
-     */
-    let lastActivity = null
-    activity.forEach(act => {
-      if (lastActivity != null && lastActivity.by === act.by && act.from - lastActivity.to < groupDistance) {
-        lastActivity.to = act.to
-      } else {
-        activityResult.push(act)
-        lastActivity = act
-      }
-    })
-    if (reverse) {
-      activityResult.reverse()
-    }
-    if (limit > 0) {
-      activityResult.splice(limit)
-    }
-    if (includeDelta) {
-      activityResult.forEach(act => {
-        const actAttributions = filterContentMapHelper(filteredAttributions, act.from, act.to, undefined, undefined)
-        const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, act.from != null ? act.from - 1 : null, undefined, undefined))
-        const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, act.to, undefined, undefined))
-        const prevDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, beforeContentIds)
-        const nextDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, afterContentIds)
-        const prevDoc = new Y.Doc()
-        const nextDoc = new Y.Doc()
-        Y.applyUpdate(prevDoc, prevDocUpdate)
-        Y.applyUpdate(nextDoc, nextDocUpdate)
-        const attrs = Y.createContentMapFromContentIds(Y.createContentIdsFromContentMap(actAttributions), [Y.createContentAttribute('insert', act.by), Y.createContentAttribute('insertAt', act.from)], [Y.createContentAttribute('delete', act.by), Y.createContentAttribute('deleteAt', act.from)])
-        const am = Y.createAttributionManagerFromDiff(prevDoc, nextDoc, { attrs })
-        // we only include the delta for the first type we find on ydoc.
-        act.delta = nextDoc.get(nextDoc.share.keys().next().value || '').toDelta(am).toJSON()
-      })
-    }
-    const encoder = encoding.createEncoder()
-    encoding.writeAny(encoder, activityResult)
-    const responseData = encoding.toUint8Array(encoder)
     if (!aborted) {
       res.cork(() => {
         setCorsHeaders(res)

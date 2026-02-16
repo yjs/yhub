@@ -42,9 +42,10 @@ Retrieve the current state of the Yjs document.
 
 Update the Yjs document with new changes. Requires write access.
 
-* `PATCH /ydoc/{org}/{docid}` body: `{ update: Uint8Array }` parameters: `{ branch?: string }`
+* `PATCH /ydoc/{org}/{docid}` body: `{ update: Uint8Array, customAttributions?: Array<{ k: string, v: string }> }` parameters: `{ branch?: string }`
   * `update`: a Yjs update (encoded via `Y.encodeStateAsUpdate` or similar)
   * `branch="main"` (default): the branch to update
+  * `customAttributions`: optional array of key-value pairs to attach as custom attributions to the changes. These are stored as `insert:<key>` / `delete:<key>` attribution attributes alongside the standard ones.
   * The update is diffed against the current document state - only new content is applied and attributed
   * Attributions are automatically assigned to the authenticated user
   * Changes are distributed to connected WebSocket clients
@@ -88,10 +89,12 @@ const patchResponse = await fetch('/ydoc/my-org/my-doc-id', {
 Rollback all changes that match the pattern. The changes will be distributed via
 websockets.
 
-* `POST /rollback/{guid}` body: `{ from?: number, to?: number, by?: string, contentIds: Y.ContentIds }`
+* `POST /rollback/{guid}` body: `{ from?: number, to?: number, by?: string, contentIds?: Y.ContentIds, customAttributions?: Array<{ k: string, v: string }>, withCustomAttributions?: Array<{ k: string, v: string }> }`
   * `from`/`to`: unix timestamp range filter
   * `by=string`: comma-separated list of user-ids that matches the attributions
   * `contentIds`: Changeset that describes the changes between two versions.
+  * `customAttributions`: optional array of key-value pairs to attach as custom attributions to the rollback changes themselves (the undo operation).
+  * `withCustomAttributions`: optional array of key-value pairs to filter which changes to undo. Only changes whose attributions match all specified key-value pairs will be rolled back.
 
 ### Example
 
@@ -107,9 +110,10 @@ websockets.
 Visualize attributed changes using either pure deltas or by retrieving the
 before and after state of a Yjs doc. Optionally, include relevant attributions.
 
-* `GET /changeset/{guid}` parameters: `{ from?: number, to?: number, by?: string, ydoc?: boolean, contentIds?: Y.ContentIds, delta?: boolean, attributions?: boolean }`
+* `GET /changeset/{guid}` parameters: `{ from?: number, to?: number, by?: string, ydoc?: boolean, contentIds?: Y.ContentIds, delta?: boolean, attributions?: boolean, withCustomAttributions?: string }`
   * `from`/`to`: unix timestamp range filter
   * `by=string`: comma-separated list of user-ids that matches the attributions
+  * `withCustomAttributions=string`: filter by custom attributions using `key:value` pairs, comma-separated (e.g. `source:import,tag:v2`). Only changes matching all specified attributions are included.
   * `contentIds`: Changeset that describes the changes between two versions. @todo not implemented
   * `ydoc=true`: include encoded Yjs docs
   * `delta=true`: include delta representation

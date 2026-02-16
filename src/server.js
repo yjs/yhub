@@ -138,6 +138,20 @@ export const createYHubServer = async (yhub, conf) => {
     }
   })
 
+  /**
+   * @param {Y.ContentIds} contentids
+   * @param {string} userid
+   * @param {Array<{ k: string, v: string }>} customAttributions
+   */
+  const createContentMapFromParams = (contentids, userid, customAttributions) => {
+    const now = time.getUnixTime()
+    return Y.encodeContentMap(Y.createContentMapFromContentIds(
+      contentids,
+      [Y.createContentAttribute('insert', userid), Y.createContentAttribute('insertAt', now), ...customAttributions.map(attr => Y.createContentAttribute('insert:' + attr.k, attr.v))],
+      [Y.createContentAttribute('delete', userid), Y.createContentAttribute('deleteAt', now), ...customAttributions.map(attr => Y.createContentAttribute('delete:' + attr.k, attr.v))]
+    ))
+  }
+
   // PATCH /ydoc/{org}/{docid} - Update the Yjs document
   app.patch('/ydoc/:org/:docid', (res, req) => {
     const room = reqToRoom(req)
@@ -160,8 +174,8 @@ export const createYHubServer = async (yhub, conf) => {
       try {
         const decoder = decoding.createDecoder(buffer)
         const decodedBody = decoding.readAny(decoder)
-        if (s.$object({ update: s.$uint8Array }).check(decodedBody)) {
-          const { update } = decodedBody
+        if (s.$object({ update: s.$uint8Array, customAttributions: s.$array(s.$object({ k: s.$string, v: s.$string })).optional }).check(decodedBody)) {
+          const { update, customAttributions = [] } = decodedBody
           // Get current document state to diff against
           const { gcDoc, nongcDoc } = await yhub.getDoc(room, { gc: true, nongc: false }, { gcOnMerge: false })
           const currentDoc = gcDoc || nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
@@ -170,12 +184,7 @@ export const createYHubServer = async (yhub, conf) => {
           // only attribute "new" content
           const diffedUpdate = /** @type {Uint8Array<ArrayBuffer>} */ (Y.intersectUpdateWithContentIds(update, newContentIds))
           if (diffedUpdate.byteLength > 3) {
-            const now = time.getUnixTime()
-            const contentmap = Y.encodeContentMap(Y.createContentMapFromContentIds(
-              Y.createContentIdsFromUpdate(diffedUpdate),
-              [Y.createContentAttribute('insert', authResult.authInfo.userid), Y.createContentAttribute('insertAt', now)],
-              [Y.createContentAttribute('delete', authResult.authInfo.userid), Y.createContentAttribute('deleteAt', now)]
-            ))
+            const contentmap = createContentMapFromParams(Y.createContentIdsFromUpdate(diffedUpdate), authResult.authInfo.userid, customAttributions)
             await yhub.stream.addMessage(room, { type: 'ydoc:update:v1', contentmap, update: diffedUpdate })
           }
           if (!aborted) {
@@ -230,21 +239,25 @@ export const createYHubServer = async (yhub, conf) => {
         const decoder = decoding.createDecoder(buffer)
         // body structure: { from?: number, to?: number, by?: string, contentIds?: buffer }
         const decodedBody = decoding.readAny(decoder)
-        if (s.$object({ from: s.$number.optional, to: s.$number.optional, by: s.$string.optional, contentIds: s.$uint8Array.optional }).check(decodedBody)) {
-          const { from, to, by, contentIds: contentIdsBin } = decodedBody
+        if (s.$object({ from: s.$number.optional, to: s.$number.optional, by: s.$string.optional, contentIds: s.$uint8Array.optional, customAttributions: s.$array(s.$object({ k: s.$string, v: s.$string })).optional, withCustomAttributions: s.$array(s.$object({ k: s.$string, v: s.$string })).optional }).check(decodedBody)) {
+          const { from, to, by, contentIds: contentIdsBin, customAttributions = [], withCustomAttributions = null } = decodedBody
           const contentIds = contentIdsBin && Y.decodeContentIds(contentIdsBin)
+          if (!from && !to && !by && !contentIds && (withCustomAttributions ?? []).length === 0) {
+            !aborted && sendErrorResponse(res, '400 Bad Request', { error: 'Rollback requires at least one filter (from, to, by, contentIds, or withCustomAttributions)' })
+            return
+          }
           const { contentmap: contentmapBin, nongcDoc: nongcDocBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
           const contentmap = Y.decodeContentMap(contentmapBin)
           const ydoc = new Y.Doc({ gc: false })
           Y.applyUpdate(ydoc, nongcDocBin)
-          const reducedAttributions = filterContentMapHelper(contentmap, from, to, by, contentIds)
+          const reducedAttributions = filterContentMapHelper(contentmap, from, to, by, contentIds, withCustomAttributions)
           const revertIds = Y.createContentIdsFromContentMap(reducedAttributions)
           ydoc.once('update', update => {
-            const now = time.getUnixTime()
+            const contentmap = createContentMapFromParams(Y.createContentIdsFromUpdate(update), authResult.authInfo.userid, customAttributions)
             yhub.stream.addMessage(room, {
               type: 'ydoc:update:v1',
               update,
-              contentmap: Y.encodeContentMap(Y.createContentMapFromContentIds(Y.createContentIdsFromUpdate(update), [Y.createContentAttribute('insert', authResult.authInfo.userid), Y.createContentAttribute('insertAt', now)], [Y.createContentAttribute('delete', authResult.authInfo.userid), Y.createContentAttribute('deleteAt', now)]))
+              contentmap
             })
           })
           Y.undoContentIds(ydoc, revertIds)
@@ -291,6 +304,9 @@ export const createYHubServer = async (yhub, conf) => {
     const includeYdoc = req.getQuery('ydoc') === 'true'
     const includeDelta = req.getQuery('delta') === 'true'
     const includeAttributions = req.getQuery('attributions') === 'true'
+    const withCustomAttributionsParam = req.getQuery('withCustomAttributions')
+    /** @type {Array<{k: string, v: string}>|null} */
+    const withCustomAttributions = withCustomAttributionsParam ? withCustomAttributionsParam.split(',').map(entry => { const [k, ...rest] = entry.split(':'); return { k, v: rest.join(':') } }) : null
     let aborted = false
     res.onAborted(() => {
       aborted = true
@@ -301,13 +317,13 @@ export const createYHubServer = async (yhub, conf) => {
       if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
       return
     }
-    const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeYdoc), String(includeDelta), String(includeAttributions)]
+    const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeYdoc), String(includeDelta), String(includeAttributions), withCustomAttributionsParam || '']
     const responseData = await yhub.stream.cachedGet('changeset', cacheArgs, async () => {
       const { nongcDoc: nongcDocBin, contentmap: contentmapBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
       const contentmap = Y.decodeContentMap(contentmapBin)
-      const filteredAttributions = filterContentMapHelper(contentmap, from, to, by, undefined)
-      const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, from != null ? from - 1 : null, undefined, undefined))
-      const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, to, undefined, undefined))
+      const filteredAttributions = filterContentMapHelper(contentmap, from, to, by, undefined, withCustomAttributions)
+      const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, from != null ? from - 1 : null, undefined, undefined, null))
+      const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, to, undefined, undefined, null))
       const prevDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, beforeContentIds)
       const nextDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, afterContentIds)
       /** @type {any} */
@@ -366,7 +382,7 @@ export const createYHubServer = async (yhub, conf) => {
     const responseData = await yhub.stream.cachedGet('activity', cacheArgs, async () => {
       const { contentmap: contentmapBin, nongcDoc: nongcDocBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
       const contentmap = Y.decodeContentMap((contentmapBin))
-      const filteredAttributions = filterContentMapHelper(contentmap, from, to, undefined, undefined)
+      const filteredAttributions = filterContentMapHelper(contentmap, from, to, undefined, undefined, null)
       /**
        * @type {Array<{ from: number, to: number, by: string|null }>}
        */
@@ -427,9 +443,9 @@ export const createYHubServer = async (yhub, conf) => {
       }
       if (includeDelta) {
         activityResult.forEach(act => {
-          const actAttributions = filterContentMapHelper(filteredAttributions, act.from, act.to, undefined, undefined)
-          const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, act.from != null ? act.from - 1 : null, undefined, undefined))
-          const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, act.to, undefined, undefined))
+          const actAttributions = filterContentMapHelper(filteredAttributions, act.from, act.to, undefined, undefined, null)
+          const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, act.from != null ? act.from - 1 : null, undefined, undefined, null))
+          const afterContentIds = Y.createContentIdsFromContentMap(filterContentMapHelper(contentmap, 0, act.to, undefined, undefined, null))
           const prevDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, beforeContentIds)
           const nextDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, afterContentIds)
           const prevDoc = new Y.Doc()
@@ -726,12 +742,13 @@ const registerWebsocketServer = (yhub, app) => {
  * @param {number|undefined?} to
  * @param {string|undefined?} by
  * @param {Y.ContentIds|undefined} requestedIds
+ * @param {Array<{k: string, v: string}>|null} customAttributions
  */
-const filterContentMapHelper = (contentMap, from, to, by, requestedIds) => {
+const filterContentMapHelper = (contentMap, from, to, by, requestedIds, customAttributions) => {
   if (requestedIds != null) {
     contentMap = Y.intersectContentMap(contentMap, requestedIds)
   }
-  if (from || to || by) {
+  if (from || to || by || (customAttributions != null && customAttributions.length > 0)) {
     /**
      * @param {Array<Y.ContentAttribute<any>>} attrs
      */
@@ -740,6 +757,15 @@ const filterContentMapHelper = (contentMap, from, to, by, requestedIds) => {
         return false
       }
       if (by != null && !attrs.some(attr => (attr.name === 'insert' || attr.name === 'delete') && /** @type {string} */ (attr.val).split(',').includes(by))) {
+        return false
+      }
+      if (customAttributions != null && !customAttributions.every(customAttr => attrs.some(attr => {
+        if (attr.name.startsWith('insert:') || attr.name.startsWith('delete:')) {
+          const arest = attr.name.slice(7)
+          return arest === customAttr.k && attr.val === customAttr.v
+        }
+        return false
+      }))) {
         return false
       }
       return true

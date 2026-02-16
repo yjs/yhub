@@ -170,6 +170,64 @@ export const testYdocRestApi = async tc => {
   t.compare(verifyDoc.get().toDelta(), delta.create(delta.$deltaAny).insert('initial new content'), 'Document should have updated content')
 }
 
+/**
+ * @param {t.TestCase} tc
+ */
+export const testCustomAttributionsRollback = async tc => {
+  const { org, createWsClient } = await utils.createTestCase(tc)
+  // Create initial document via websocket
+  const { ydoc: initialDoc, provider } = await createWsClient({ waitForSync: true })
+  initialDoc.get().applyDelta(delta.create().insert('hello world'))
+  await promise.wait(100)
+  provider.destroy()
+
+  // Fetch doc state, apply change 1 with custom attribution source=import
+  const get1 = await fetchYhubResponse(`/ydoc/${org}/${initialDoc.guid}`)
+  const doc1 = new Y.Doc()
+  Y.applyUpdate(doc1, get1.doc)
+  doc1.get().applyDelta(delta.create().retain(5).insert(' beautiful'))
+  const patchRes1 = await patchYhubRequest(`/ydoc/${org}/${initialDoc.guid}`, {
+    update: Y.encodeStateAsUpdate(doc1),
+    customAttributions: [{ k: 'source', v: 'userA' }]
+  })
+  t.assert(patchRes1.success === true)
+  await promise.wait(500)
+
+  // Fetch doc state, apply change 2 with custom attribution source=manual
+  const get2 = await fetchYhubResponse(`/ydoc/${org}/${initialDoc.guid}`)
+  const doc2 = new Y.Doc()
+  Y.applyUpdate(doc2, get2.doc)
+  // doc should now be "hello beautiful world"
+  t.compare(doc2.get().toDelta(), delta.create(delta.$deltaAny).insert('hello beautiful world'))
+  doc2.get().applyDelta(delta.create().insert('hey '))
+  const patchRes2 = await patchYhubRequest(`/ydoc/${org}/${initialDoc.guid}`, {
+    update: Y.encodeStateAsUpdate(doc2),
+    customAttributions: [{ k: 'source', v: 'userB' }]
+  })
+  t.assert(patchRes2.success === true)
+  await promise.wait(500)
+
+  // Verify current state: "hey hello beautiful world"
+  const { ydoc: beforeRollback } = await createWsClient({ waitForSync: true })
+  t.compare(beforeRollback.get().toDelta(), delta.create(delta.$deltaAny).insert('hey hello beautiful world'))
+
+  // Rollback without any filter should return an error
+  const emptyRollback = await postYhubRequest(`/rollback/${org}/${initialDoc.guid}`, {})
+  t.assert(emptyRollback.error != null, 'Rollback without filters should return an error')
+
+  // Rollback only changes with source=userA
+  const rollbackResult = await postYhubRequest(`/rollback/${org}/${initialDoc.guid}`, {
+    withCustomAttributions: [{ k: 'source', v: 'userA' }]
+  })
+  t.assert(rollbackResult.success === true)
+  await promise.wait(3000)
+
+  // Verify: " beautiful" should be undone, "hey " should remain
+  const { ydoc: afterRollback } = await createWsClient({ waitForSync: true })
+  console.log('after rollback json', afterRollback.get().toDelta().toJSON())
+  t.compare(afterRollback.get().toDelta(), delta.create(delta.$deltaAny).insert('hey hello world'))
+}
+
 const logMemoryUsed = (prefix = '') => {
   const heapUsed = process.memoryUsage().heapUsed
   console.log(`${prefix.length === 0 ? '' : `[${prefix}] `}Heap used: ${(heapUsed / 1024 / 1024).toFixed(2)} MB`)

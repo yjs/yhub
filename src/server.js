@@ -14,6 +14,37 @@ import * as math from 'lib0/math'
 
 const log = logging.createModuleLogger('@y/hub/ws')
 
+/**
+ * @param {Y.ContentIds} contentids
+ * @param {string} userid
+ * @param {Array<{ k: string, v: string }>} customAttributions
+ */
+const createContentMapFromParams = (contentids, userid, customAttributions) => {
+  const now = time.getUnixTime()
+  return Y.encodeContentMap(Y.createContentMapFromContentIds(
+    contentids,
+    [Y.createContentAttribute('insert', userid), Y.createContentAttribute('insertAt', now), ...customAttributions.map(attr => Y.createContentAttribute('insert:' + attr.k, attr.v))],
+    [Y.createContentAttribute('delete', userid), Y.createContentAttribute('deleteAt', now), ...customAttributions.map(attr => Y.createContentAttribute('delete:' + attr.k, attr.v))]
+  ))
+}
+
+/**
+ * @param {string|undefined} param
+ * @returns {Array<{k: string, v: string}>}
+ */
+const parseCustomAttributionsParam = (param) =>
+  param ? param.split(',').map(entry => { const [k, ...rest] = entry.split(':'); return { k, v: rest.join(':') } }) : []
+
+/**
+ * @param {uws.HttpRequest} req
+ */
+const reqToRoom = req => {
+  const org = /** @type {string} */ (req.getParameter(0))
+  const docid = /** @type {string} */ (req.getParameter(1))
+  const branch = /** @type {string} */ (req.getQuery('branch')) ?? 'main'
+  return { org, docid, branch }
+}
+
 export class YHubServer {
   /**
    * @param {import('./index.js').YHub} yhub
@@ -137,20 +168,6 @@ export const createYHubServer = async (yhub, conf) => {
       sendErrorResponse(res, '500 Internal Server Error', { error: 'Failed to retrieve document' })
     }
   })
-
-  /**
-   * @param {Y.ContentIds} contentids
-   * @param {string} userid
-   * @param {Array<{ k: string, v: string }>} customAttributions
-   */
-  const createContentMapFromParams = (contentids, userid, customAttributions) => {
-    const now = time.getUnixTime()
-    return Y.encodeContentMap(Y.createContentMapFromContentIds(
-      contentids,
-      [Y.createContentAttribute('insert', userid), Y.createContentAttribute('insertAt', now), ...customAttributions.map(attr => Y.createContentAttribute('insert:' + attr.k, attr.v))],
-      [Y.createContentAttribute('delete', userid), Y.createContentAttribute('deleteAt', now), ...customAttributions.map(attr => Y.createContentAttribute('delete:' + attr.k, attr.v))]
-    ))
-  }
 
   // PATCH /ydoc/{org}/{docid} - Update the Yjs document
   app.patch('/ydoc/:org/:docid', (res, req) => {
@@ -306,7 +323,7 @@ export const createYHubServer = async (yhub, conf) => {
     const includeAttributions = req.getQuery('attributions') === 'true'
     const withCustomAttributionsParam = req.getQuery('withCustomAttributions')
     /** @type {Array<{k: string, v: string}>|null} */
-    const withCustomAttributions = withCustomAttributionsParam ? withCustomAttributionsParam.split(',').map(entry => { const [k, ...rest] = entry.split(':'); return { k, v: rest.join(':') } }) : null
+    const withCustomAttributions = withCustomAttributionsParam ? parseCustomAttributionsParam(withCustomAttributionsParam) : null
     let aborted = false
     res.onAborted(() => {
       aborted = true
@@ -362,12 +379,16 @@ export const createYHubServer = async (yhub, conf) => {
   // GET /activity/{guid} - Get all editing timestamps for a document
   app.get('/activity/:org/:docid', async (res, req) => {
     const room = reqToRoom(req)
+    const by = req.getQuery('by')
     const from = number.parseInt(req.getQuery('from') || '0')
     const to = number.parseInt(req.getQuery('to') || number.MAX_SAFE_INTEGER.toString())
     const includeDelta = req.getQuery('delta') === 'true'
     const limit = number.parseInt(req.getQuery('limit') || number.MAX_SAFE_INTEGER.toString())
     const reverse = req.getQuery('order') === 'desc'
     const group = req.getQuery('group') !== 'false'
+    const withCustomAttributionsParam = req.getQuery('withCustomAttributions')
+    /** @type {Array<{k: string, v: string}>|null} */
+    const withCustomAttributions = withCustomAttributionsParam ? parseCustomAttributionsParam(withCustomAttributionsParam) : null
     let aborted = false
     res.onAborted(() => {
       aborted = true
@@ -378,11 +399,11 @@ export const createYHubServer = async (yhub, conf) => {
       if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
       return
     }
-    const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), String(includeDelta), String(limit), reverse ? 'desc' : 'asc', String(group)]
+    const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeDelta), String(limit), reverse ? 'desc' : 'asc', String(group), withCustomAttributionsParam || '']
     const responseData = await yhub.stream.cachedGet('activity', cacheArgs, async () => {
       const { contentmap: contentmapBin, nongcDoc: nongcDocBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
       const contentmap = Y.decodeContentMap((contentmapBin))
-      const filteredAttributions = filterContentMapHelper(contentmap, from, to, undefined, undefined, null)
+      const filteredAttributions = filterContentMapHelper(contentmap, from, to, by, undefined, withCustomAttributions)
       /**
        * @type {Array<{ from: number, to: number, by: string|null }>}
        */
@@ -505,8 +526,9 @@ class WSUser {
    * @param {boolean} hasWriteAccess
    * @param {{ userid: string }} authInfo
    * @param {boolean} gc
+   * @param {Array<{ k: string, v: string }>} customAttributions
    */
-  constructor (yhub, ws, room, hasWriteAccess, authInfo, gc) {
+  constructor (yhub, ws, room, hasWriteAccess, authInfo, gc, customAttributions) {
     this.yhub = yhub
     /**
      * @type {uws.WebSocket<{ user: WSUser }>|null}
@@ -531,6 +553,7 @@ class WSUser {
      * windows)
      */
     this.userid = authInfo.userid
+    this.customAttributions = customAttributions
     /**
      * @type {number|null}
      */
@@ -590,16 +613,6 @@ class WSUser {
 }
 
 /**
- * @param {uws.HttpRequest} req
- */
-const reqToRoom = req => {
-  const org = /** @type {string} */ (req.getParameter(0))
-  const docid = /** @type {string} */ (req.getParameter(1))
-  const branch = /** @type {string} */ (req.getQuery('branch')) ?? 'main'
-  return { org, docid, branch }
-}
-
-/**
  * @param {import('./index.js').YHub} yhub
  * @param {uws.TemplatedApp} app
  */
@@ -625,6 +638,9 @@ const registerWebsocketServer = (yhub, app) => {
       try {
         const room = reqToRoom(req)
         const gc = req.getQuery('gc') !== 'false' // default to true unless explicitly set to 'false'
+        const customAttributionsParam = req.getQuery('customAttributions')
+        /** @type {Array<{k: string, v: string}>} */
+        const customAttributions = parseCustomAttributionsParam(customAttributionsParam)
         const authInfo = await yhub.conf.server?.auth.readAuthInfo(req)
         s.$string.expect(authInfo.userid)
         const accessType = authInfo && await yhub.conf.server?.auth.getAccessType(authInfo, room)
@@ -637,7 +653,7 @@ const registerWebsocketServer = (yhub, app) => {
         if (aborted) return
         res.cork(() => {
           res.upgrade(
-            { user: new WSUser(yhub, null, room, t.hasWriteAccess(accessType), authInfo, gc) },
+            { user: new WSUser(yhub, null, room, t.hasWriteAccess(accessType), authInfo, gc, customAttributions) },
             headerWsKey,
             headerWsProtocol,
             headerWsExtensions,
@@ -692,12 +708,7 @@ const registerWebsocketServer = (yhub, app) => {
             if (syncMessageType === protocol.messageSyncUpdate || syncMessageType === protocol.messageSyncStep2) {
               const update = decoding.readVarUint8Array(decoder)
               if (update.byteLength > 3) {
-                const now = time.getUnixTime()
-                const contentmap = Y.encodeContentMap(Y.createContentMapFromContentIds(
-                  Y.createContentIdsFromUpdate(update),
-                  [Y.createContentAttribute('insert', user.userid), Y.createContentAttribute('insertAt', now)],
-                  [Y.createContentAttribute('delete', user.userid), Y.createContentAttribute('deleteAt', now)]
-                ))
+                const contentmap = createContentMapFromParams(Y.createContentIdsFromUpdate(update), user.userid, user.customAttributions)
                 yhub.stream.addMessage(user.room, { type: 'ydoc:update:v1', contentmap, update }).catch(handleErr)
               }
             } else if (syncMessageType === protocol.messageSyncStep1) {

@@ -226,6 +226,11 @@ export const testCustomAttributionsRollback = async tc => {
   const { ydoc: afterRollback } = await createWsClient({ waitForSync: true })
   console.log('after rollback json', afterRollback.get().toDelta().toJSON())
   t.compare(afterRollback.get().toDelta(), delta.create(delta.$deltaAny).insert('hey hello world'))
+
+  // Verify activity API filtering by custom attributions
+  const activityUserA = await fetchYhubResponse(`/activity/${org}/${initialDoc.guid}?group=false&withCustomAttributions=source:userA&delta=true`)
+  t.assert(activityUserA.length === 1)
+  t.compare(activityUserA[0].delta.children[1].insert, ' beautiful')
 }
 
 const logMemoryUsed = (prefix = '') => {

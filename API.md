@@ -18,11 +18,12 @@ Optionally, you may fork the document to a branch, which users can use for
 implementing suggestions. Branched documents have a gc'd version and a non-gc'd
 version as well.
 
-* `ws://{host}/ws/{guid}` parameters: `{ gc?: boolean, branch?: string }`
+* `ws://{host}/ws/{guid}` parameters: `{ gc?: boolean, branch?: string, customAttributions?: string }`
   * `gc=true` (default): standard garbage-collected document
   * `gc=false`: full document history which can be used to reconstruct editing history.
   * `branch="main"`: (default) The default branch-name if not specified otherwise.
   * `branch=string`: Optionally, define a custom branch. Changes won't be automatically synced with other branches.
+  * `customAttributions=string`: optional comma-separated `key:value` pairs (e.g. `source:ai,model:gpt4`). All updates sent through this connection will include these custom attributions in the contentmap, stored as `insert:<key>` / `delete:<key>` attribution attributes alongside the standard ones.
 
 ## Ydoc
 
@@ -132,8 +133,10 @@ before and after state of a Yjs doc. Optionally, include relevant attributions.
 Retrieve all editing-timestamps for a certain document. Use
 the activity API and the changeset API to reconstruct an editing trail.
 
-* `GET /activity/{guid}` parameters: `{ from?: number, to?: number, limit?: number, order?: string, group?: boolean, delta?: boolean }`
+* `GET /activity/{guid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, delta?: boolean, withCustomAttributions?: string }`
   * `from`/`to`: unix timestamp range filter
+  * `by=string`: comma-separated list of user-ids to filter by
+  * `withCustomAttributions=string`: filter by custom attributions using `key:value` pairs, comma-separated (e.g. `source:import,tag:v2`). Only changes matching all specified attributions are included.
   * `limit=number`: maximum number of entries to return
   * `order='asc'|'desc'`: `"asc"` (oldest first) or `"desc"` (newest first, default)
   * `group=boolean`: bundle consecutive changes from the same user into a single entry (experimental)

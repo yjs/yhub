@@ -333,7 +333,7 @@ export class Stream {
    */
   async claimTasks (count) {
     const reclaimedTasks = await this.redis.xAutoClaim(this.workerStreamName, this.workerGroupName, this.consumername, this.taskDebounce, '0', { COUNT: count })
-    if (reclaimedTasks.deletedMessages.length > 0) {
+    if (reclaimedTasks.deletedMessages != null && reclaimedTasks.deletedMessages.length > 0) {
       console.warn('[yhub-worker] deleting ghost tasks from stream', reclaimedTasks.deletedMessages)
       const multi = this.redis.multi()
       for (const id of reclaimedTasks.deletedMessages) {

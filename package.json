@@ -11,6 +11,7 @@
   "scripts": {
     "start": "docker compose --profile all up",
     "start:dbs": "docker compose --profile db up",
+    "start:minio": "docker compose --profile db up minio",
     "docker:rebuild": "docker compose --profile all build --no-cache",
     "debug:server": "node --env-file .env --inspect-brk ./bin/server.js",
     "debug:worker": "node --env-file .env --inspect-brk ./bin/worker.js",

@@ -133,7 +133,7 @@ before and after state of a Yjs doc. Optionally, include relevant attributions.
 Retrieve all editing-timestamps for a certain document. Use
 the activity API and the changeset API to reconstruct an editing trail.
 
-* `GET /activity/{guid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, delta?: boolean, withCustomAttributions?: string }`
+* `GET /activity/{guid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, delta?: boolean, withCustomAttributions?: string, customAttributions?: boolean }`
   * `from`/`to`: unix timestamp range filter
   * `by=string`: comma-separated list of user-ids to filter by
   * `withCustomAttributions=string`: filter by custom attributions using `key:value` pairs, comma-separated (e.g. `source:import,tag:v2`). Only changes matching all specified attributions are included.
@@ -141,7 +141,9 @@ the activity API and the changeset API to reconstruct an editing trail.
   * `order='asc'|'desc'`: `"asc"` (oldest first) or `"desc"` (newest first, default)
   * `group=boolean`: bundle consecutive changes from the same user into a single entry (experimental)
   * `delta=boolean`: include delta representation for each activity entry
-  * Returns `Array<{ from: number, to: number, by: string?, delta?: Delta }>`
+  * `customAttributions=true`: include the list of custom attributions associated with each activity entry. When enabled, each entry includes a `customAttributions` field containing deduplicated `{ k, v }` pairs collected from the underlying attribution attributes (e.g. `insert:<key>`). When grouping is enabled, custom attributions from merged entries are combined and deduplicated.
+  * Returns `Array<{ from: number, to: number, by: string?, delta?: Delta, customAttributions?: Array<{ k: string, v: string }> }>`
+    * `customAttributions` is only present when `customAttributions=true`
 
 ## Webhooks
 

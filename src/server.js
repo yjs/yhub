@@ -389,6 +389,7 @@ export const createYHubServer = async (yhub, conf) => {
     const withCustomAttributionsParam = req.getQuery('withCustomAttributions')
     /** @type {Array<{k: string, v: string}>|null} */
     const withCustomAttributions = withCustomAttributionsParam ? parseCustomAttributionsParam(withCustomAttributionsParam) : null
+    const includeCustomAttributions = req.getQuery('customAttributions') === 'true'
     let aborted = false
     res.onAborted(() => {
       aborted = true
@@ -399,13 +400,13 @@ export const createYHubServer = async (yhub, conf) => {
       if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
       return
     }
-    const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeDelta), String(limit), reverse ? 'desc' : 'asc', String(group), withCustomAttributionsParam || '']
+    const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeDelta), String(limit), reverse ? 'desc' : 'asc', String(group), withCustomAttributionsParam || '', String(includeCustomAttributions)]
     const responseData = await yhub.stream.cachedGet('activity', cacheArgs, async () => {
       const { contentmap: contentmapBin, nongcDoc: nongcDocBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
       const contentmap = Y.decodeContentMap((contentmapBin))
       const filteredAttributions = filterContentMapHelper(contentmap, from, to, by, undefined, withCustomAttributions)
       /**
-       * @type {Array<{ from: number, to: number, by: string|null }>}
+       * @type {Array<{ from: number, to: number, by: string|null, customAttributions: { k: string, v: string}[]|null }>}
        */
       const activity = []
       filteredAttributions.inserts.forEach(attrRange => {
@@ -413,15 +414,21 @@ export const createYHubServer = async (yhub, conf) => {
         let t = null
         /** @type {string?} */
         let by = null
+        /**
+         * @type {Array<{k:string,v:string}>|null}
+         */
+        const customAttributions = includeCustomAttributions ? [] : null
         attrRange.attrs.forEach(attr => {
           if (attr.name === 'insertAt') {
             t = attr.val
           } else if (attr.name === 'insert') {
             by = attr.val
+          } else if (customAttributions != null && attr.name.startsWith('insert:')) {
+            customAttributions.push({ k: attr.name.slice(7), v: attr.val })
           }
         })
         if (t != null) {
-          activity.push({ from: t, to: t, by })
+          activity.push({ from: t, to: t, by, customAttributions })
         }
       })
       filteredAttributions.deletes.forEach(attrRange => {
@@ -429,33 +436,57 @@ export const createYHubServer = async (yhub, conf) => {
         let t = null
         /** @type {string?} */
         let by = null
+        /**
+         * @type {Array<{k:string,v:string}>|null}
+         */
+        const customAttributions = includeCustomAttributions ? [] : null
         attrRange.attrs.forEach(attr => {
           if (attr.name === 'deleteAt') {
             t = attr.val
           } else if (attr.name === 'delete') {
             by = attr.val
+          } else if (customAttributions != null && attr.name.startsWith('insert:')) {
+            customAttributions.push({ k: attr.name.slice(7), v: attr.val })
           }
         })
         if (t != null) {
-          activity.push({ from: t, to: t, by })
+          activity.push({ from: t, to: t, by, customAttributions })
         }
       })
       activity.sort((a, b) => a.from - b.from)
       /**
-       * @type {Array<{ from: number, to: number, by: string?, delta?: any }>}
+       * @type {Array<{ from: number, to: number, by: string?, delta?: any, customAttributions: Array<{k:string,v:string}>|null }>}
        */
       const activityResult = []
       const groupDistance = group ? 1000 : 1
-      /** @type {{ from: number, to: number, by: string? }|null} */
+      /** @type {{ from: number, to: number, by: string?, customAttributions: Array<{k:string,v:string}>|null }|null} */
       let lastActivity = null
       activity.forEach(act => {
         if (lastActivity != null && lastActivity.by === act.by && act.from - lastActivity.to < groupDistance) {
           lastActivity.to = act.to
+          lastActivity.customAttributions?.push(...(act?.customAttributions || []))
         } else {
           activityResult.push(act)
           lastActivity = act
         }
       })
+      if (includeCustomAttributions) {
+        activity.forEach(act => {
+          /**
+           * @type {Array<{k:string,v:string}>}
+           */
+          const uniqueCustomAttrs = []
+          const unique = new Set()
+          act.customAttributions?.forEach(c => {
+            const uniqueKey = c.k + '_' + c.v
+            if (!unique.has(uniqueKey)) {
+              unique.add(uniqueKey)
+              uniqueCustomAttrs.push(c)
+            }
+          })
+          act.customAttributions = uniqueCustomAttrs
+        })
+      }
       if (reverse) {
         activityResult.reverse()
       }

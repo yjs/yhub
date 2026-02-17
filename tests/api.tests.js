@@ -198,6 +198,7 @@ export const testCustomAttributionsRollback = async tc => {
   const doc2 = new Y.Doc()
   Y.applyUpdate(doc2, get2.doc)
   // doc should now be "hello beautiful world"
+  console.log('should be "hello beautiful world"', doc2.get().toDelta().toJSON())
   t.compare(doc2.get().toDelta(), delta.create(delta.$deltaAny).insert('hello beautiful world'))
   doc2.get().applyDelta(delta.create().insert('hey '))
   const patchRes2 = await patchYhubRequest(`/ydoc/${org}/${initialDoc.guid}`, {
@@ -228,8 +229,15 @@ export const testCustomAttributionsRollback = async tc => {
   t.compare(afterRollback.get().toDelta(), delta.create(delta.$deltaAny).insert('hey hello world'))
 
   // Verify activity API filtering by custom attributions
-  const activityUserA = await fetchYhubResponse(`/activity/${org}/${initialDoc.guid}?group=false&withCustomAttributions=source:userA&delta=true`)
+  /**
+   * @type {Array<any>}
+   */
+  const activityUserA = await fetchYhubResponse(`/activity/${org}/${initialDoc.guid}?group=false&withCustomAttributions=source:userA&delta=true&customAttributions=true`)
+  console.log('activity', JSON.stringify(activityUserA))
   t.assert(activityUserA.length === 1)
+  activityUserA.forEach(act => {
+    t.compare(act.customAttributions, [{ k: 'source', v: 'userA' }])
+  })
   t.compare(activityUserA[0].delta.children[1].insert, ' beautiful')
 }
 

@@ -409,7 +409,6 @@ export const createYHubServer = async (yhub, conf) => {
        * @type {Array<{ from: number, to: number, by: string|null, customAttributions: { k: string, v: string}[]|null }>}
        */
       const activity = []
-      debugger
       filteredAttributions.inserts.forEach(attrRange => {
         /** @type {number?} */
         let t = null

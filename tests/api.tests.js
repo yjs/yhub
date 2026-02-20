@@ -10,7 +10,6 @@ import * as array from 'lib0/array'
 import * as math from 'lib0/math'
 import * as fs from 'node:fs'
 import * as prng from 'lib0/prng'
-import * as buffer from 'lib0/buffer'
 
 /**
  * @param {string} path

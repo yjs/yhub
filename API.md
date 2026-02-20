@@ -5,8 +5,8 @@ Y/hub is a collaborative document backend built on Yjs. It implements the standa
 All endpoints require an `auth-cookie` which will be check via the PERM
 CALLBACK.
 
-It is assumed that all documents can be identified by a unique `{guid}`.
-Furthermore, all "body" content is encoded via lib0/encoding's
+It is assumed that all documents can be identified by a unique `{org}/{docid}`
+combination. Furthermore, all "body" content is encoded via lib0/encoding's
 `encodeAny`. All binary data in parameters is encoded via base64.
 
 ## WebSocket
@@ -18,7 +18,7 @@ Optionally, you may fork the document to a branch, which users can use for
 implementing suggestions. Branched documents have a gc'd version and a non-gc'd
 version as well.
 
-* `ws://{host}/ws/{guid}` parameters: `{ gc?: boolean, branch?: string, customAttributions?: string }`
+* `ws://{host}/ws/{org}/{docid}` parameters: `{ gc?: boolean, branch?: string, customAttributions?: string }`
   * `gc=true` (default): standard garbage-collected document
   * `gc=false`: full document history which can be used to reconstruct editing history.
   * `branch="main"`: (default) The default branch-name if not specified otherwise.
@@ -90,7 +90,7 @@ const patchResponse = await fetch('/ydoc/my-org/my-doc-id', {
 Rollback all changes that match the pattern. The changes will be distributed via
 websockets.
 
-* `POST /rollback/{guid}` body: `{ from?: number, to?: number, by?: string, contentIds?: Y.ContentIds, customAttributions?: Array<{ k: string, v: string }>, withCustomAttributions?: Array<{ k: string, v: string }> }`
+* `POST /rollback/{org}/{docid}` body: `{ from?: number, to?: number, by?: string, contentIds?: Y.ContentIds, customAttributions?: Array<{ k: string, v: string }>, withCustomAttributions?: Array<{ k: string, v: string }> }`
   * `from`/`to`: unix timestamp range filter
   * `by=string`: comma-separated list of user-ids that matches the attributions
   * `contentIds`: Changeset that describes the changes between two versions.
@@ -99,19 +99,19 @@ websockets.
 
 ### Example
 
-* Rollback all changes that happened after timestamp `X`: `POST /rollback/{doc-guid}?from=X`
+* Rollback all changes that happened after timestamp `X`: `POST /rollback/{org}/{docid}?from=X`
   * If your "versions" have timestamps, this call enables you to revert to a specific
     version of the document.
-* Rollback all changes from user-id `U` that happened between timestamp `X` and `Y`: `POST /rollback/{doc-guid}?by=U&from=X&to=Y`
+* Rollback all changes from user-id `U` that happened between timestamp `X` and `Y`: `POST /rollback/{org}/{docid}?by=U&from=X&to=Y`
   * This call enables you to undo all changes within a certain editing-interval.
-* Rollback all changes of a certain user between two versions: `POST /rollback/{guid}` body: `{ by: userid, contentIds: Y.createContentIdsFromDocDiff(prevYDoc, nextYDoc) }`
+* Rollback all changes of a certain user between two versions: `POST /rollback/{org}/{docid}` body: `{ by: userid, contentIds: Y.createContentIdsFromDocDiff(prevYDoc, nextYDoc) }`
 
 ## Changeset
 
 Visualize attributed changes using either pure deltas or by retrieving the
 before and after state of a Yjs doc. Optionally, include relevant attributions.
 
-* `GET /changeset/{guid}` parameters: `{ from?: number, to?: number, by?: string, ydoc?: boolean, contentIds?: Y.ContentIds, delta?: boolean, attributions?: boolean, withCustomAttributions?: string }`
+* `GET /changeset/{org}/docid` parameters: `{ from?: number, to?: number, by?: string, ydoc?: boolean, contentIds?: Y.ContentIds, delta?: boolean, attributions?: boolean, withCustomAttributions?: string }`
   * `from`/`to`: unix timestamp range filter
   * `by=string`: comma-separated list of user-ids that matches the attributions
   * `withCustomAttributions=string`: filter by custom attributions using `key:value` pairs, comma-separated (e.g. `source:import,tag:v2`). Only changes matching all specified attributions are included.
@@ -123,9 +123,9 @@ before and after state of a Yjs doc. Optionally, include relevant attributions.
 
 ### Example: visualize editing trail of the past day
 
-* Retrieve activity `GET /activity/{guid}?from={now-1day}`
+* Retrieve activity `GET /activity/{org}/{docid}?from={now-1day}`
 * Optionally, bundle changes that belong to each other: `[1, 2, 70, 71] ⇒ [2, 71]` - because `1,2` and `70,71` belong to each other.
-* For each timestamp: `GET /changeset/{guid}?from=timestamps[I - 1]&to=timestamps[I]&delta=true&attributions=true`
+* For each timestamp: `GET /changeset/{org}/{docid}?from=timestamps[I - 1]&to=timestamps[I]&delta=true&attributions=true`
 * Which will give you the state of the document at timestamp `from`: `deltaState` and the (attributed) diff that is needed to get to timestamp `to`: `diff`.
 
 ## Activity
@@ -133,7 +133,7 @@ before and after state of a Yjs doc. Optionally, include relevant attributions.
 Retrieve all editing-timestamps for a certain document. Use
 the activity API and the changeset API to reconstruct an editing trail.
 
-* `GET /activity/{guid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, delta?: boolean, withCustomAttributions?: string, customAttributions?: boolean }`
+* `GET /activity/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, delta?: boolean, withCustomAttributions?: string, customAttributions?: boolean }`
   * `from`/`to`: unix timestamp range filter
   * `by=string`: comma-separated list of user-ids to filter by
   * `withCustomAttributions=string`: filter by custom attributions using `key:value` pairs, comma-separated (e.g. `source:import,tag:v2`). Only changes matching all specified attributions are included.

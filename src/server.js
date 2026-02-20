@@ -409,6 +409,7 @@ export const createYHubServer = async (yhub, conf) => {
        * @type {Array<{ from: number, to: number, by: string|null, customAttributions: { k: string, v: string}[]|null }>}
        */
       const activity = []
+      debugger
       filteredAttributions.inserts.forEach(attrRange => {
         /** @type {number?} */
         let t = null
@@ -507,7 +508,7 @@ export const createYHubServer = async (yhub, conf) => {
           const attrs = Y.createContentMapFromContentIds(Y.createContentIdsFromContentMap(actAttributions), [Y.createContentAttribute('insert', act.by), Y.createContentAttribute('insertAt', act.from)], [Y.createContentAttribute('delete', act.by), Y.createContentAttribute('deleteAt', act.from)])
           const am = Y.createAttributionManagerFromDiff(prevDoc, nextDoc, { attrs })
           // we only include the delta for the first type we find on ydoc.
-          act.delta = nextDoc.get(nextDoc.share.keys().next().value || '').toDelta(am).toJSON()
+          act.delta = nextDoc.get(nextDoc.share.keys().next().value || '').toDeltaDeep(am).toJSON()
         })
       }
       const encoder = encoding.createEncoder()

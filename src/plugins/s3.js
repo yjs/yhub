@@ -1,6 +1,7 @@
 import * as t from '../types.js'
 import * as buffer from 'lib0/buffer'
 import { Client as S3Client } from 'minio'
+import { Readable } from 'stream'
 
 /**
  * @typedef {{ bucket: string, endPoint: string, port: number, useSSL: boolean, accessKey: string, secretKey: string }} S3Conf
@@ -42,8 +43,8 @@ export class S3PersistenceV1 {
   async store (assetId, asset) {
     if (assetId.branch === 'main') {
       const path = t.assetIdToString(assetId)
-      const file = buffer.encodeAny(asset)
-      await this.s3client.putObject(this.bucket, path, Buffer.from(file))
+      const file = Buffer.from(buffer.encodeAny(asset))
+      await this.s3client.putObject(this.bucket, path, Readable.from(file), file.length)
       return {
         type: 'asset:retrievable:v1',
         plugin: this.pluginid

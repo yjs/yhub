@@ -10,6 +10,7 @@ import * as array from 'lib0/array'
 import * as math from 'lib0/math'
 import * as fs from 'node:fs'
 import * as prng from 'lib0/prng'
+import * as buffer from 'lib0/buffer'
 
 /**
  * @param {string} path
@@ -367,3 +368,29 @@ export const testLargeDoc = async tc => {
     yhub.conf.redis.minMessageLifetime = prevMinMessageLifletime
   }
 }
+
+// /**
+//  * Regression test: uploading a specific problematic ydoc+contentmap combination and calling the
+//  * activity API with delta=true and group=false previously caused errors.
+//  *
+//  * @param {t.TestCase} tc
+//  */
+// export const testTmpDocActivityWithDeltaNoGrouping = async tc => {
+//   const { yhub, defaultRoom } = await utils.createTestCase(tc)
+//
+//   // Load the known-problematic binary files from the tmp folder (lib0/any-encoded)
+//   const nongcDoc = buffer.decodeAny(fs.readFileSync(new URL('../tmp/ydoc_non_gc.bin', import.meta.url)))
+//   const changeset = buffer.decodeAny(fs.readFileSync(new URL('../tmp/changeset.bin', import.meta.url)))
+//
+//   // Upload the document via the addMessage API
+//   await yhub.stream.addMessage(defaultRoom, {
+//     type: 'ydoc:update:v1',
+//     update: nongcDoc.doc,
+//     contentmap: changeset.attributions
+//   })
+//
+//   // Call activity API with delta=true and group=false - this combination previously caused errors
+//   const activity = await fetchYhubResponse(`/activity/${defaultRoom.org}/${defaultRoom.docid}?delta=true&group=false`)
+//   console.log('activity result', JSON.stringify(activity))
+//   t.assert(Array.isArray(activity))
+// }

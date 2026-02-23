@@ -10,7 +10,6 @@ import * as array from 'lib0/array'
 import * as math from 'lib0/math'
 import * as fs from 'node:fs'
 import * as prng from 'lib0/prng'
-import * as buffer from 'lib0/buffer'
 
 /**
  * @param {string} path
@@ -67,11 +66,11 @@ export const testChangesetRestApi = async tc => {
   const { org, createWsClient } = await utils.createTestCase(tc)
   const { ydoc } = createWsClient()
   console.log('creating documents')
-  ydoc.get().applyDelta(delta.create().insert('hello world')) // change time: 1
+  ydoc.get().applyDelta(delta.create().insert('hello world').done()) // change time: 1
   await promise.wait(100)
-  ydoc.get().applyDelta(delta.create().delete(6).retain(5).insert('!')) // change time: 2
+  ydoc.get().applyDelta(delta.create().delete(6).retain(5).insert('!').done()) // change time: 2
   await promise.wait(100)
-  ydoc.get().applyDelta(delta.create().insert('hi ')) // change time: 3
+  ydoc.get().applyDelta(delta.create().insert('hi ').done()) // change time: 3
   await promise.wait(3000)
   // fetch timestamps
   console.log('finished creating documents - fetching activity')
@@ -94,7 +93,7 @@ export const testChangesetRestApi = async tc => {
     const { ydoc: xdoc } = await createWsClient({ waitForSync: true })
     const rollbackContent = xdoc.get().toDelta()
     console.log(rollbackContent.toJSON())
-    t.compare(rollbackContent, delta.create().insert('hello hi world'))
+    t.compare(rollbackContent, delta.create().insert('hello hi world').done())
   }
 }
 
@@ -144,7 +143,7 @@ export const testYdocRestApi = async tc => {
   const { org, createWsClient } = await utils.createTestCase(tc)
   // Create initial document via websocket
   const { ydoc: initialDoc, provider } = await createWsClient({ waitForSync: true })
-  initialDoc.get().applyDelta(delta.create().insert('initial content'))
+  initialDoc.get().applyDelta(delta.create().insert('initial content').done())
   await promise.wait(100)
   provider.destroy()
 
@@ -155,10 +154,10 @@ export const testYdocRestApi = async tc => {
   // Apply remote state to a local document and make changes
   const localDoc = new Y.Doc()
   Y.applyUpdate(localDoc, getResponse.doc)
-  t.compare(localDoc.get().toDelta(), delta.create().insert('initial content'), 'Local doc should have initial content')
+  t.compare(localDoc.get().toDelta(), delta.create().insert('initial content').done(), 'Local doc should have initial content')
 
   // Make local changes
-  localDoc.get().applyDelta(delta.create().retain(8).insert('new '))
+  localDoc.get().applyDelta(delta.create().retain(8).insert('new ').done())
   const update = Y.encodeStateAsUpdate(localDoc)
 
   // Send update via PATCH
@@ -178,7 +177,7 @@ export const testCustomAttributionsRollback = async tc => {
   const { org, createWsClient } = await utils.createTestCase(tc)
   // Create initial document via websocket
   const { ydoc: initialDoc, provider } = await createWsClient({ waitForSync: true })
-  initialDoc.get().applyDelta(delta.create().insert('hello world'))
+  initialDoc.get().applyDelta(delta.create().insert('hello world').done())
   await promise.wait(100)
   provider.destroy()
 
@@ -186,7 +185,7 @@ export const testCustomAttributionsRollback = async tc => {
   const get1 = await fetchYhubResponse(`/ydoc/${org}/${initialDoc.guid}`)
   const doc1 = new Y.Doc()
   Y.applyUpdate(doc1, get1.doc)
-  doc1.get().applyDelta(delta.create().retain(5).insert(' beautiful'))
+  doc1.get().applyDelta(delta.create().retain(5).insert(' beautiful').done())
   const patchRes1 = await patchYhubRequest(`/ydoc/${org}/${initialDoc.guid}`, {
     update: Y.encodeStateAsUpdate(doc1),
     customAttributions: [{ k: 'source', v: 'userA' }]
@@ -201,7 +200,7 @@ export const testCustomAttributionsRollback = async tc => {
   // doc should now be "hello beautiful world"
   console.log('should be "hello beautiful world"', doc2.get().toDelta().toJSON())
   t.compare(doc2.get().toDelta(), delta.create(delta.$deltaAny).insert('hello beautiful world'))
-  doc2.get().applyDelta(delta.create().insert('hey '))
+  doc2.get().applyDelta(delta.create().insert('hey ').done())
   const patchRes2 = await patchYhubRequest(`/ydoc/${org}/${initialDoc.guid}`, {
     update: Y.encodeStateAsUpdate(doc2),
     customAttributions: [{ k: 'source', v: 'userB' }]

@@ -277,7 +277,7 @@ export const createYHubServer = async (yhub, conf) => {
               contentmap
             })
           })
-          Y.undoContentIds(ydoc, revertIds)
+          Y.undoContentIds(ydoc, revertIds, { ignoreRemoteMapChanges: true })
           if (!aborted) {
             // write response
             const encoder = encoding.createEncoder()

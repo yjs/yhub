@@ -50,7 +50,7 @@ const tryPersistencePluginStore = async (plugins, assetId, asset) => {
  * @param {t.PersistencePlugin[]} plugins
  * @param {t.AssetId} assetId
  * @param {ASSET} asset
- * @return {Promise<Exclude<ASSET,t.RetrievableAsset>>}
+ * @return {Promise<Exclude<ASSET,t.RetrievableAsset>|null>} - it can't be guaranteed that we find all retrievable assets
  */
 const tryPersistencePluginRetrieve = async (plugins, assetId, asset) => {
   if (asset.type === 'asset:retrievable:v1') {
@@ -60,6 +60,7 @@ const tryPersistencePluginRetrieve = async (plugins, assetId, asset) => {
         if (r != null) return r
       }
     }
+    return null
   }
   return /** @type {Exclude<ASSET,t.RetrievableAsset>} */ (asset)
 }
@@ -177,37 +178,45 @@ export class Persistence {
      * @type {Include['references'] extends true ? Array<{ assetId: t.AssetId, asset: t.Asset }> : null}
      */
     const references = includeReferences ? /** @type {any} */ ([]) : null
-    const contentmapAssets = await promise.all(rows.filter(row => row.contentmap != null).map(row => {
+    const contentmapAssets = await promise.all(rows.filter(row => row.contentmap != null).map(async row => {
       const assetId = object.assign({ type: /** @type {const} */ ('id:contentmap:v1'), t: row.t }, room)
       const contentmapAsset = /** @type {s.Unwrap<typeof t.$contentMapAsset> | t.RetrievableAsset} */ (buffer.decodeAny(/** @type {Buffer} */ (row.contentmap)))
-      references?.push({ assetId, asset: contentmapAsset })
-      return tryPersistencePluginRetrieve(this.plugins, assetId, contentmapAsset)
+      return tryPersistencePluginRetrieve(this.plugins, assetId, contentmapAsset).then(retrieved => {
+        retrieved && references?.push({ assetId, asset: contentmapAsset })
+        return retrieved?.contentmap
+      })
     }))
-    const contentidsAssets = await promise.all(rows.filter(row => row.contentids != null).map(row => {
+    const contentidsAssets = await promise.all(rows.filter(row => row.contentids != null).map(async row => {
       const assetId = object.assign({ type: /** @type {const} */ ('id:contentids:v1'), t: row.t }, room)
       const contentidsAsset = /** @type {s.Unwrap<typeof t.$contentidsAsset> | t.RetrievableAsset} */ (buffer.decodeAny(/** @type {Buffer} */ (row.contentids)))
-      references?.push({ assetId, asset: contentidsAsset })
-      return tryPersistencePluginRetrieve(this.plugins, assetId, contentidsAsset)
+      return tryPersistencePluginRetrieve(this.plugins, assetId, contentidsAsset).then(retrieved => {
+        retrieved && references?.push({ assetId, asset: contentidsAsset })
+        return retrieved?.contentids
+      })
     }))
-    const gcUpdates = await promise.all(rows.filter(row => row.gcdoc != null).map(row => {
+    const gcUpdates = await promise.all(rows.filter(row => row.gcdoc != null).map(async row => {
       const assetId = object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), t: row.t, gc: true }, room)
       const gcDocAsset = /** @type {s.Unwrap<typeof t.$ydocAsset> | t.RetrievableAsset} */ (buffer.decodeAny(/** @type {Buffer} */ (row.gcdoc)))
-      references?.push({ assetId, asset: gcDocAsset })
-      return tryPersistencePluginRetrieve(this.plugins, assetId, gcDocAsset)
+      return tryPersistencePluginRetrieve(this.plugins, assetId, gcDocAsset).then(retrieved => {
+        retrieved && references?.push({ assetId, asset: gcDocAsset })
+        return retrieved?.update
+      })
     }))
-    const nongcUpdates = await promise.all(rows.filter(row => row.nongcdoc != null).map(row => {
+    const nongcUpdates = await promise.all(rows.filter(row => row.nongcdoc != null).map(async row => {
       const assetId = object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), t: row.t, gc: false }, room)
       const nongcDocAsset = /** @type {s.Unwrap<typeof t.$ydocAsset> | t.RetrievableAsset} */ (buffer.decodeAny(/** @type {Buffer} */ (row.nongcdoc)))
-      references?.push({ assetId, asset: nongcDocAsset })
-      return tryPersistencePluginRetrieve(this.plugins, assetId, nongcDocAsset)
+      return tryPersistencePluginRetrieve(this.plugins, assetId, nongcDocAsset).then(retrieved => {
+        retrieved && references?.push({ assetId, asset: nongcDocAsset })
+        return retrieved?.update
+      })
     }))
     const lastClock = array.last(rows.map(row => row.t).sort((a, b) => isSmallerRedisClock(a, b) ? -1 : 1)) || '0'
     return {
       lastClock,
-      gcDoc: /** @type {Include['gc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeGc ? gcUpdates.map(asset => asset.update) : null),
-      nongcDoc: /** @type {Include['nongc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeNongc ? nongcUpdates.map(asset => asset.update) : null),
-      contentmap: /** @type {Include['contentmap'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeContentmap ? contentmapAssets.map(asset => asset.contentmap) : null),
-      contentids: /** @type {Include['contentids'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeContentids ? contentidsAssets.map(asset => asset.contentids) : null),
+      gcDoc: /** @type {Include['gc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeGc ? gcUpdates.filter(u => u != null) : null),
+      nongcDoc: /** @type {Include['nongc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeNongc ? nongcUpdates.filter(u => u != null) : null),
+      contentmap: /** @type {Include['contentmap'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeContentmap ? contentmapAssets.filter(u => u != null) : null),
+      contentids: /** @type {Include['contentids'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeContentids ? contentidsAssets.filter(u => u != null) : null),
       references
     }
   }

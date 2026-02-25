@@ -454,6 +454,83 @@ npm start
 
 Open [`http://localhost:5173`](http://localhost:5173) in a browser.
 
+## Plugins
+
+### S3 Persistence (`S3PersistenceV1`)
+
+Stores document blobs in any S3-compatible object store (AWS S3, MinIO, etc.).
+Objects larger than 5 MB are uploaded using S3 multipart upload.
+
+**Usage**
+
+Pass an `S3PersistenceV1` instance in the `persistence` array when calling
+`createYHub()`:
+
+```javascript
+import { createYHub } from '@y/hub'
+import { S3PersistenceV1 } from '@y/hub/plugins/s3'
+
+const yhub = await createYHub({
+  redis:    { url: 'redis://localhost:6379', prefix: 'y' },
+  postgres: 'postgres://user:pass@localhost:5432/yhub',
+  persistence: [
+    new S3PersistenceV1({
+      bucket:    'yhub',
+      endPoint:  'localhost',
+      port:      9000,
+      useSSL:    false,
+      accessKey: 'minioadmin',
+      secretKey: 'minioadmin',
+    })
+  ],
+  server: { /* ... */ },
+})
+```
+
+The environment variables `S3_ENDPOINT`, `S3_PORT`, `S3_SSL`, `S3_ACCESS_KEY`,
+`S3_SECRET_KEY`, and `S3_YHUB_BUCKET` are mapped to these fields by the default
+configuration loader.
+
+**Required IAM permissions**
+
+| Permission | When required |
+|---|---|
+| `s3:CreateBucket` | On first start (bucket auto-creation) |
+| `s3:ListBucket` | Always |
+| `s3:GetObject` | Always |
+| `s3:PutObject` | Always |
+| `s3:DeleteObject` | Always |
+| `s3:ListBucketMultipartUploads` | Objects > 5 MB |
+| `s3:ListMultipartUploadParts` | Objects > 5 MB |
+| `s3:AbortMultipartUpload` | Objects > 5 MB |
+
+Minimal AWS IAM policy example:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:ListBucket",
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucketMultipartUploads",
+        "s3:ListMultipartUploadParts",
+        "s3:AbortMultipartUpload"
+      ],
+      "Resource": [
+        "arn:aws:s3:::yhub",
+        "arn:aws:s3:::yhub/*"
+      ]
+    }
+  ]
+}
+```
+
 ## API Documentation
 
 See [API.md](./API.md) for the REST API documentation including:

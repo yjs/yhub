@@ -65,7 +65,7 @@
   },
   "dependencies": {
     "@y/protocols": "^1.0.6-rc.1",
-    "@y/y": "^14.0.0-rc.0",
+    "@y/y": "^14.0.0-rc.1",
     "lib0": "^1.0.0-rc.2",
     "minio": "^8.0.6",
     "postgres": "^3.4.3",

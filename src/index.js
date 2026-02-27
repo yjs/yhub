@@ -123,7 +123,7 @@ export class YHub {
    * Attribute and persist a document directly to the database, without distributing it via redis.
    *
    * Changes won't be synced to users connected via websocket until they reconnect.
-   * 
+   *
    * @param {t.Room} room
    * @param {Uint8Array<ArrayBuffer>} ydoc
    * @param {{ by?: string }} attributions

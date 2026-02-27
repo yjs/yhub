@@ -2,14 +2,18 @@
 
 Y/hub is a collaborative document backend built on Yjs. It implements the standard y-websocket protocol and extends it with attribution, history management, and selective undo/redo capabilities.
 
-All endpoints require an `auth-cookie` which will be check via the PERM
+---
+
+## REST API
+
+All endpoints require an `auth-cookie` which will be checked via the PERM
 CALLBACK.
 
 It is assumed that all documents can be identified by a unique `{org}/{docid}`
 combination. Furthermore, all "body" content is encoded via lib0/encoding's
 `encodeAny`. All binary data in parameters is encoded via base64.
 
-## WebSocket
+### WebSocket
 
 The standard WebSocket backend that is compatible with y-websocket, and TipTapProvider.
 
@@ -25,11 +29,11 @@ version as well.
   * `branch=string`: Optionally, define a custom branch. Changes won't be automatically synced with other branches.
   * `customAttributions=string`: optional comma-separated `key:value` pairs (e.g. `source:ai,model:gpt4`). All updates sent through this connection will include these custom attributions in the contentmap, stored as `insert:<key>` / `delete:<key>` attribution attributes alongside the standard ones.
 
-## Ydoc
+### Ydoc
 
 Retrieve and update the Yjs document via REST API.
 
-### GET /ydoc/{org}/{docid}
+#### GET /ydoc/{org}/{docid}
 
 Retrieve the current state of the Yjs document.
 
@@ -39,7 +43,7 @@ Retrieve the current state of the Yjs document.
   * `branch="main"` (default): the branch to retrieve
   * Returns `{ doc: Uint8Array }` - the encoded Yjs document update
 
-### PATCH /ydoc/{org}/{docid}
+#### PATCH /ydoc/{org}/{docid}
 
 Update the Yjs document with new changes. Requires write access.
 
@@ -52,7 +56,7 @@ Update the Yjs document with new changes. Requires write access.
   * Changes are distributed to connected WebSocket clients
   * Returns `{ success: true, message: string }` on success
 
-### Example
+#### Example
 
 ```javascript
 import * as Y from 'yjs'
@@ -85,7 +89,7 @@ const patchResponse = await fetch('/ydoc/my-org/my-doc-id', {
 })
 ```
 
-## Rollback
+### Rollback
 
 Rollback all changes that match the pattern. The changes will be distributed via
 websockets.
@@ -97,7 +101,7 @@ websockets.
   * `customAttributions`: optional array of key-value pairs to attach as custom attributions to the rollback changes themselves (the undo operation).
   * `withCustomAttributions`: optional array of key-value pairs to filter which changes to undo. Only changes whose attributions match all specified key-value pairs will be rolled back.
 
-### Example
+#### Example
 
 * Rollback all changes that happened after timestamp `X`: `POST /rollback/{org}/{docid}?from=X`
   * If your "versions" have timestamps, this call enables you to revert to a specific
@@ -106,7 +110,7 @@ websockets.
   * This call enables you to undo all changes within a certain editing-interval.
 * Rollback all changes of a certain user between two versions: `POST /rollback/{org}/{docid}` body: `{ by: userid, contentIds: Y.createContentIdsFromDocDiff(prevYDoc, nextYDoc) }`
 
-## Changeset
+### Changeset
 
 Visualize attributed changes using either pure deltas or by retrieving the
 before and after state of a Yjs doc. Optionally, include relevant attributions.
@@ -121,14 +125,14 @@ before and after state of a Yjs doc. Optionally, include relevant attributions.
   * `attributions=true`: include attributions
   * Returns `{ prevDoc?: Y.Doc, nextDoc?: Y.Doc, attributions?: Y.ContentMap, delta?: Delta }` - currently returns only the ydoc.get()-delta.
 
-### Example: visualize editing trail of the past day
+#### Example: visualize editing trail of the past day
 
 * Retrieve activity `GET /activity/{org}/{docid}?from={now-1day}`
 * Optionally, bundle changes that belong to each other: `[1, 2, 70, 71] ⇒ [2, 71]` - because `1,2` and `70,71` belong to each other.
 * For each timestamp: `GET /changeset/{org}/{docid}?from=timestamps[I - 1]&to=timestamps[I]&delta=true&attributions=true`
 * Which will give you the state of the document at timestamp `from`: `deltaState` and the (attributed) diff that is needed to get to timestamp `to`: `diff`.
 
-## Activity
+### Activity
 
 Retrieve all editing-timestamps for a certain document. Use
 the activity API and the changeset API to reconstruct an editing trail.
@@ -145,11 +149,146 @@ the activity API and the changeset API to reconstruct an editing trail.
   * Returns `Array<{ from: number, to: number, by: string?, delta?: Delta, customAttributions?: Array<{ k: string, v: string }> }>`
     * `customAttributions` is only present when `customAttributions=true`
 
-## Webhooks
+### Webhooks
 
 Webhooks are configured using environment variables.
 
 * `YDOC_UPDATE_CALLBACK=http://localhost:5173/ydoc` body: `encoded ydoc` - Called whenever the Yjs document was updated (after a debounce)
-* `YDOC_CHANGE_CALLBACK=http://localhost:5173/ydoc` body: `{ ydoc: v2 encoded ydoc, delta: delta describing all changes }` - Called whenever the Yjs document was updated (after a debounce). 
+* `YDOC_CHANGE_CALLBACK=http://localhost:5173/ydoc` body: `{ ydoc: v2 encoded ydoc, delta: delta describing all changes }` - Called whenever the Yjs document was updated (after a debounce).
 * `AUTH_PERM_CALLBACK=http://localhost:5173/auth/perm` - Called to check Authentication of a client.
 
+---
+
+### YHub Import API
+
+The `YHub` class is available when importing `@y/hub` directly. It exposes methods for reading and writing documents programmatically, bypassing the WebSocket and REST layers. This is useful for server-side scripts, migrations, and data pipelines.
+
+#### `createYHub(config)`
+
+```js
+import { createYHub } from '@y/hub'
+const yhub = await createYHub(config)
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `redis.url` | `string` | yes | Redis connection URL |
+| `redis.prefix` | `string` | yes | Key prefix for all Redis entries (use a unique value per environment) |
+| `redis.taskDebounce` | `number` | no | Milliseconds before a worker picks up a compaction task. Default: 60 000 |
+| `redis.minMessageLifetime` | `number` | no | Minimum time in ms that update messages are kept in Redis streams before compaction. Default: 60 000 |
+| `redis.cacheTtl` | `number` | no | TTL in seconds for cached API responses. Default: 10 |
+| `postgres` | `string` | yes | PostgreSQL connection string |
+| `persistence` | `PersistencePlugin[]` | yes | One or more storage plugins (e.g. `S3PersistenceV1`). At least one is required. |
+| `server` | `object \| null` | no | HTTP/WebSocket server config. Set to `null` to run without a server (worker/script mode). |
+| `server.port` | `number` | yes* | Port to listen on |
+| `server.auth` | `AuthPlugin` | yes* | Auth plugin created with `createAuthPlugin` |
+| `server.maxDocSize` | `number` | no | Maximum Ydoc size in bytes, used for WebSocket payload limits. Default: 500 MB |
+| `worker` | `object \| null` | no | Background compaction worker config. Set to `null` to disable. |
+| `worker.taskConcurrency` | `number` | yes* | Maximum number of compaction tasks to process in parallel |
+| `worker.events.docUpdate` | `function` | no | Called after each compaction with the merged `DocTable` |
+
+**Example: full server setup**
+
+```js
+import { createYHub, createAuthPlugin } from '@y/hub'
+import { S3PersistenceV1 } from '@y/hub/plugins/s3'
+
+const yhub = await createYHub({
+  redis: { url: 'redis://localhost:6379', prefix: 'yhub:prod' },
+  postgres: 'postgres://user:pass@localhost/yhub',
+  persistence: [
+    new S3PersistenceV1({ bucket: 'my-bucket', /* ... */ })
+  ],
+  server: {
+    port: 8080,
+    auth: createAuthPlugin({
+      async readAuthInfo (req) { return { userid: req.getHeader('x-user-id') } },
+      async getAccessType (authInfo, room) { return 'rw' }
+    })
+  },
+  worker: { taskConcurrency: 10 }
+})
+```
+
+**Example: script / worker-only mode (no HTTP server)**
+
+```js
+const yhub = await createYHub({
+  redis: { url: 'redis://localhost:6379', prefix: 'yhub:prod' },
+  postgres: 'postgres://user:pass@localhost/yhub',
+  persistence: [ new S3PersistenceV1({ /* ... */ }) ],
+  server: null,
+  worker: null
+})
+```
+
+#### `yhub.getDoc(room, include, opts?)`
+
+Retrieve the current state of a document, merging any in-memory Redis updates with the persisted state.
+
+```ts
+yhub.getDoc(
+  room: { org: string, docid: string, branch: string },
+  include: {
+    gc?: boolean,
+    nongc?: boolean,
+    contentmap?: boolean,
+    contentids?: boolean,
+    references?: boolean,
+    awareness?: boolean
+  },
+  opts?: { gcOnMerge?: boolean }  // default: true
+): Promise<{
+  gcDoc: Uint8Array | null,
+  nongcDoc: Uint8Array | null,
+  contentmap: Uint8Array | null,
+  contentids: Uint8Array | null,
+  references: Array<{ assetId, asset }> | null,
+  awareness: Uint8Array | null,
+  lastClock: string,
+  lastPersistedClock: string
+}>
+```
+
+Only fields listed in `include` with a truthy value are populated; the rest are `null`. Set `gcOnMerge: false` to keep full history in the returned `gcDoc`.
+
+**Example**
+
+```js
+import * as Y from '@y/y'
+
+const { gcDoc } = await yhub.getDoc(
+  { org: 'my-org', docid: 'my-doc', branch: 'main' },
+  { gc: true }
+)
+const ydoc = Y.createDocFromUpdate(gcDoc)
+```
+
+#### `yhub.unsafePersistDoc(room, update, attributions)`
+
+Attribute and persist a Yjs update directly to the database, without distributing it via Redis or WebSocket. Multiple calls for the same room are merged on next retrieval.
+
+> **Warning:** connected clients will not see the changes until they reconnect.
+
+```ts
+yhub.unsafePersistDoc(
+  room: { org: string, docid: string, branch: string },
+  update: Uint8Array,          // encoded Yjs update (e.g. Y.encodeStateAsUpdate)
+  attributions: { by?: string } // optional author user-id
+): Promise<void>
+```
+
+**Example**
+
+```js
+import * as Y from '@y/y'
+
+const ydoc = new Y.Doc()
+ydoc.getText('content').insert(0, 'Hello from a script')
+
+await yhub.unsafePersistDoc(
+  { org: 'my-org', docid: 'my-doc', branch: 'main' },
+  Y.encodeStateAsUpdate(ydoc),
+  { by: 'import-script' }
+)
+```

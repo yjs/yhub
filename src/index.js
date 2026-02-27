@@ -7,6 +7,7 @@ import * as object from 'lib0/object'
 import * as protocol from './protocol.js'
 import * as server from './server.js'
 import * as logging from 'lib0/logging'
+import * as math from 'lib0/math'
 
 export { createAuthPlugin } from './types.js'
 
@@ -116,6 +117,36 @@ export class YHub {
       references,
       awareness
     }
+  }
+
+  /**
+   * Attribute and persist a document directly to the database, without distributing it via redis.
+   *
+   * Changes won't be synced to users connected via websocket until they reconnect.
+   * 
+   * @param {t.Room} room
+   * @param {Uint8Array<ArrayBuffer>} ydoc
+   * @param {{ by?: string }} attributions
+   */
+  async unsafePersistDoc (room, ydoc, { by }) {
+    const [seconds, microseconds] = await this.stream.redis.time()
+    const ms = parseInt(seconds) * 1000 + math.floor(parseInt(microseconds) / 1000)
+    const lastClock = `${ms}-I`
+    const contentids = Y.createContentIdsFromUpdate(ydoc)
+    /**
+     * @type {Y.ContentAttribute<any>[]}
+     */
+    const insertAttrs = [Y.createContentAttribute('insertAt', ms)]
+    /**
+     * @type {Y.ContentAttribute<any>[]}
+     */
+    const deleteAttrs = [Y.createContentAttribute('deleteAt', ms)]
+    if (by != null) {
+      insertAttrs.push(Y.createContentAttribute('insertBy', by))
+      deleteAttrs.push(Y.createContentAttribute('deleteBy', by))
+    }
+    const contentmap = Y.createContentMapFromContentIds(contentids, insertAttrs, deleteAttrs)
+    await this.persistence.store(room, { lastClock, gcDoc: ydoc, nongcDoc: ydoc, contentids: Y.encodeContentIds(contentids), contentmap: Y.encodeContentMap(contentmap) })
   }
 }
 

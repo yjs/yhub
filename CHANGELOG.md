@@ -1,10 +1,33 @@
 # Changelog
 
-## [0.2.8] - TBD
+## [0.2.9] - TBD
 
-- activity API accepts `contentids` parameters that allows rendering - for
-example - only changes on a specific yjs attribute.
+- **Activity API: `contentIds` filter.** Pass a base64-encoded `Y.ContentIds` to restrict activity results to changes that touch a specific set of Yjs content (e.g. a single YType attribute). Encode via `buffer.toBase64(Y.encodeContentIds(ids))`.
 
+## [0.2.8] - 2026-02-27
+
+- **`yhub.unsafePersistDoc`** — new import-API method to write and attribute a Yjs update directly to the database without going through Redis/WebSocket. Useful for server-side migration scripts.
+- **S3 reliability fixes** — keepalive connections, automatic retry on transient failures, and graceful handling of nonexistent resources.
+- **Rollback API** now uses the standard undo/redo model for KV (map) entries, matching the behaviour users expect from collaborative editors.
+- **Faster update merging** — bumped `@y/y` dependency for more efficient Yjs update merging.
+
+## [0.2.7] - 2026-02-23
+
+- Fixed a remaining infinite-recursion crash in the activity API under certain document shapes.
+
+## [0.2.6] - 2026-02-20
+
+- **S3 multipart uploads** — large documents are now uploaded to S3 in parallel chunks, avoiding timeouts and memory pressure on the server.
+- Fixed infinite recursion in the activity API when `delta=true` was requested on certain documents.
+
+## [0.2.5] - 2026-02-17
+
+- **KeyDB support** — KeyDB can now be used as a drop-in Redis alternative.
+- **Activity API: `customAttributions` response field** — passing `customAttributions=true` now returns the list of custom attribution key-value pairs associated with each activity entry (deduplicated when grouping is enabled).
+
+## [0.2.4] - 2026-02-17
+
+- **Activity & WebSocket: filter by custom attributions** — the `/activity` endpoint and the WebSocket connection both now accept a `withCustomAttributions` query parameter (`key:value` pairs) to limit results to changes that carry matching attributions.
 
 ## [0.2.3] - 2026-02-16
 

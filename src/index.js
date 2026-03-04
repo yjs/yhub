@@ -142,8 +142,8 @@ export class YHub {
      */
     const deleteAttrs = [Y.createContentAttribute('deleteAt', ms)]
     if (by != null) {
-      insertAttrs.push(Y.createContentAttribute('insertBy', by))
-      deleteAttrs.push(Y.createContentAttribute('deleteBy', by))
+      insertAttrs.push(Y.createContentAttribute('insert', by))
+      deleteAttrs.push(Y.createContentAttribute('delete', by))
     }
     const contentmap = Y.createContentMapFromContentIds(contentids, insertAttrs, deleteAttrs)
     await this.persistence.store(room, { lastClock, gcDoc: ydoc, nongcDoc: ydoc, contentids: Y.encodeContentIds(contentids), contentmap: Y.encodeContentMap(contentmap) })

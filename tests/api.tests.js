@@ -10,6 +10,7 @@ import * as array from 'lib0/array'
 import * as math from 'lib0/math'
 import * as fs from 'node:fs'
 import * as prng from 'lib0/prng'
+import * as buffer from 'lib0/buffer'
 
 /**
  * @param {string} path
@@ -366,6 +367,64 @@ export const testLargeDoc = async tc => {
   } finally {
     yhub.conf.redis.minMessageLifetime = prevMinMessageLifletime
   }
+}
+
+/**
+ * Test that the activity API `contentIds` parameter correctly filters to a specific YType attribute.
+ *
+ * We make two separate attribute changes on the same YType ('someattr' and 'otherattr'), then
+ * verify that passing the ContentIds of the 'someattr' update returns only the activity entry
+ * for that attribute.
+ *
+ * ContentIds for a specific attribute are built by traversing the linked list stored in
+ * `ytype._map.get(attrName)` — each item's `.left` pointer points to its previous version.
+ * Here we capture the update at write time and derive the ContentIds from it.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testActivityContentIdsFilter = async tc => {
+  const { org, createWsClient } = await utils.createTestCase(tc)
+  const { ydoc } = createWsClient()
+  const ytype = ydoc.get('map')
+
+  // Capture the Yjs update emitted when 'someattr' is written
+  /** @type {Uint8Array|null} */
+  let someattrUpdate = null
+  ydoc.once('update', u => { someattrUpdate = u })
+  ytype.setAttr('someattr', 'hello')
+  await promise.wait(100)
+
+  // Write a second, independent attribute – this change must NOT appear in the filtered result
+  ytype.setAttr('otherattr', 'world')
+  await promise.wait(300)
+
+  // Reconnect and inspect the 'someattr' linked list on the synced doc.
+  // _map.get(key) returns the current Item; item.left traverses to previous versions.
+  const { ydoc: syncedDoc } = await createWsClient({ waitForSync: true })
+  const syncedYtype = syncedDoc.get('map')
+  /**
+   * @param {Y.Type} ytype
+   * @param {string} key
+   */
+  const getAttributeHistory = async (ytype, key) => {
+    const idset = Y.createIdSet()
+    let item = ytype._map.get(key) ?? null
+    while (item !== null) {
+      idset.add(item.id.client, item.id.clock, item.length)
+      item = item.left
+    }
+    const contentIdsParam = encodeURIComponent(buffer.toBase64(Y.encodeContentIds(Y.createContentIds(idset, idset))))
+    return await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false&contentIds=${contentIdsParam}&delta=true`)
+  }
+  // Without filter: both attribute changes should appear
+  const allActivity = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)
+  t.assert(allActivity.length === 2, 'expected 2 activity entries without contentIds filter')
+  console.log({ allActivity })
+  // Encode ContentIds derived from the captured 'someattr' update
+  const filteredActivity = await getAttributeHistory(syncedYtype, 'someattr')
+  console.log({ filteredActivity: JSON.stringify(filteredActivity) })
+  t.assert(filteredActivity.length === 1, 'expected 1 activity entry when filtering by someattr contentIds')
+  t.assert(filteredActivity[0].from === allActivity[0].from, 'filtered entry should match the someattr change timestamp')
 }
 
 // /**

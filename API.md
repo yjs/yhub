@@ -137,10 +137,11 @@ before and after state of a Yjs doc. Optionally, include relevant attributions.
 Retrieve all editing-timestamps for a certain document. Use
 the activity API and the changeset API to reconstruct an editing trail.
 
-* `GET /activity/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, delta?: boolean, withCustomAttributions?: string, customAttributions?: boolean }`
+* `GET /activity/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, delta?: boolean, withCustomAttributions?: string, customAttributions?: boolean, contentIds?: string }`
   * `from`/`to`: unix timestamp range filter
   * `by=string`: comma-separated list of user-ids to filter by
   * `withCustomAttributions=string`: filter by custom attributions using `key:value` pairs, comma-separated (e.g. `source:import,tag:v2`). Only changes matching all specified attributions are included.
+  * `contentIds=string`: base64-encoded `Y.ContentIds` binary. When provided, only activity entries whose content intersects the given content set are returned. Encode via `buffer.toBase64(Y.encodeContentIds(contentIds))` (`import * as buffer from 'lib0/buffer'`).
   * `limit=number`: maximum number of entries to return
   * `order='asc'|'desc'`: `"asc"` (oldest first) or `"desc"` (newest first, default)
   * `group=boolean`: bundle consecutive changes from the same user into a single entry (experimental)

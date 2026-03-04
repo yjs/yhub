@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.8] - TBD
+
+- activity API accepts `contentids` parameters that allows rendering - for
+example - only changes on a specific yjs attribute.
+
+
 ## [0.2.3] - 2026-02-16
 
 This release focused on **performance** and the new **custom attributions** feature. Y/hub now avoids loading YDocs into memory during sync, making it possible to handle very large documents (300MB+) and thousands of concurrent WebSocket connections without breaking a sweat. REST API responses are now cached via Redis for efficient repeated access.

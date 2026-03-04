@@ -11,6 +11,7 @@ import * as number from 'lib0/number'
 import * as t from './types.js'
 import * as protocol from './protocol.js'
 import * as math from 'lib0/math'
+import * as buffer from 'lib0/buffer'
 
 const log = logging.createModuleLogger('@y/hub/ws')
 
@@ -390,6 +391,9 @@ export const createYHubServer = async (yhub, conf) => {
     /** @type {Array<{k: string, v: string}>|null} */
     const withCustomAttributions = withCustomAttributionsParam ? parseCustomAttributionsParam(withCustomAttributionsParam) : null
     const includeCustomAttributions = req.getQuery('customAttributions') === 'true'
+    const contentIdsParam = req.getQuery('contentIds')
+    /** @type {Y.ContentIds|undefined} */
+    const contentIds = contentIdsParam ? Y.decodeContentIds(buffer.fromBase64(contentIdsParam)) : undefined
     let aborted = false
     res.onAborted(() => {
       aborted = true
@@ -400,11 +404,11 @@ export const createYHubServer = async (yhub, conf) => {
       if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
       return
     }
-    const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeDelta), String(limit), reverse ? 'desc' : 'asc', String(group), withCustomAttributionsParam || '', String(includeCustomAttributions)]
+    const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeDelta), String(limit), reverse ? 'desc' : 'asc', String(group), withCustomAttributionsParam || '', String(includeCustomAttributions), contentIdsParam || '']
     const responseData = await yhub.stream.cachedGet('activity', cacheArgs, async () => {
       const { contentmap: contentmapBin, nongcDoc: nongcDocBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
       const contentmap = Y.decodeContentMap((contentmapBin))
-      const filteredAttributions = filterContentMapHelper(contentmap, from, to, by, undefined, withCustomAttributions)
+      const filteredAttributions = filterContentMapHelper(contentmap, from, to, by, contentIds, withCustomAttributions)
       /**
        * @type {Array<{ from: number, to: number, by: string|null, customAttributions: { k: string, v: string}[]|null }>}
        */

@@ -386,18 +386,12 @@ export const testActivityContentIdsFilter = async tc => {
   const { org, createWsClient } = await utils.createTestCase(tc)
   const { ydoc } = createWsClient()
   const ytype = ydoc.get('map')
-
-  // Capture the Yjs update emitted when 'someattr' is written
-  /** @type {Uint8Array|null} */
-  let someattrUpdate = null
-  ydoc.once('update', u => { someattrUpdate = u })
+  // change an attribute
   ytype.setAttr('someattr', 'hello')
   await promise.wait(100)
-
   // Write a second, independent attribute – this change must NOT appear in the filtered result
   ytype.setAttr('otherattr', 'world')
   await promise.wait(300)
-
   // Reconnect and inspect the 'someattr' linked list on the synced doc.
   // _map.get(key) returns the current Item; item.left traverses to previous versions.
   const { ydoc: syncedDoc } = await createWsClient({ waitForSync: true })

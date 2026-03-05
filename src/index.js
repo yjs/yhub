@@ -8,6 +8,7 @@ import * as protocol from './protocol.js'
 import * as server from './server.js'
 import * as logging from 'lib0/logging'
 import * as math from 'lib0/math'
+import { createComputePool } from './compute.js'
 
 export { createAuthPlugin } from './types.js'
 
@@ -33,6 +34,7 @@ export class YHub {
      * @type {Conf['server'] extends null ? null : server.YHubServer}
      */
     this.server = /** @type {any} */ (null)
+    this.computePool = createComputePool()
     this._workerCtx = {
       shouldRun: false
     }
@@ -108,8 +110,8 @@ export class YHub {
       }
     })
     return {
-      gcDoc: /** @type {Include['gc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (gcDoc ? (gcOnMerge ? mergeUpdatesAndGc(gcDoc) : Y.mergeUpdates(gcDoc)) : null),
-      nongcDoc: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (nongcDoc ? Y.mergeUpdates(nongcDoc) : null),
+      gcDoc: /** @type {Include['gc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (gcDoc ? (gcOnMerge ? await this.computePool.mergeUpdatesAndGc(gcDoc) : await this.computePool.mergeUpdates(gcDoc)) : null),
+      nongcDoc: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (nongcDoc ? await this.computePool.mergeUpdates(nongcDoc) : null),
       contentmap: /** @type {Include['contentmap'] extends true ? Uint8Array<ArrayBuffer> : null} */ (contentmap ? Y.encodeContentMap(Y.mergeContentMaps(contentmap.map(Y.decodeContentMap))) : null),
       contentids: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (contentids ? Y.encodeContentIds(Y.mergeContentIds(contentids.map(Y.decodeContentIds))) : null),
       lastClock,
@@ -148,20 +150,6 @@ export class YHub {
     const contentmap = Y.createContentMapFromContentIds(contentids, insertAttrs, deleteAttrs)
     await this.persistence.store(room, { lastClock, gcDoc: ydoc, nongcDoc: ydoc, contentids: Y.encodeContentIds(contentids), contentmap: Y.encodeContentMap(contentmap) })
   }
-}
-
-/**
- * @param {Array<Uint8Array<ArrayBuffer>>} updates
- */
-const mergeUpdatesAndGc = updates => {
-  if (updates.length === 1) {
-    return updates[0]
-  }
-  const ydoc = new Y.Doc()
-  updates.forEach(update => {
-    Y.applyUpdate(ydoc, update)
-  })
-  return Y.encodeStateAsUpdate(ydoc)
 }
 
 /**

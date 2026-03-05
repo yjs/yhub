@@ -1,6 +1,20 @@
 # Changelog
 
-## [0.2.9] - TBD
+## [0.2.9] - 2026-03-06
+
+### Performance
+
+- **Compute worker thread pool.** All CPU-intensive Yjs operations (merge, rollback, changeset, activity, patch) are now offloaded to a pool of worker threads, keeping the main event loop free for I/O. Workers are created lazily up to `maxPoolSize` (defaults to `cpus - 1`). Stale workers running longer than 30 minutes are automatically terminated and replaced. Dead workers (e.g. from uncaught exceptions) are detected and recycled.
+- **Smart `mergeUpdates`.** Small merges (≤ 5kb or single update) run synchronously to avoid worker overhead; larger merges are offloaded to a worker thread.
+
+### Bug Fixes & Reliability
+
+- **Fix `unsafePersistDoc` attribute names.** Content attribute names (`insert`/`insertAt`/`delete`/`deleteAt`) were incorrect. (Thanks @PabloSzx — #43)
+- **Catch all floating promises.** Added `.catch()` handlers to previously unawaited promises in the Redis stream, S3 persistence, worker startup, and HTTP request handlers, preventing silent failures.
+- **Fix worker hang on `--inspect`.** Worker threads no longer inherit `--inspect` flags from the parent process, which caused them to fail when binding to the same debugger port.
+- **Fix dead worker recovery.** Workers that crash from uncaught exceptions are now correctly marked as dead before draining the task queue, preventing tasks from being sent to terminated threads.
+
+### New Features
 
 - **Activity API: `contentIds` filter.** Pass a base64-encoded `Y.ContentIds` to restrict activity results to changes that touch a specific set of Yjs content (e.g. a single YType attribute). Encode via `buffer.toBase64(Y.encodeContentIds(ids))`.
 

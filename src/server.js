@@ -230,7 +230,10 @@ export const createYHubServer = async (yhub, conf) => {
       const chunkBuffer = Buffer.from(chunk)
       buffer = Buffer.concat([buffer, chunkBuffer])
       if (isLast) {
-        handleUpdateRequest(buffer)
+        handleUpdateRequest(buffer).catch(err => {
+          console.error('[@y/hub/server] error handling update request', err)
+          if (!aborted) sendErrorResponse(res, '500 Internal Server Error', { error: 'Internal server error' })
+        })
       }
     })
   })
@@ -308,7 +311,10 @@ export const createYHubServer = async (yhub, conf) => {
       const chunkBuffer = Buffer.from(chunk)
       buffer = Buffer.concat([buffer, chunkBuffer])
       if (isLast) {
-        handleRollbackRequest(buffer)
+        handleRollbackRequest(buffer).catch(err => {
+          console.error('[@y/hub/server] error handling rollback request', err)
+          if (!aborted) sendErrorResponse(res, '500 Internal Server Error', { error: 'Internal server error' })
+        })
       }
     })
   })

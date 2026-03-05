@@ -165,7 +165,7 @@ export const createYHub = async conf => {
   if (conf.server != null) {
     yhub.server = /** @type {any} */ (await server.createYHubServer(yhub, conf))
   }
-  yhub.startWorker()
+  yhub.startWorker().catch(err => console.error('[yhub] worker failed', err))
   // @todo start workers _after_ persistence plugin is done. Otherwise, workers might use
   // persistence.
   return yhub

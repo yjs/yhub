@@ -74,7 +74,7 @@ const tryPersistencePluginDelete = (plugins, assetId, asset) => {
   if (asset.type === 'asset:retrievable:v1') {
     for (const plugin of plugins) {
       if (plugin.delete != null) {
-        plugin.delete(assetId, asset)
+        plugin.delete(assetId, asset).catch(err => console.error('[persistence] error deleting asset', assetId, err))
       }
     }
   }

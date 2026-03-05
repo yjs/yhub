@@ -306,7 +306,7 @@ export class Stream {
     const s = map.setIfUndefined(this.subUpdates, streamName, () => ({ lastReceivedClock: subscriber.lastReceivedClock, subs: /** @type {Set<StreamSubscriber>} */ (new Set()) }))
     s.lastReceivedClock = minRedisClock(s.lastReceivedClock, subscriber.lastReceivedClock)
     s.subs.add(subscriber)
-    this._runSub()
+    this._runSub().catch(err => console.error('[yhub] error running subscription loop', err))
   }
 
   /**
@@ -340,7 +340,7 @@ export class Stream {
         multi.xAck(this.workerStreamName, this.workerGroupName, id)
         multi.xDel(this.workerStreamName, id)
       }
-      multi.exec()
+      multi.exec().catch(err => console.error('[yhub-worker] error cleaning up ghost tasks', err))
     }
     const tasks = reclaimedTasks.messages.map(m => {
       if (m?.message.compact != null) {
@@ -389,7 +389,10 @@ export class Stream {
     const startTime = time.getUnixTime()
     const result = await computeResult()
     const computeTime = math.floor((time.getUnixTime() - startTime) / 1000)
-    this.redis.set(key, Buffer.from(result), { EX: this.cacheTtl + computeTime * 2 })
+    if (result.byteLength < 100 * 1000 * 1000) {
+      // only cache if content is smaller than 100mb
+      this.redis.set(key, Buffer.from(result), { EX: this.cacheTtl + computeTime * 2 }).catch(err => log('error caching result', { err }))
+    }
     return result
   }
 }

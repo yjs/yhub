@@ -130,7 +130,7 @@ export class S3PersistenceV1 {
     setTimeout(() => {
       // delete at some point later, avoiding issues of clients pulling from stale data
       // @todo it would be nice to implement a worker that finds unused s3 docs and deletes them
-      this.s3client.removeObject(this.bucket, path)
+      this.s3client.removeObject(this.bucket, path).catch(err => console.error('[s3] error deleting object', path, err))
     }, 10_000)
     return true
   }

@@ -2,6 +2,10 @@
 
 ## [0.2.9] - 2026-03-06
 
+### New Features
+
+- **Redis TLS support (`tlsCaCert`).** Added an optional `redis.tlsCaCert` config field that accepts a PEM-encoded CA certificate string. When connecting over TLS (`rediss://`), this certificate is used to validate the server, enabling secure connections to Redis instances with self-signed or privately-signed certificates. A startup warning is logged when `rediss://` is used without `tlsCaCert`.
+
 ### Performance
 
 - **Compute worker thread pool.** All CPU-intensive Yjs operations (merge, rollback, changeset, activity, patch) are now offloaded to a pool of worker threads, keeping the main event loop free for I/O. Workers are created lazily up to `maxPoolSize` (defaults to `cpus - 1`). Stale workers running longer than 30 minutes are automatically terminated and replaced. Dead workers (e.g. from uncaught exceptions) are detected and recycled.

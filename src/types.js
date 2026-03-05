@@ -251,7 +251,12 @@ export const $config = s.$object({
     /**
      * TTL for cached API responses in seconds. (default: 10 seconds)
      */
-    cacheTtl: s.$number.optional
+    cacheTtl: s.$number.optional,
+    /**
+     * PEM-encoded CA certificate for TLS connections (rediss://). Used to validate
+     * self-signed or privately-signed certificates.
+     */
+    tlsCaCert: s.$string.optional
   }),
   postgres: s.$string,
   persistence: s.$array($persistencePlugin),

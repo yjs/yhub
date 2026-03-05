@@ -5,6 +5,7 @@ import * as s from 'lib0/schema'
 import * as promise from 'lib0/promise'
 import * as logging from 'lib0/logging'
 import * as Y from '@y/y'
+import * as math from 'lib0/math'
 
 const log = logging.createModuleLogger('@y/hub/compute-worker')
 
@@ -196,7 +197,7 @@ const drain = (pool) => {
  * @param {{ poolSize?: number }} [opts]
  */
 export const createComputePool = (opts = {}) => {
-  const poolSize = opts.poolSize ?? Math.max(1, cpus().length - 1)
+  const poolSize = opts.poolSize ?? math.max(1, cpus().length - 1)
   return new ComputePool(poolSize)
 }
 

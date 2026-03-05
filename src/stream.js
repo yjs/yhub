@@ -340,7 +340,7 @@ export class Stream {
         multi.xAck(this.workerStreamName, this.workerGroupName, id)
         multi.xDel(this.workerStreamName, id)
       }
-      multi.exec()
+      await multi.exec()
     }
     const tasks = reclaimedTasks.messages.map(m => {
       if (m?.message.compact != null) {
@@ -389,7 +389,7 @@ export class Stream {
     const startTime = time.getUnixTime()
     const result = await computeResult()
     const computeTime = math.floor((time.getUnixTime() - startTime) / 1000)
-    this.redis.set(key, Buffer.from(result), { EX: this.cacheTtl + computeTime * 2 })
+    this.redis.set(key, Buffer.from(result), { EX: this.cacheTtl + computeTime * 2 }).catch(err => log('cache write error: ', { err }))
     return result
   }
 }

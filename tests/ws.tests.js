@@ -42,7 +42,7 @@ export const testSyncAndCleanup = async tc => {
   t.info('docs synced (3)')
   t.assert(doc3.get().getAttr('a') === 1)
   const { references } = await yhub.getDoc(defaultRoom, { references: true, gc: true })
-  t.assert(references.length === 1)
+  t.assert(references.length === 1 * 2)
   t.info('doc retrieved')
   // now write another updates that the worker will collect
   doc1.get().setAttr('a', 2)
@@ -51,7 +51,7 @@ export const testSyncAndCleanup = async tc => {
   const { references: references2 } = await yhub.getDoc(defaultRoom, { references: true, gc: true })
   t.info('map retrieved')
   // should delete old references
-  t.assert(references2.length === 1)
+  t.assert(references2.length === 1 * 2)
 }
 
 /**

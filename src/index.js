@@ -90,30 +90,36 @@ export class YHub {
    */
   async getDoc (room, includeContent, { gcOnMerge = true } = {}) {
     const [persistedDoc, cachedMessages] = await promise.all([
-      this.persistence.retrieveDoc(room, includeContent),
+      this.persistence.retrieveDoc(room, object.assign({}, includeContent, { contentids: /** @type {const} */ (true) })),
       this.stream.getMessages([{ room, clock: '0' }]).then(ms => ms[0] || { messages: [], lastClock: '0' })
     ])
     const gcDoc = persistedDoc.gcDoc
     const nongcDoc = persistedDoc.nongcDoc
-    const contentmap = persistedDoc.contentmap
-    const contentids = persistedDoc.contentids
+    const contentmap = persistedDoc.contentmap?.map(Y.decodeContentMap)
+    const contentids = /** @type {Array<Uint8Array>} */ (persistedDoc.contentids).map(Y.decodeContentIds)
     const references = persistedDoc.references
     const awareness = /** @type {Include['awareness'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.awareness ? protocol.mergeAwarenessUpdates(cachedMessages.messages.filter(m => m.type === 'awareness:v1').map(m => m.update)) : null)
     const lastClock = strm.maxRedisClock(persistedDoc.lastClock, cachedMessages.lastClock)
+    const mergedContentIds = Y.mergeContentIds(contentids)
     cachedMessages.messages.forEach(m => {
       // only add update messages that are newer that what we currently know
       if (t.$updateMessage.check(m) && strm.isSmallerRedisClock(persistedDoc.lastClock, m.redisClock)) {
+        // attributions can only be assigned once. Filter out "known" attributions
+        const mcontentmap = Y.excludeContentMaps(Y.decodeContentMap(m.contentmap), mergedContentIds)
+        const mcontentids = Y.createContentIdsFromContentMap(mcontentmap)
+        Y.insertIntoIdSet(mergedContentIds.inserts, mcontentids.inserts)
+        Y.insertIntoIdSet(mergedContentIds.deletes, mcontentids.deletes)
         gcDoc?.push(m.update)
         nongcDoc?.push(m.update)
-        contentmap?.push(m.contentmap)
-        contentids?.push(Y.encodeContentIds(Y.createContentIdsFromContentMap(Y.decodeContentMap(m.contentmap))))
+        contentmap?.push(mcontentmap)
+        contentids.push(mcontentids)
       }
     })
     return {
       gcDoc: /** @type {Include['gc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (gcDoc ? (gcOnMerge ? await this.computePool.mergeUpdatesAndGc(gcDoc) : await this.computePool.mergeUpdates(gcDoc)) : null),
       nongcDoc: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (nongcDoc ? await this.computePool.mergeUpdates(nongcDoc) : null),
-      contentmap: /** @type {Include['contentmap'] extends true ? Uint8Array<ArrayBuffer> : null} */ (contentmap ? Y.encodeContentMap(Y.mergeContentMaps(contentmap.map(Y.decodeContentMap))) : null),
-      contentids: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (contentids ? Y.encodeContentIds(Y.mergeContentIds(contentids.map(Y.decodeContentIds))) : null),
+      contentmap: /** @type {Include['contentmap'] extends true ? Uint8Array<ArrayBuffer> : null} */ (contentmap ? Y.encodeContentMap(Y.mergeContentMaps(contentmap)) : null),
+      contentids: /** @type {Include['contentids'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.contentids === true ? Y.encodeContentIds(Y.mergeContentIds(contentids)) : null),
       lastClock,
       lastPersistedClock: persistedDoc.lastClock,
       references,

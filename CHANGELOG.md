@@ -6,6 +6,10 @@
 
 - **`redis.tlsCaCert` replaced by `redis.socket`.** The `redis.tlsCaCert` config field has been replaced with a generic `redis.socket` object that is merged into the Redis client socket config. See [node-redis socket options](https://github.com/redis/node-redis/blob/master/docs/client-configuration.md#socket-options) for available options.
 
+### Bug Fixes & Reliability
+
+- **Reduce log verbosity.** Avoid logging large objects and binary data in stream and worker logs. Log counts and summaries instead.
+
 ## [0.2.10] - 2026-03-06
 
 ### New Features

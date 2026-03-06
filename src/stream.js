@@ -121,7 +121,7 @@ export class Stream {
           }
           return math.min(retries * 10, 3000)
         },
-        ...(isTls && config.redis.tlsCaCert ? { tls: { ca: config.redis.tlsCaCert } } : {})
+        ...(isTls && config.redis.tlsCaCert ? { ca: config.redis.tlsCaCert } : {})
       }
     }
     this.redis = redis.createClient({

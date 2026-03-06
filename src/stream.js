@@ -261,7 +261,7 @@ export class Stream {
       return []
     }
     const streams = rooms.map(asset => ({ key: s.$string.check(asset.room) ? asset.room : encodeRoomName(asset.room, this.prefix), id: asset.clock || '0' }))
-    log('retrieving messages: ', streams)
+    log('retrieving messages from ', streams.length, ' streams')
     const reads = /** @type {Array<{name: Buffer, messages: Array<{id: Buffer, message: Record<string, Buffer>}>}> | null} */ (await redisClient.withTypeMapping({
       [redis.RESP_TYPES.BLOB_STRING]: Buffer
     }).xRead(
@@ -354,7 +354,7 @@ export class Stream {
         console.warn('[yhub-worker] deleting ghost task from stream')
         return null
       } else {
-        console.error('found unknown task type', m?.message)
+        console.error('found unknown task type', Object.keys(m?.message ?? {}))
         return null
       }
     }).filter(t => t != null)

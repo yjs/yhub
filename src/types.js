@@ -253,10 +253,11 @@ export const $config = s.$object({
      */
     cacheTtl: s.$number.optional,
     /**
-     * PEM-encoded CA certificate for TLS connections (rediss://). Used to validate
-     * self-signed or privately-signed certificates.
+     * Custom socket options passed to the Redis client (e.g. `{ tls: true, rejectUnauthorized: false, ca: '...' }`).
+     * Merged into the default socket config (which sets connectTimeout and reconnectStrategy).
+     * @type {s.$Optional<s.Schema<import('@redis/client').RedisClientOptions['socket']>>}
      */
-    tlsCaCert: s.$string.optional
+    socket: /** @type {s.$Optional<s.Schema<import('@redis/client').RedisClientOptions['socket']>>} */ (s.$any.optional)
   }),
   postgres: s.$string,
   persistence: s.$array($persistencePlugin),

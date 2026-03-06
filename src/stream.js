@@ -103,10 +103,6 @@ export class Stream {
      * @type {Map<string, { lastReceivedClock: string, subs: Set<StreamSubscriber> }>}
      */
     this.subUpdates = new Map()
-    const isTls = config.redis.url.startsWith('rediss://')
-    if (isTls && !config.redis.tlsCaCert) {
-      console.info('WARNING: Using rediss:// without tlsCaCert. TLS certificate validation relies on the default system CA store. Set redis.tlsCaCert to trust a specific CA for self-signed certificates.')
-    }
     this.redisClientConf = {
       url: config.redis.url,
       socket: {
@@ -121,7 +117,7 @@ export class Stream {
           }
           return math.min(retries * 10, 3000)
         },
-        ...(isTls && config.redis.tlsCaCert ? { ca: config.redis.tlsCaCert } : {})
+        ...config.redis.socket
       }
     }
     this.redis = redis.createClient({

@@ -178,7 +178,7 @@ const yhub = await createYHub(config)
 | `redis.taskDebounce` | `number` | no | Milliseconds before a worker picks up a compaction task. Default: 60 000 |
 | `redis.minMessageLifetime` | `number` | no | Minimum time in ms that update messages are kept in Redis streams before compaction. Default: 60 000 |
 | `redis.cacheTtl` | `number` | no | TTL in seconds for cached API responses. Default: 10 |
-| `redis.tlsCaCert` | `string` | no | PEM-encoded CA certificate for TLS connections (`rediss://`). When set, used to validate self-signed or privately-signed server certificates. |
+| `redis.socket` | `object` | no | Custom socket options merged into the Redis client socket config. See [node-redis socket options](https://github.com/redis/node-redis/blob/master/docs/client-configuration.md#socket-options) for available options. |
 | `postgres` | `string` | yes | PostgreSQL connection string |
 | `persistence` | `PersistencePlugin[]` | yes | One or more storage plugins (e.g. `S3PersistenceV1`). At least one is required. |
 | `server` | `object \| null` | no | HTTP/WebSocket server config. Set to `null` to run without a server (worker/script mode). |
@@ -199,8 +199,8 @@ const yhub = await createYHub({
   redis: {
     url: 'redis://localhost:6379',
     prefix: 'yhub:prod',
-    // Optional: trust a custom CA for TLS connections (rediss://)
-    // tlsCaCert: fs.readFileSync('/path/to/ca.pem', 'utf-8')
+    // Optional: custom socket options for TLS, etc.
+    // socket: { rejectUnauthorized: false, ca: fs.readFileSync('/path/to/ca.pem', 'utf-8') }
   },
   postgres: 'postgres://user:pass@localhost/yhub',
   persistence: [

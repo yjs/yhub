@@ -1,10 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **`redis.tlsCaCert` replaced by `redis.socket`.** The `redis.tlsCaCert` config field has been replaced with a generic `redis.socket` object that is merged into the Redis client socket config. See [node-redis socket options](https://github.com/redis/node-redis/blob/master/docs/client-configuration.md#socket-options) for available options.
+
 ## [0.2.10] - 2026-03-06
 
 ### New Features
 
-- **Redis TLS support (`tlsCaCert`).** Added an optional `redis.tlsCaCert` config field that accepts a PEM-encoded CA certificate string. When connecting over TLS (`rediss://`), this certificate is used to validate the server, enabling secure connections to Redis instances with self-signed or privately-signed certificates. A startup warning is logged when `rediss://` is used without `tlsCaCert`.
+- **Redis TLS support (`tlsCaCert`).** Added an optional `redis.tlsCaCert` config field that accepts a PEM-encoded CA certificate string for TLS connections (`rediss://`).
 
 ### Performance
 

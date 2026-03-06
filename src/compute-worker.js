@@ -65,7 +65,7 @@ const createContentMap = (contentids, userid, customAttributions) => {
 
 const port = parentPort
 port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg => {
-  log(`new compute task: ${msg.type}`, { msg })
+  log(`new compute task: ${msg.type}`)
   switch (msg.type) {
     case 'mergeUpdatesAndGc': {
       const ydoc = new Y.Doc()

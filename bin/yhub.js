@@ -10,7 +10,7 @@ import * as number from 'lib0/number'
 import * as env from 'lib0/environment'
 import * as yhub from '@y/hub'
 import * as random from 'lib0/random'
-import * as logging from 'lib0/logging'
+import { logger } from '../src/logger.js'
 
 const userIdChoices = [
   'Calvin Hobbes',
@@ -21,7 +21,7 @@ const userIdChoices = [
 
 const port = number.parseInt(env.getConf('port') || '3002')
 
-logging.print(logging.GREEN, 'starting server on port ' + port)
+logger.info({ port }, 'starting server')
 
 yhub.createYHub({
   redis: {

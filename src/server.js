@@ -1,5 +1,4 @@
 import * as uws from 'uws'
-import * as logging from 'lib0/logging'
 import * as error from 'lib0/error'
 import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
@@ -12,8 +11,9 @@ import * as t from './types.js'
 import * as protocol from './protocol.js'
 import * as math from 'lib0/math'
 import * as buffer from 'lib0/buffer'
+import { logger } from './logger.js'
 
-const log = logging.createModuleLogger('@y/hub/ws')
+const log = logger.child({ module: 'ws' })
 
 /**
  * @param {Y.ContentIds} contentids
@@ -142,6 +142,7 @@ export const createYHubServer = async (yhub, conf) => {
   app.get('/ydoc/:org/:docid', async (res, req) => {
     const room = reqToRoom(req)
     const gc = req.getQuery('gc') !== 'false'
+    log.debug({ endpoint: 'GET /ydoc', room }, 'api request')
     let aborted = false
     res.onAborted(() => {
       aborted = true
@@ -173,6 +174,7 @@ export const createYHubServer = async (yhub, conf) => {
   // PATCH /ydoc/{org}/{docid} - Update the Yjs document
   app.patch('/ydoc/:org/:docid', (res, req) => {
     const room = reqToRoom(req)
+    log.debug({ endpoint: 'PATCH /ydoc', room }, 'api request')
     const authPromise = authenticateRequest(req, room, 'rw')
     let buffer = Buffer.allocUnsafe(0)
     let aborted = false
@@ -220,7 +222,7 @@ export const createYHubServer = async (yhub, conf) => {
           return
         }
       } catch (_err) {
-        console.warn('[@y/hub/server] error parsing update request', _err)
+        log.warn({ err: _err }, 'error parsing update request')
       }
       if (!aborted) {
         sendErrorResponse(res, '400 Bad Request', { error: 'Invalid request body' })
@@ -231,7 +233,7 @@ export const createYHubServer = async (yhub, conf) => {
       buffer = Buffer.concat([buffer, chunkBuffer])
       if (isLast) {
         handleUpdateRequest(buffer).catch(err => {
-          console.error('[@y/hub/server] error handling update request', err)
+          log.error({ err }, 'error handling update request')
           if (!aborted) sendErrorResponse(res, '500 Internal Server Error', { error: 'Internal server error' })
         })
       }
@@ -241,6 +243,7 @@ export const createYHubServer = async (yhub, conf) => {
   // POST /rollback/{guid} - Rollback changes matching the pattern
   app.post('/rollback/:org/:docid', (res, req) => {
     const room = reqToRoom(req)
+    log.debug({ endpoint: 'POST /rollback', room }, 'api request')
     const authPromise = authenticateRequest(req, room, 'rw')
     let buffer = Buffer.allocUnsafe(0)
     let aborted = false
@@ -301,7 +304,7 @@ export const createYHubServer = async (yhub, conf) => {
         }
         // couldn't parse correctly. throw error
       } catch (_err) {
-        console.warn('[rollback api] error parsing request')
+        log.warn('error parsing rollback request')
       }
       if (!aborted) {
         sendErrorResponse(res, '400 Bad Request', { error: 'error consuming request' })
@@ -312,7 +315,7 @@ export const createYHubServer = async (yhub, conf) => {
       buffer = Buffer.concat([buffer, chunkBuffer])
       if (isLast) {
         handleRollbackRequest(buffer).catch(err => {
-          console.error('[@y/hub/server] error handling rollback request', err)
+          log.error({ err }, 'error handling rollback request')
           if (!aborted) sendErrorResponse(res, '500 Internal Server Error', { error: 'Internal server error' })
         })
       }
@@ -322,6 +325,7 @@ export const createYHubServer = async (yhub, conf) => {
   // GET /changeset/{guid} - Get attributed changes and document states
   app.get('/changeset/:org/:docid', async (res, req) => {
     const room = reqToRoom(req)
+    log.debug({ endpoint: 'GET /changeset', room }, 'api request')
     const by = req.getQuery('by')
     const _from = req.getQuery('from')
     const _to = req.getQuery('to')
@@ -336,7 +340,7 @@ export const createYHubServer = async (yhub, conf) => {
     let aborted = false
     res.onAborted(() => {
       aborted = true
-      log('Request aborted')
+      log.debug('request aborted')
     })
     const authResult = await authenticateRequest(req, room, 'r')
     if ('error' in authResult) {
@@ -371,6 +375,7 @@ export const createYHubServer = async (yhub, conf) => {
   // GET /activity/{guid} - Get all editing timestamps for a document
   app.get('/activity/:org/:docid', async (res, req) => {
     const room = reqToRoom(req)
+    log.debug({ endpoint: 'GET /activity', room }, 'api request')
     const by = req.getQuery('by')
     const from = number.parseInt(req.getQuery('from') || '0')
     const to = number.parseInt(req.getQuery('to') || number.MAX_SAFE_INTEGER.toString())
@@ -387,7 +392,7 @@ export const createYHubServer = async (yhub, conf) => {
     let aborted = false
     res.onAborted(() => {
       aborted = true
-      log('Request aborted')
+      log.debug('request aborted')
     })
     const authResult = await authenticateRequest(req, room, 'r')
     if ('error' in authResult) {
@@ -426,7 +431,7 @@ export const createYHubServer = async (yhub, conf) => {
     const port = conf.server?.port || 4000
     app.listen(port, (token) => {
       if (token) {
-        logging.print(logging.GREEN, '[y-redis] Listening to port ', port)
+        log.info({ port }, 'listening')
         resolve()
       } else {
         const err = error.create('[y-redis] Failed to lisen to port ' + port)
@@ -490,6 +495,7 @@ class WSUser {
     this.awarenessLastClock = 0
     this.isClosed = false
     this.lastReceivedClock = '0'
+    this.log = log.child({ clientId: this.id, userid: this.userid, gc, hasWriteAccess, room })
   }
 
   /**
@@ -523,12 +529,12 @@ class WSUser {
    */
   sendData (m) {
     if (this.ws == null) {
-      return log('Tried to send a message to client, but it isn\'t connected yet')
+      return this.log.warn('tried to send a message to client, but it is not connected yet')
     }
-    log(() => ['sending data to client', { size: m.byteLength, firstByte: m[0] }])
+    this.log.debug({ size: m.byteLength, firstByte: m[0] }, 'sending data to client')
     const sendResult = this.ws.send(m, true, false)
     if (sendResult === 2) {
-      console.error(`Message to client=${this.id}, userid=${this.userid} dropped because of backpressure limit. socketBackpressure=${this.ws?.getBufferedAmount()} maxDocSize=${this.yhub.conf.server?.maxDocSize}`)
+      this.log.error({ socketBackpressure: this.ws?.getBufferedAmount(), maxDocSize: this.yhub.conf.server?.maxDocSize }, 'message dropped because of backpressure limit')
       this.ws.end(400)
     }
   }
@@ -561,7 +567,7 @@ const registerWebsocketServer = (yhub, app) => {
       const headerWsExtensions = req.getHeader('sec-websocket-extensions')
       let aborted = false
       res.onAborted(() => {
-        log(() => ['Upgrading client aborted', { url }])
+        log.debug({ url }, 'upgrading client aborted')
         aborted = true
       })
       try {
@@ -574,6 +580,7 @@ const registerWebsocketServer = (yhub, app) => {
         s.$string.expect(authInfo.userid)
         const accessType = authInfo && await yhub.conf.server?.auth.getAccessType(authInfo, room)
         if (authInfo == null || !t.hasReadAccess(accessType)) {
+          log.info({ url, userid: authInfo?.userid ?? null }, 'ws upgrade denied, insufficient access')
           res.cork(() => {
             res.writeStatus('401 Unauthorized').end('Unauthorized')
           })
@@ -590,7 +597,7 @@ const registerWebsocketServer = (yhub, app) => {
           )
         })
       } catch (err) {
-        log(`User failed to auth to endpoint ${url}`, err)
+        log.warn({ url, err }, 'user failed to auth')
         if (aborted) return
         res.cork(() => {
           res.writeStatus('401 Unauthorized').end('Unauthorized')
@@ -600,14 +607,14 @@ const registerWebsocketServer = (yhub, app) => {
     open: async (ws) => {
       const user = ws.getUserData().user
       user.ws = ws
-      log(() => ['client connected (uid=', user.id, ', ip=', Buffer.from(ws.getRemoteAddressAsText()).toString(), ')'])
+      user.log.info({ ip: Buffer.from(ws.getRemoteAddressAsText()).toString() }, 'client connected')
       const doctable = await yhub.getDoc(user.room, { gc: user.gc, nongc: !user.gc, awareness: true }, { gcOnMerge: false })
       const ydoc = doctable.gcDoc || doctable.nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
       if (user.isClosed) return
       ws.cork(() => {
         user.sendData(protocol.encodeSyncStep1(Y.encodeStateVectorFromUpdate(ydoc)))
         user.sendData(protocol.encodeSyncStep2(ydoc))
-        log('sent syncstep2 to client')
+        user.log.debug('sent syncstep2 to client')
         const aw = doctable.awareness
         if (aw.byteLength > 3) {
           user.sendData(aw)
@@ -622,7 +629,7 @@ const registerWebsocketServer = (yhub, app) => {
        * @param {any} err
        */
       const handleErr = err => {
-        console.error('Error processing client message:', err)
+        user.log.error({ err }, 'error processing client message')
         user.destroy()
       }
       // don't read any messages from users without write access
@@ -643,7 +650,7 @@ const registerWebsocketServer = (yhub, app) => {
             } else if (syncMessageType === protocol.messageSyncStep1) {
               // can be safely ignored because we send the full initial state at the beginning
             } else {
-              console.warn('Unknown sync message type', syncMessageType)
+              user.log.warn({ syncMessageType }, 'unknown sync message type')
             }
             break
           }
@@ -667,10 +674,10 @@ const registerWebsocketServer = (yhub, app) => {
     close: (ws, code, message) => {
       const user = ws.getUserData().user
       user.awarenessId && yhub.stream.addMessage(user.room, { type: 'awareness:v1', update: protocol.encodeAwarenessUserDisconnected(user.awarenessId, user.awarenessLastClock) }).catch(err => {
-        console.error('Error adding message to redis', err)
+        user.log.error({ err }, 'error adding message to redis')
       })
       user.isClosed = true
-      log(() => ['client connection closed (uid=', user.id, ', code=', code, ', message="', Buffer.from(message).toString(), '")'])
+      user.log.info({ code, message: Buffer.from(message).toString() }, 'client connection closed')
       user.destroy()
     }
   }))

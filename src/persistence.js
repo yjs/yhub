@@ -12,6 +12,9 @@ import * as s from 'lib0/schema'
 // eslint-disable-next-line
 import * as t from './types.js'
 import { isSmallerRedisClock } from './stream.js'
+import { logger } from './logger.js'
+
+const log = logger.child({ module: 'persistence' })
 
 /**
  * @param {string} postgresUrl - postgres://username:password@host:port/database
@@ -74,7 +77,7 @@ const tryPersistencePluginDelete = (plugins, assetId, asset) => {
   if (asset.type === 'asset:retrievable:v1') {
     for (const plugin of plugins) {
       if (plugin.delete != null) {
-        plugin.delete(assetId, asset).catch(err => console.error('[persistence] error deleting asset', assetId, err))
+        plugin.delete(assetId, asset).catch(err => log.error({ err, assetId }, 'error deleting asset'))
       }
     }
   }
@@ -107,6 +110,7 @@ export class Persistence {
    * @returns {Promise<void>}
    */
   async store (room, { lastClock, gcDoc, nongcDoc, contentmap, contentids }) {
+    log.debug({ room, gcDocSize: gcDoc.byteLength, nongcDocSize: nongcDoc.byteLength, contentmapSize: contentmap.byteLength, contentidsSize: contentids.byteLength }, 'storing doc')
     /**
      * @type {t.AssetId}
      */
@@ -211,6 +215,7 @@ export class Persistence {
       })
     }))
     const lastClock = array.last(rows.map(row => row.t).sort((a, b) => isSmallerRedisClock(a, b) ? -1 : 1)) || '0'
+    log.debug({ room, rowCount: rows.length, lastClock }, 'retrieved doc')
     return {
       lastClock,
       gcDoc: /** @type {Include['gc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeGc ? gcUpdates.filter(u => u != null) : null),
@@ -226,6 +231,7 @@ export class Persistence {
    * @return {Promise<void>}
    */
   async deleteReferences (references) {
+    log.debug({ referenceCount: references.length }, 'deleting references')
     references.forEach(ref => tryPersistencePluginDelete(this.plugins, ref.assetId, ref.asset))
     /**
      * org, docid, branch, t[]

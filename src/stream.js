@@ -10,9 +10,9 @@ import * as array from 'lib0/array'
 import * as map from 'lib0/map'
 import * as math from 'lib0/math'
 import * as time from 'lib0/time'
-import * as logging from 'lib0/logging'
+import { logger } from './logger.js'
 
-const log = logging.createModuleLogger('@y/hub/stream')
+const log = logger.child({ module: 'stream' })
 
 /**
  * @typedef {object} StreamSubscriber
@@ -112,10 +112,12 @@ export class Stream {
          */
         reconnectStrategy: retries => {
           if (retries > 1000) {
-            console.error('Unable to connect to redis, max attempts reached, closing yhub')
+            log.fatal('Unable to connect to redis, max attempts reached, closing yhub')
             process.exit(1)
           }
-          return math.min(retries * 10, 3000)
+          const delay = math.min(retries * 10, 3000)
+          log.warn({ retries, delayMs: delay }, 'redis reconnecting')
+          return delay
         },
         ...config.redis.socket
       }
@@ -139,7 +141,7 @@ export class Stream {
            * @param {Buffer} message
            */
           parseCommand (parser, key, message) {
-            log(() => ['adding message ', { key, messageSize: message.byteLength }])
+            log.debug({ key, messageSize: message.byteLength }, 'adding message')
             parser.pushKey(key)
             parser.push(message)
           },
@@ -184,7 +186,7 @@ export class Stream {
         })
       }
     })
-    this.redis.on('error', /** @param {Error} err */ err => log('Redis client error: ', { err }))
+    this.redis.on('error', /** @param {Error} err */ err => log.error({ err }, 'Redis client error'))
     /**
      * Second instance to fetch things concurrent to the other connection.
      *
@@ -207,7 +209,7 @@ export class Stream {
       this._subRunning = true
       if (this.redisSubscriptions === null) {
         this.redisSubscriptions = redis.createClient(this.redisClientConf)
-        this.redisSubscriptions.on('error', /** @param {Error} err */ err => log('Redis subscription client error: ', { err }))
+        this.redisSubscriptions.on('error', /** @param {Error} err */ err => log.error({ err }, 'Redis subscription client error'))
         await this.redisSubscriptions.connect()
       }
       while (this.subs.size > 0 || this.subUpdates.size > 0) {
@@ -238,9 +240,9 @@ export class Stream {
               sub.lastReceivedClock = m.lastClock
             }
           }
-          ms.length > 0 && log(() => ['pulled', ms.length, ' messages and notified ', nsubCounter, 'subscribers'])
+          ms.length > 0 && log.debug({ messageCount: ms.length, subscriberCount: nsubCounter }, 'pulled messages and notified subscribers')
         } catch (e) {
-          console.error(e)
+          log.error({ err: e }, 'error in subscription loop')
           await promise.wait(3000)
         }
       }
@@ -261,7 +263,7 @@ export class Stream {
       return []
     }
     const streams = rooms.map(asset => ({ key: s.$string.check(asset.room) ? asset.room : encodeRoomName(asset.room, this.prefix), id: asset.clock || '0' }))
-    log('retrieving messages from ', streams.length, ' streams')
+    log.debug({ streamCount: streams.length }, 'retrieving messages')
     const reads = /** @type {Array<{name: Buffer, messages: Array<{id: Buffer, message: Record<string, Buffer>}>}> | null} */ (await redisClient.withTypeMapping({
       [redis.RESP_TYPES.BLOB_STRING]: Buffer
     }).xRead(
@@ -285,7 +287,7 @@ export class Stream {
         })
       })
     })
-    log(() => ['retrieved message: ', { messages: res.map(r => ({ stream: r.streamName, ms: r.messages.map(m => ({ type: m.type, size: m.update.byteLength, rclock: m.redisClock })) })) }])
+    log.debug({ messages: res.map(r => ({ stream: r.streamName, ms: r.messages.map(m => ({ type: m.type, size: m.update.byteLength, rclock: m.redisClock })) })) }, 'retrieved messages')
     return res
   }
 
@@ -303,11 +305,11 @@ export class Stream {
    */
   subscribe (room, subscriber) {
     const streamName = encodeRoomName(room, this.prefix)
-    log('subscribing: ', { room, streamName })
+    log.debug({ room, streamName }, 'subscribing')
     const s = map.setIfUndefined(this.subUpdates, streamName, () => ({ lastReceivedClock: subscriber.lastReceivedClock, subs: /** @type {Set<StreamSubscriber>} */ (new Set()) }))
     s.lastReceivedClock = minRedisClock(s.lastReceivedClock, subscriber.lastReceivedClock)
     s.subs.add(subscriber)
-    this._runSub().catch(err => console.error('[yhub] error running subscription loop', err))
+    this._runSub().catch(err => log.error({ err }, 'error running subscription loop'))
   }
 
   /**
@@ -335,13 +337,13 @@ export class Stream {
   async claimTasks (count) {
     const reclaimedTasks = await this.redis.xAutoClaim(this.workerStreamName, this.workerGroupName, this.consumername, this.taskDebounce, '0', { COUNT: count })
     if (reclaimedTasks.deletedMessages != null && reclaimedTasks.deletedMessages.length > 0) {
-      console.warn('[yhub-worker] deleting ghost tasks from stream', reclaimedTasks.deletedMessages)
+      log.warn({ deletedMessages: reclaimedTasks.deletedMessages }, 'deleting ghost tasks from stream')
       const multi = this.redis.multi()
       for (const id of reclaimedTasks.deletedMessages) {
         multi.xAck(this.workerStreamName, this.workerGroupName, id)
         multi.xDel(this.workerStreamName, id)
       }
-      multi.exec().catch(err => console.error('[yhub-worker] error cleaning up ghost tasks', err))
+      multi.exec().catch(err => log.error({ err }, 'error cleaning up ghost tasks'))
     }
     const tasks = reclaimedTasks.messages.map(m => {
       if (m?.message.compact != null) {
@@ -351,10 +353,10 @@ export class Stream {
           redisClock: m?.id
         }
       } else if (m === null) {
-        console.warn('[yhub-worker] deleting ghost task from stream')
+        log.warn('deleting ghost task from stream')
         return null
       } else {
-        console.error('found unknown task type', Object.keys(m?.message ?? {}))
+        log.error({ keys: Object.keys(m?.message ?? {}) }, 'found unknown task type')
         return null
       }
     }).filter(t => t != null)
@@ -386,13 +388,17 @@ export class Stream {
     const cached = await /** @type {Promise<Buffer | null>} */ (this.redis.withTypeMapping({
       [redis.RESP_TYPES.BLOB_STRING]: Buffer
     }).get(key))
-    if (cached != null) return cached
+    if (cached != null) {
+      log.debug({ endpoint, size: cached.byteLength }, 'cache hit')
+      return cached
+    }
+    log.debug({ endpoint }, 'cache miss')
     const startTime = time.getUnixTime()
     const result = await computeResult()
     const computeTime = math.floor((time.getUnixTime() - startTime) / 1000)
     if (result.byteLength < 100 * 1000 * 1000) {
       // only cache if content is smaller than 100mb
-      this.redis.set(key, Buffer.from(result), { EX: this.cacheTtl + computeTime * 2 }).catch(err => log('error caching result', { err }))
+      this.redis.set(key, Buffer.from(result), { EX: this.cacheTtl + computeTime * 2 }).catch(err => log.error({ err }, 'error caching result'))
     }
     return result
   }

@@ -3,11 +3,11 @@ import { cpus } from 'node:os'
 import * as time from 'lib0/time'
 import * as s from 'lib0/schema'
 import * as promise from 'lib0/promise'
-import * as logging from 'lib0/logging'
 import * as Y from '@y/y'
 import * as math from 'lib0/math'
+import { logger } from './logger.js'
 
-const log = logging.createModuleLogger('@y/hub/compute-worker')
+const log = logger.child({ module: 'compute' })
 
 const workerUrl = new URL('./compute-worker.js', import.meta.url)
 
@@ -119,7 +119,7 @@ class ComputeWorker {
       drain(pool)
     })
     this.worker.on('error', (err) => {
-      log('worker failed with error', err)
+      log.error({ err }, 'worker failed')
       const reject = this._cbReject
       this.isDead = true
       finishWorker(this)
@@ -166,9 +166,11 @@ const getFreeWorker = (pool) => {
   for (let i = 0; i < pool.workers.length; i++) {
     const w = pool.workers[i]
     if (w.isComputing && now - w.taskStart > maxTaskDurationMs) {
+      log.warn({ workerIndex: i, taskDurationMs: now - w.taskStart }, 'terminating worker that exceeded max task duration')
       w.terminate()
     }
     if (w.isDead) {
+      log.info({ workerIndex: i }, 'replacing dead worker')
       pool.workers[i] = new ComputeWorker(pool)
       return pool.workers[i]
     }
@@ -226,6 +228,9 @@ class ComputePool {
     $computeTask.expect(task)
     return promise.create((resolve, reject) => {
       this.queue.push({ task, transferList, resolve, reject })
+      if (this.queue.length > 1) {
+        log.debug({ taskType: task.type, queueDepth: this.queue.length }, 'task queued, no free worker')
+      }
       drain(this)
     })
   }

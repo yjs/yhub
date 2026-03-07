@@ -4,19 +4,21 @@ import postgres from 'postgres'
 import * as env from 'lib0/environment'
 import { Client as S3Client } from 'minio'
 import { createClient as createRedisClient } from 'redis'
+import { logger } from '../src/logger.js'
+
+const log = logger.child({ module: 'init-db' })
 
 /**
  * Initialize the database and tables for y/hub
  * @param {string} postgresUrl - postgres://username:password@host:port/database
  */
 async function init (postgresUrl) {
-  console.log(`[init-db] Initializing database from URL: ${postgresUrl}`)
+  log.info({ postgresUrl }, 'initializing database')
   // Extract database from URL path
   const database = new URL(postgresUrl).pathname.slice(1)
   if (database !== '') {
     // Step 1: Create database if URL includes one
-    console.log(`[init-db] Ensuring database '${database}' exists...`)
-    console.log('[init-db] postgres url', postgresUrl)
+    log.info({ database, postgresUrl }, 'ensuring database exists')
     // Connect to default 'postgres' database for admin operations
     // Preserve query parameters (like ssl=require) when switching database
     const url = new URL(postgresUrl)
@@ -30,11 +32,11 @@ async function init (postgresUrl) {
         );
       `
       if (!dbExists || dbExists.length === 0 || !dbExists[0].exists) {
-        console.log(`[init-db] Creating database '${database}'...`)
+        log.info({ database }, 'creating database')
         await adminSql.unsafe(`CREATE DATABASE "${database}"`)
-        console.log(`[init-db] ✓ Database '${database}' created`)
+        log.info({ database }, 'database created')
       } else {
-        console.log(`[init-db] ✓ Database '${database}' already exists`)
+        log.info({ database }, 'database already exists')
       }
     } finally {
       await adminSql.end({ timeout: 5 })
@@ -42,7 +44,7 @@ async function init (postgresUrl) {
   }
 
   // Step 2: Create tables
-  console.log('[init-db] Creating tables...')
+  log.info('creating tables')
   const sql = postgres(postgresUrl, { max: 1 })
   try {
     // Create updates table
@@ -53,7 +55,7 @@ async function init (postgresUrl) {
       );
     `
     if (!updatesTableExists || updatesTableExists.length === 0 || !updatesTableExists[0].exists) {
-      console.log('[init-db] Creating yhub_ydoc_v1 table...')
+      log.info('creating yhub_ydoc_v1 table')
       // @todo move contentmap and sv to another table!
       await sql`
         CREATE TABLE IF NOT EXISTS yhub_ydoc_v1 (
@@ -69,14 +71,14 @@ async function init (postgresUrl) {
             PRIMARY KEY     (org,docid,branch,t)
         );
       `
-      console.log('[init-db] ✓ yhub_ydoc_v1 table created')
+      log.info('yhub_ydoc_v1 table created')
     } else {
-      console.log('[init-db] ✓ yhub_ydoc_v1 table already exists')
+      log.info('yhub_ydoc_v1 table already exists')
     }
   } finally {
     await sql.end({ timeout: 5 })
   }
-  console.log(`[init-db] ✓ Initialization done: ${postgresUrl}`)
+  log.info({ postgresUrl }, 'initialization done')
 }
 
 /**
@@ -85,18 +87,18 @@ async function init (postgresUrl) {
  * @param {string} bucket
  */
 async function initS3Bucket (s3client, bucket) {
-  console.log(`[init-db] Checking if S3 bucket '${bucket}' exists...`)
+  log.info({ bucket }, 'checking if S3 bucket exists')
   const exists = await s3client.bucketExists(bucket)
   if (!exists) {
-    console.log(`[init-db] Creating S3 bucket '${bucket}'...`)
+    log.info({ bucket }, 'creating S3 bucket')
     await s3client.makeBucket(bucket)
-    console.log(`[init-db] ✓ S3 bucket '${bucket}' created`)
+    log.info({ bucket }, 'S3 bucket created')
   } else {
-    console.log(`[init-db] ✓ S3 bucket '${bucket}' already exists`)
+    log.info({ bucket }, 'S3 bucket already exists')
   }
 }
 
-console.log('[init-db] Initializing databases based on environment variables POSTGRES & POSTGRES_TESTING')
+log.info('initializing databases based on environment variables POSTGRES & POSTGRES_TESTING')
 
 const postgresUrl = env.getConf('postgres')
 const postgresTestingUrl = env.getConf('postgres-testing')
@@ -108,7 +110,7 @@ const s3Bucket = env.getConf('S3_YHUB_BUCKET')
 const s3TestBucket = env.getConf('S3_YHUB_TEST_BUCKET')
 
 if (s3Bucket) {
-  console.log('[init-db] Initializing S3 buckets...')
+  log.info('initializing S3 buckets')
   const s3client = new S3Client({
     endPoint: env.ensureConf('S3_ENDPOINT'),
     port: parseInt(env.ensureConf('S3_PORT'), 10),
@@ -131,12 +133,12 @@ if (redisUrl) {
   redis.connect()
   try {
     await redis.xGroupCreate(redisWorkerStreamName, redisWorkerGroupName, '0', { MKSTREAM: true })
-    console.log('[init-db] successfully created redis worker and group')
+    log.info('successfully created redis worker and group')
   } catch (err) {
-    console.error('[init-db] redis - failde to init worker stream: ', { redisWorkerStreamName, redisWorkerGroupName })
+    log.error({ err, redisWorkerStreamName, redisWorkerGroupName }, 'failed to init worker stream')
   }
 }
 
-console.log('[init-db] All databases initialized successfully')
+log.info('all databases initialized successfully')
 
 process.exit(0)

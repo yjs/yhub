@@ -6,13 +6,14 @@ import * as Y from '@y/y'
 import * as object from 'lib0/object'
 import * as protocol from './protocol.js'
 import * as server from './server.js'
-import * as logging from 'lib0/logging'
 import * as math from 'lib0/math'
 import { createComputePool } from './compute.js'
+import { logger } from './logger.js'
 
 export { createAuthPlugin } from './types.js'
+export { logger } from './logger.js'
 
-const log = logging.createModuleLogger('@y/hub/worker')
+const log = logger.child({ module: 'worker' })
 
 /**
  * @template {t.YHubConfig} [Conf=t.YHubConfig]
@@ -49,13 +50,17 @@ export class YHub {
     while (ctx.shouldRun) {
       try {
         const tasks = await this.stream.claimTasks(this.conf.worker.taskConcurrency)
-        tasks.length && log(() => ['picked up ' + tasks.length + ' tasks. Working on it..', tasks.map(task => ({ type: task.type, room: task.room }))])
+        tasks.length && log.info({ taskCount: tasks.length }, 'picked up tasks')
         await promise.all(tasks.map(async task => {
+          const taskLog = log.child({ taskType: task.type, room: task.room })
           if (task.type === 'compact') {
+            taskLog.info('task started')
             // execute compact task
             const d = await this.getDoc(task.room, { gc: true, nongc: true, contentmap: true, contentids: true, references: true })
             if (!strm.isSmallerRedisClock(d.lastPersistedClock, d.lastClock)) {
+              taskLog.debug('nothing to compact, trimming only')
               await this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
+              taskLog.info('task completed (trim only)')
               return null
             }
             this.conf.worker?.events?.docUpdate?.(object.assign({}, d, { references: null }))
@@ -64,13 +69,15 @@ export class YHub {
               this.persistence.deleteReferences(d.references),
               this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
             ])
+            taskLog.info({ gcDocSize: d.gcDoc?.byteLength, nongcDocSize: d.nongcDoc?.byteLength, refsDeleted: d.references?.length ?? 0 }, 'task completed')
           }
         }))
+        tasks.length && log.info({ taskCount: tasks.length }, 'completed tasks')
         if (tasks.length === 0) {
           await promise.wait(1000)
         }
       } catch (err) {
-        console.error('[yhub-worker] error processing task: ', err)
+        log.error({ err }, 'error processing task')
         await promise.wait(3000)
       }
     }
@@ -171,7 +178,14 @@ export const createYHub = async conf => {
   if (conf.server != null) {
     yhub.server = /** @type {any} */ (await server.createYHubServer(yhub, conf))
   }
-  yhub.startWorker().catch(err => console.error('[yhub] worker failed', err))
+  log.info({
+    redisPrefix: conf.redis.prefix,
+    pluginCount: conf.persistence.length,
+    workerConcurrency: conf.worker?.taskConcurrency ?? null,
+    computePoolSize: yhub.computePool.maxPoolSize,
+    serverPort: conf.server?.port ?? null
+  }, 'yhub initialized')
+  yhub.startWorker().catch(err => log.error({ err }, 'worker failed'))
   // @todo start workers _after_ persistence plugin is done. Otherwise, workers might use
   // persistence.
   return yhub

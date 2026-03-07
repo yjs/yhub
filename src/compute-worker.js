@@ -1,10 +1,10 @@
 import { parentPort } from 'node:worker_threads'
 import * as Y from '@y/y'
 import * as time from 'lib0/time'
-import * as logging from 'lib0/logging'
 import * as encoding from 'lib0/encoding'
+import { logger } from './logger.js'
 
-const log = logging.createModuleLogger('@y/hub/compute-worker')
+const log = logger.child({ module: 'compute-worker' })
 
 if (parentPort == null) {
   throw new Error('Unable to run node worker!')
@@ -65,7 +65,7 @@ const createContentMap = (contentids, userid, customAttributions) => {
 
 const port = parentPort
 port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg => {
-  log(`new compute task: ${msg.type}`)
+  log.debug({ type: msg.type }, 'new compute task')
   switch (msg.type) {
     case 'mergeUpdatesAndGc': {
       const ydoc = new Y.Doc()

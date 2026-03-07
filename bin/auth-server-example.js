@@ -4,11 +4,13 @@ import * as ecdsa from 'lib0/crypto/ecdsa'
 import * as json from 'lib0/json'
 import * as time from 'lib0/time'
 import * as env from 'lib0/environment'
-import * as logging from 'lib0/logging'
 import * as error from 'lib0/error'
 import * as promise from 'lib0/promise'
 import * as encoding from 'lib0/encoding'
 import * as Y from '@y/y'
+import { logger } from '../src/logger.js'
+
+const log = logger.child({ module: 'auth-server-example' })
 
 const appName = 'Auth-Server-Example'
 const authPrivateKey = await ecdsa.importKeyJwk(json.parse(env.ensureConf('auth-private-key')))
@@ -32,13 +34,13 @@ app.put('/ydoc/:room', async (res, req) => {
       const parts = uws.getParts(fullContent, header)
       const ydocUpdateData = parts?.find(part => part.name === 'ydoc')?.data
       if (ydocUpdateData == null) {
-        console.error('Received empty data')
+        log.error('received empty data')
         return
       }
       const ydocUpdate = new Uint8Array(ydocUpdateData)
       const ydoc = new Y.Doc()
       Y.applyUpdateV2(ydoc, ydocUpdate)
-      console.log(`Ydoc in room "${room}" updated. New codemirror content: "${ydoc.get('codemirror').toString()}"`)
+      log.info({ room, content: ydoc.get('codemirror').toString() }, 'ydoc updated')
       res.endWithoutBody()
     }
   })
@@ -78,7 +80,7 @@ app.get('/auth/perm/:room/:userid', async (res, req) => {
 export const authServerStarted = promise.create((resolve, reject) => {
   const server = app.listen(port, (token) => {
     if (token) {
-      logging.print(logging.GREEN, `[${appName}] Listening to port ${port}`)
+      log.info({ port }, 'listening')
       resolve()
     } else {
       const err = error.create(`[${appName}] Failed to lisen to port ${port}`)
@@ -92,7 +94,7 @@ export const authServerStarted = promise.create((resolve, reject) => {
   process.on('SIGINT', shutDown)
 
   function shutDown () {
-    console.log('Received SIGTERM/SIGINT - shutting down')
+    log.info('received SIGTERM/SIGINT - shutting down')
     server.close()
     process.exit(0)
   }

@@ -4,6 +4,9 @@ import { Client as S3Client } from 'minio'
 import { Readable } from 'stream'
 import http from 'http'
 import https from 'https'
+import { logger } from '../logger.js'
+
+const log = logger.child({ module: 's3' })
 
 /**
  * @typedef {{ bucket: string, endPoint: string, port: number, useSSL: boolean, accessKey: string, secretKey: string }} S3Conf
@@ -49,14 +52,14 @@ export class S3PersistenceV1 {
   }
 
   async init () {
-    console.log(`[init ${this.pluginid}] Checking if S3 bucket '${this.bucket}' exists...`)
+    log.info({ bucket: this.bucket }, 'checking if S3 bucket exists')
     const exists = await this.s3client.bucketExists(this.bucket)
     if (!exists) {
-      console.log(`[init ${this.pluginid}] Creating S3 bucket '${this.bucket}'...`)
+      log.info({ bucket: this.bucket }, 'creating S3 bucket')
       await this.s3client.makeBucket(this.bucket)
-      console.log(`[init ${this.pluginid}] ✓ S3 bucket '${this.bucket}' created`)
+      log.info({ bucket: this.bucket }, 'S3 bucket created')
     } else {
-      console.log(`[init ${this.pluginid}] ✓ S3 bucket '${this.bucket}' already exists`)
+      log.info({ bucket: this.bucket }, 'S3 bucket already exists')
     }
   }
 
@@ -74,6 +77,7 @@ export class S3PersistenceV1 {
         await put()
       } catch (e) {
         if (!isTransient(e)) throw e
+        log.warn({ err: e, path }, 'transient error storing object, retrying')
         await put()
       }
       return {
@@ -110,6 +114,7 @@ export class S3PersistenceV1 {
         data = await get()
       } catch (e) {
         if (!isTransient(e)) throw e
+        log.warn({ err: e, path }, 'transient error retrieving object, retrying')
         data = await get()
       }
       return data && t.$asset.expect(buffer.decodeAny(data))
@@ -130,7 +135,7 @@ export class S3PersistenceV1 {
     setTimeout(() => {
       // delete at some point later, avoiding issues of clients pulling from stale data
       // @todo it would be nice to implement a worker that finds unused s3 docs and deletes them
-      this.s3client.removeObject(this.bucket, path).catch(err => console.error('[s3] error deleting object', path, err))
+      this.s3client.removeObject(this.bucket, path).catch(err => log.error({ err, path }, 'error deleting object'))
     }, 10_000)
     return true
   }

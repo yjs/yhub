@@ -2,13 +2,24 @@
 
 ## [Unreleased]
 
+## [0.2.12] - 2026-03-18
+
 ### Breaking Changes
 
+- **Switched to Pino logging.** All logging now uses [Pino](https://github.com/pinojs/pino) instead of `lib0/logging`. Log output is structured JSON by default; use `pino-pretty` for human-readable output during development. All npm scripts now pipe through `pino-pretty`.
 - **`redis.tlsCaCert` replaced by `redis.socket`.** The `redis.tlsCaCert` config field has been replaced with a generic `redis.socket` object that is merged into the Redis client socket config. See [node-redis socket options](https://github.com/redis/node-redis/blob/master/docs/client-configuration.md#socket-options) for available options.
+- **`decodeContentMaps` API change.** The `decodeContentMaps` function signature/return type has changed.
 
-### Bug Fixes & Reliability
+### Improvements
 
+- **Bumped Yjs to rc.2.** Updated `@y/y` to `^14.0.0-rc.2` and `lib0` to `^1.0.0-rc.5`.
+- **Better error handling in WebSocket open handler.** Errors during the WebSocket `open` callback are now caught and handled gracefully instead of crashing the connection.
+- **Improved worker failure logging.** Worker failures now produce more detailed log output for easier debugging.
 - **Reduce log verbosity.** Avoid logging large objects and binary data in stream and worker logs. Log counts and summaries instead.
+
+### Bug Fixes
+
+- **Fixed rollback.** Resolved a rollback bug introduced alongside the Yjs rc.2 upgrade.
 
 ## [0.2.10] - 2026-03-06
 

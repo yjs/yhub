@@ -112,37 +112,46 @@ class ComputeWorker {
      * @type {((reason: any) => void) | null}
      */
     this._cbReject = null
+    /**
+     * @type {Object<string, any>?}
+     */
+    this._logContext = null
     this.worker.on('message', (result) => {
       const resolve = this._cbResolve
       finishWorker(this)
       resolve?.(result)
       drain(pool)
+      this._logContext = null
     })
     this.worker.on('error', (err) => {
-      log.error({ err }, 'worker failed')
+      log.error({ err, ...this._logContext }, 'worker failed')
       const reject = this._cbReject
       this.isDead = true
       finishWorker(this)
       reject?.(err)
       drain(pool)
+      this._logContext = null
     })
     this.worker.on('exit', () => {
       this.isDead = true
+      this._logContext = null
     })
   }
 
   /**
    * @param {ComputeTask} task
    * @param {Array<ArrayBuffer>} transferList
+   * @param {Object<string, any>} logContext
    * @param {(value: any) => void} resolve
    * @param {(reason: any) => void} reject
    */
-  run (task, transferList, resolve, reject) {
+  run (task, transferList, logContext, resolve, reject) {
     this.isComputing = true
     this.taskStart = time.getUnixTime()
     this.lastUsed = this.taskStart
     this._cbResolve = resolve
     this._cbReject = reject
+    this._logContext = logContext
     this.worker.postMessage(task, transferList)
   }
 
@@ -190,8 +199,8 @@ const drain = (pool) => {
   while (pool.queue.length > 0) {
     const worker = getFreeWorker(pool)
     if (!worker) break
-    const task = /** @type {{ task: ComputeTask, transferList: ArrayBuffer[], resolve: (value: any) => void, reject: (reason: any) => void }} */ (pool.queue.shift())
-    worker.run(task.task, task.transferList, task.resolve, task.reject)
+    const task = /** @type {{ task: ComputeTask, transferList: ArrayBuffer[], logContext: Object<string, any>, resolve: (value: any) => void, reject: (reason: any) => void }} */ (pool.queue.shift())
+    worker.run(task.task, task.transferList, task.logContext, task.resolve, task.reject)
   }
 }
 
@@ -214,7 +223,7 @@ class ComputePool {
      */
     this.workers = []
     /**
-     * @type {Array<{ task: ComputeTask, transferList: ArrayBuffer[], resolve: (value: any) => void, reject: (reason: any) => void }>}
+     * @type {Array<{ task: ComputeTask, transferList: ArrayBuffer[], logContext: Object<string, any>, resolve: (value: any) => void, reject: (reason: any) => void }>}
      */
     this.queue = []
   }
@@ -222,12 +231,13 @@ class ComputePool {
   /**
    * @param {ComputeTask} task
    * @param {Array<ArrayBuffer>} transferList
+   * @param {Object<string, any>} logContext
    * @returns {Promise<any>}
    */
-  run (task, transferList) {
+  run (task, transferList, logContext) {
     $computeTask.expect(task)
     return promise.create((resolve, reject) => {
-      this.queue.push({ task, transferList, resolve, reject })
+      this.queue.push({ task, transferList, logContext, resolve, reject })
       if (this.queue.length > 1) {
         log.debug({ taskType: task.type, queueDepth: this.queue.length }, 'task queued, no free worker')
       }
@@ -237,10 +247,11 @@ class ComputePool {
 
   /**
    * @param {Array<Uint8Array<ArrayBuffer>>} updates
+   * @param {Object<string, any>} logContext
    * @returns {Promise<Uint8Array<ArrayBuffer>>}
    */
-  mergeUpdatesAndGc (updates) {
-    return this.run({ type: 'mergeUpdatesAndGc', updates }, [])
+  mergeUpdatesAndGc (updates, logContext = {}) {
+    return this.run({ type: 'mergeUpdatesAndGc', updates }, [], logContext)
   }
 
   /**
@@ -248,9 +259,10 @@ class ComputePool {
    * is <= 5kb. Otherwise offloads to a worker thread.
    *
    * @param {Array<Uint8Array<ArrayBuffer>>} updates
+   * @param {Object<string, any>} logContext
    * @returns {Promise<Uint8Array<ArrayBuffer>>}
    */
-  mergeUpdates (updates) {
+  mergeUpdates (updates, logContext = {}) {
     let totalSize = 0
     for (let i = 0; i < updates.length; i++) {
       totalSize += updates[i].byteLength
@@ -258,7 +270,7 @@ class ComputePool {
     if (totalSize <= 5120 || updates.length <= 1) {
       return promise.resolveWith(Y.mergeUpdates(updates))
     }
-    return this.run({ type: 'mergeUpdates', updates }, [])
+    return this.run({ type: 'mergeUpdates', updates }, [], logContext)
   }
 
   /**
@@ -272,10 +284,11 @@ class ComputePool {
    * @param {boolean} opts.includeYdoc
    * @param {boolean} opts.includeDelta
    * @param {boolean} opts.includeAttributions
+   * @param {Object<string, any>} [logContext]
    * @returns {Promise<Uint8Array<ArrayBuffer>>}
    */
-  changeset (opts) {
-    return this.run({ type: 'changeset', ...opts }, [])
+  changeset (opts, logContext = {}) {
+    return this.run({ type: 'changeset', ...opts }, [], logContext)
   }
 
   /**
@@ -292,10 +305,11 @@ class ComputePool {
    * @param {number} opts.limit
    * @param {boolean} opts.reverse
    * @param {boolean} opts.group
+   * @param {Object<string, any>} [logContext]
    * @returns {Promise<Uint8Array<ArrayBuffer>>}
    */
-  activity (opts) {
-    return this.run({ type: 'activity', ...opts }, [])
+  activity (opts, logContext = {}) {
+    return this.run({ type: 'activity', ...opts }, [], logContext)
   }
 
   /**
@@ -304,10 +318,11 @@ class ComputePool {
    * @param {Uint8Array<ArrayBuffer>} opts.currentDoc
    * @param {string} opts.userid
    * @param {Array<{k: string, v: string}>} opts.customAttributions
+   * @param {Object<string, any>} [logContext]
    * @returns {Promise<{ update: Uint8Array<ArrayBuffer>, contentmap: Uint8Array<ArrayBuffer> } | null>}
    */
-  patchYdoc (opts) {
-    return this.run({ type: 'patchYdoc', ...opts }, [])
+  patchYdoc (opts, logContext = {}) {
+    return this.run({ type: 'patchYdoc', ...opts }, [], logContext)
   }
 
   /**
@@ -321,10 +336,11 @@ class ComputePool {
    * @param {Array<{k: string, v: string}>|null} [opts.withCustomAttributions]
    * @param {string} opts.userid
    * @param {Array<{k: string, v: string}>} opts.customAttributions
+   * @param {Object<string, any>} [logContext]
    * @returns {Promise<{ update: Uint8Array<ArrayBuffer>, contentmap: Uint8Array<ArrayBuffer> }>}
    */
-  rollback (opts) {
-    return this.run({ type: 'rollback', ...opts }, [])
+  rollback (opts, logContext = {}) {
+    return this.run({ type: 'rollback', ...opts }, [], logContext)
   }
 
   async destroy () {

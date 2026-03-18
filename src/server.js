@@ -166,6 +166,7 @@ export const createYHubServer = async (yhub, conf) => {
         res.end(response)
       })
     } catch (err) {
+      log.error({ err, room }, 'error handling ydoc request')
       if (aborted) return
       sendErrorResponse(res, '500 Internal Server Error', { error: 'Failed to retrieve document' })
     }
@@ -204,7 +205,7 @@ export const createYHubServer = async (yhub, conf) => {
             currentDoc,
             userid: authResult.authInfo.userid,
             customAttributions
-          })
+          }, { room })
           if (result != null) {
             await yhub.stream.addMessage(room, { type: 'ydoc:update:v1', contentmap: result.contentmap, update: result.update })
           }
@@ -281,7 +282,7 @@ export const createYHubServer = async (yhub, conf) => {
             withCustomAttributions,
             userid: authResult.authInfo.userid,
             customAttributions
-          })
+          }, { room })
           if (update) {
             await yhub.stream.addMessage(room, {
               type: 'ydoc:update:v1',
@@ -303,8 +304,8 @@ export const createYHubServer = async (yhub, conf) => {
           return
         }
         // couldn't parse correctly. throw error
-      } catch (_err) {
-        log.warn('error parsing rollback request')
+      } catch (err) {
+        log.warn({ err }, 'error parsing rollback request')
       }
       if (!aborted) {
         sendErrorResponse(res, '400 Bad Request', { error: 'error consuming request' })
@@ -347,28 +348,33 @@ export const createYHubServer = async (yhub, conf) => {
       if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
       return
     }
-    const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeYdoc), String(includeDelta), String(includeAttributions), withCustomAttributionsParam || '']
-    const responseData = await yhub.stream.cachedGet('changeset', cacheArgs, async () => {
-      const { nongcDoc, contentmap: contentmapBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
-      return yhub.computePool.changeset({
-        nongcDoc,
-        contentmapBin,
-        from,
-        to,
-        by: by || '',
-        withCustomAttributions,
-        includeYdoc,
-        includeDelta,
-        includeAttributions
+    try {
+      const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeYdoc), String(includeDelta), String(includeAttributions), withCustomAttributionsParam || '']
+      const responseData = await yhub.stream.cachedGet('changeset', cacheArgs, async () => {
+        const { nongcDoc, contentmap: contentmapBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
+        return yhub.computePool.changeset({
+          nongcDoc,
+          contentmapBin,
+          from,
+          to,
+          by: by || '',
+          withCustomAttributions,
+          includeYdoc,
+          includeDelta,
+          includeAttributions
+        }, { room })
       })
-    })
-    if (!aborted) {
-      res.cork(() => {
-        setCorsHeaders(res)
-        res.writeStatus('200 OK')
-        res.writeHeader('Content-Type', 'application/octet-stream')
-        res.end(responseData)
-      })
+      if (!aborted) {
+        res.cork(() => {
+          setCorsHeaders(res)
+          res.writeStatus('200 OK')
+          res.writeHeader('Content-Type', 'application/octet-stream')
+          res.end(responseData)
+        })
+      }
+    } catch (err) {
+      log.error({ err, room }, 'error handling changeset request')
+      if (!aborted) sendErrorResponse(res, '500 Internal Server Error', { error: 'Failed to compute changeset' })
     }
   })
 
@@ -399,31 +405,36 @@ export const createYHubServer = async (yhub, conf) => {
       if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
       return
     }
-    const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeDelta), String(limit), reverse ? 'desc' : 'asc', String(group), withCustomAttributionsParam || '', String(includeCustomAttributions), contentIdsParam || '']
-    const responseData = await yhub.stream.cachedGet('activity', cacheArgs, async () => {
-      const { contentmap: contentmapBin, nongcDoc } = await yhub.getDoc(room, { nongc: true, contentmap: true })
-      return yhub.computePool.activity({
-        nongcDoc,
-        contentmapBin,
-        from,
-        to,
-        by: by || '',
-        contentIds: contentIdsBin,
-        withCustomAttributions,
-        includeCustomAttributions,
-        includeDelta,
-        limit,
-        reverse,
-        group
+    try {
+      const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeDelta), String(limit), reverse ? 'desc' : 'asc', String(group), withCustomAttributionsParam || '', String(includeCustomAttributions), contentIdsParam || '']
+      const responseData = await yhub.stream.cachedGet('activity', cacheArgs, async () => {
+        const { contentmap: contentmapBin, nongcDoc } = await yhub.getDoc(room, { nongc: true, contentmap: true })
+        return yhub.computePool.activity({
+          nongcDoc,
+          contentmapBin,
+          from,
+          to,
+          by: by || '',
+          contentIds: contentIdsBin,
+          withCustomAttributions,
+          includeCustomAttributions,
+          includeDelta,
+          limit,
+          reverse,
+          group
+        }, { room })
       })
-    })
-    if (!aborted) {
-      res.cork(() => {
-        setCorsHeaders(res)
-        res.writeStatus('200 OK')
-        res.writeHeader('Content-Type', 'application/octet-stream')
-        res.end(responseData)
-      })
+      if (!aborted) {
+        res.cork(() => {
+          setCorsHeaders(res)
+          res.writeStatus('200 OK')
+          res.writeHeader('Content-Type', 'application/octet-stream')
+          res.end(responseData)
+        })
+      }
+    } catch (err) {
+      log.error({ err, room }, 'error handling activity request')
+      if (!aborted) sendErrorResponse(res, '500 Internal Server Error', { error: 'Failed to compute activity' })
     }
   })
 
@@ -494,6 +505,7 @@ class WSUser {
     this.awarenessId = null
     this.awarenessLastClock = 0
     this.isClosed = false
+    this.isDestroyed = false
     this.lastReceivedClock = '0'
     this.log = log.child({ clientId: this.id, userid: this.userid, gc, hasWriteAccess, room })
   }
@@ -535,15 +547,33 @@ class WSUser {
     const sendResult = this.ws.send(m, true, false)
     if (sendResult === 2) {
       this.log.error({ socketBackpressure: this.ws?.getBufferedAmount(), maxDocSize: this.yhub.conf.server?.maxDocSize }, 'message dropped because of backpressure limit')
-      this.ws.end(400)
+      this.closeWithError(400, 'closing because of backpressure limit')
     }
   }
 
-  destroy () {
+  /**
+   * @param {number} code
+   * @param {string} message
+   */
+  closeWithError (code, message) {
+    this.log.error({ code, message }, 'closing connection with error')
     if (!this.isClosed) {
-      this.ws?.close()
+      this.ws?.end(code, message)
+      this.isClosed = true
     }
-    this.yhub.stream.unsubscribe(this.room, this)
+    this.destroy()
+  }
+
+  destroy () {
+    if (!this.isDestroyed) {
+      this.yhub.stream.unsubscribe(this.room, this)
+      this.awarenessId && this.yhub.stream.addMessage(this.room, { type: 'awareness:v1', update: protocol.encodeAwarenessUserDisconnected(this.awarenessId, this.awarenessLastClock) }).catch(err => {
+        this.log.error({ err }, 'error adding message to redis')
+      })
+      if (!this.isClosed) {
+        this.ws?.close()
+      }
+    }
   }
 }
 
@@ -608,20 +638,25 @@ const registerWebsocketServer = (yhub, app) => {
       const user = ws.getUserData().user
       user.ws = ws
       user.log.info({ ip: Buffer.from(ws.getRemoteAddressAsText()).toString() }, 'client connected')
-      const doctable = await yhub.getDoc(user.room, { gc: user.gc, nongc: !user.gc, awareness: true }, { gcOnMerge: false })
-      const ydoc = doctable.gcDoc || doctable.nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
-      if (user.isClosed) return
-      ws.cork(() => {
-        user.sendData(protocol.encodeSyncStep1(Y.encodeStateVectorFromUpdate(ydoc)))
-        user.sendData(protocol.encodeSyncStep2(ydoc))
-        user.log.debug('sent syncstep2 to client')
-        const aw = doctable.awareness
-        if (aw.byteLength > 3) {
-          user.sendData(aw)
-        }
-      })
-      user.lastReceivedClock = doctable.lastClock
-      yhub.stream.subscribe(user.room, user)
+      try {
+        const doctable = await yhub.getDoc(user.room, { gc: user.gc, nongc: !user.gc, awareness: true }, { gcOnMerge: false })
+        const ydoc = doctable.gcDoc || doctable.nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
+        if (user.isClosed) return
+        ws.cork(() => {
+          user.sendData(protocol.encodeSyncStep1(Y.encodeStateVectorFromUpdate(ydoc)))
+          user.sendData(protocol.encodeSyncStep2(ydoc))
+          user.log.debug('sent syncstep2 to client')
+          const aw = doctable.awareness
+          if (aw.byteLength > 3) {
+            user.sendData(aw)
+          }
+        })
+        user.lastReceivedClock = doctable.lastClock
+        yhub.stream.subscribe(user.room, user)
+      } catch (err) {
+        user.log.error({ err }, 'failed to sync initial document')
+        user.closeWithError(1011, 'Internal error')
+      }
     },
     message: (ws, messageBuffer) => {
       const user = ws.getUserData().user
@@ -630,7 +665,7 @@ const registerWebsocketServer = (yhub, app) => {
        */
       const handleErr = err => {
         user.log.error({ err }, 'error processing client message')
-        user.destroy()
+        user.closeWithError(1011, 'Internal error')
       }
       // don't read any messages from users without write access
       if (!user.hasWriteAccess) return
@@ -673,9 +708,6 @@ const registerWebsocketServer = (yhub, app) => {
     },
     close: (ws, code, message) => {
       const user = ws.getUserData().user
-      user.awarenessId && yhub.stream.addMessage(user.room, { type: 'awareness:v1', update: protocol.encodeAwarenessUserDisconnected(user.awarenessId, user.awarenessLastClock) }).catch(err => {
-        user.log.error({ err }, 'error adding message to redis')
-      })
       user.isClosed = true
       user.log.info({ code, message: Buffer.from(message).toString() }, 'client connection closed')
       user.destroy()

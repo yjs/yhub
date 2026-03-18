@@ -123,8 +123,8 @@ export class YHub {
       }
     })
     return {
-      gcDoc: /** @type {Include['gc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (gcDoc ? (gcOnMerge ? await this.computePool.mergeUpdatesAndGc(gcDoc) : await this.computePool.mergeUpdates(gcDoc)) : null),
-      nongcDoc: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (nongcDoc ? await this.computePool.mergeUpdates(nongcDoc) : null),
+      gcDoc: /** @type {Include['gc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (gcDoc ? (gcOnMerge ? await this.computePool.mergeUpdatesAndGc(gcDoc, { room }) : await this.computePool.mergeUpdates(gcDoc, { room })) : null),
+      nongcDoc: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (nongcDoc ? await this.computePool.mergeUpdates(nongcDoc, { room }) : null),
       contentmap: /** @type {Include['contentmap'] extends true ? Uint8Array<ArrayBuffer> : null} */ (contentmap ? Y.encodeContentMap(Y.mergeContentMaps(contentmap)) : null),
       contentids: /** @type {Include['contentids'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.contentids === true ? Y.encodeContentIds(Y.mergeContentIds(contentids)) : null),
       lastClock,

@@ -112,7 +112,7 @@ export class YHub {
       // only add update messages that are newer that what we currently know
       if (t.$updateMessage.check(m) && strm.isSmallerRedisClock(persistedDoc.lastClock, m.redisClock)) {
         // attributions can only be assigned once. Filter out "known" attributions
-        const mcontentmap = Y.excludeContentMaps(Y.decodeContentMap(m.contentmap), mergedContentIds)
+        const mcontentmap = Y.excludeContentMap(Y.decodeContentMap(m.contentmap), mergedContentIds)
         const mcontentids = Y.createContentIdsFromContentMap(mcontentmap)
         Y.insertIntoIdSet(mergedContentIds.inserts, mcontentids.inserts)
         Y.insertIntoIdSet(mergedContentIds.deletes, mcontentids.deletes)

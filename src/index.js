@@ -54,6 +54,11 @@ export class YHub {
         await promise.all(tasks.map(async task => {
           const taskLog = log.child({ taskType: task.type, room: task.room })
           if (task.type === 'compact') {
+            const _taskTs = Date.now()
+            this.conf.worker?.events?.taskStart?.({ room: task.room, timestamp: _taskTs })
+            /** @type {Error | undefined} */
+            let _taskErr
+            try {
             taskLog.info('task started')
             // execute compact task
             const d = await this.getDoc(task.room, { gc: true, nongc: true, contentmap: true, contentids: true, references: true })
@@ -70,6 +75,8 @@ export class YHub {
               this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
             ])
             taskLog.info({ gcDocSize: d.gcDoc?.byteLength, nongcDocSize: d.nongcDoc?.byteLength, refsDeleted: d.references?.length ?? 0 }, 'task completed')
+            } catch (e) { _taskErr = e; throw e }
+            finally { this.conf.worker?.events?.taskComplete?.({ room: task.room, duration: Date.now() - _taskTs, error: _taskErr }) }
           }
         }))
         tasks.length && log.info({ taskCount: tasks.length }, 'completed tasks')

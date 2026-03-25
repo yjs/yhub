@@ -267,7 +267,11 @@ export const $config = s.$object({
   worker: s.$object({
     taskConcurrency: s.$number,
     events: s.$object({
-      docUpdate: /** @type {s.$Optional<s.Schema<(doctable:DocTable<{ gc: true, nongc: true, contentmap: true, contentids: true }>) => void>>} */ (s.$function.optional)
+      docUpdate: /** @type {s.$Optional<s.Schema<(doctable:DocTable<{ gc: true, nongc: true, contentmap: true, contentids: true }>) => void>>} */ (s.$function.optional),
+      /** @type {s.$Optional<s.Schema<(event: { room: Room, timestamp: number }) => void>>} */
+      taskStart: s.$function.optional,
+      /** @type {s.$Optional<s.Schema<(event: { room: Room, duration: number, error: Error | undefined }) => void>>} */
+      taskComplete: s.$function.optional
     }).optional
   }).nullable.optional,
   server: s.$object({

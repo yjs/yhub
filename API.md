@@ -175,7 +175,7 @@ const yhub = await createYHub(config)
 |---|---|---|---|
 | `redis.url` | `string` | yes | Redis connection URL |
 | `redis.prefix` | `string` | yes | Key prefix for all Redis entries (use a unique value per environment) |
-| `redis.taskDebounce` | `number` | no | Milliseconds before a worker picks up a compaction task. Default: 60 000 |
+| `redis.taskDebounce` | `number` | no | Milliseconds before a worker picks up a compaction task. Default: 120 000 |
 | `redis.minMessageLifetime` | `number` | no | Minimum time in ms that update messages are kept in Redis streams before compaction. Default: 60 000 |
 | `redis.cacheTtl` | `number` | no | TTL in seconds for cached API responses. Default: 10 |
 | `redis.socket` | `object` | no | Custom socket options merged into the Redis client socket config. See [node-redis socket options](https://github.com/redis/node-redis/blob/master/docs/client-configuration.md#socket-options) for available options. |

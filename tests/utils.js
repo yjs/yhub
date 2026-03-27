@@ -29,7 +29,7 @@ export const yhub = await createYHub({
   redis: {
     url: env.ensureConf('redis'),
     prefix: 'yhub:testing',
-    taskDebounce: 10000,
+    taskDebounce: 1000,
     minMessageLifetime: 3000
   },
   postgres: env.ensureConf('postgres'),

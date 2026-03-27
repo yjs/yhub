@@ -1,0 +1,82 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      valkey:
+        image: valkey/valkey:alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: yhub
+          POSTGRES_PASSWORD: yhub
+          POSTGRES_DB: yhub
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U yhub"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      minio:
+        image: minio/minio
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "mc ready local"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Create .env
+        run: |
+          cat > .env << 'EOF'
+          REDIS=redis://localhost:6379
+          REDIS_PREFIX=yhub-ci
+          S3_ENDPOINT=localhost
+          S3_PORT=9000
+          S3_SSL=false
+          S3_ACCESS_KEY=minioadmin
+          S3_SECRET_KEY=minioadmin
+          S3_YHUB_BUCKET=yhub
+          S3_YHUB_TEST_BUCKET=yhub-testing
+          POSTGRES=postgres://yhub:yhub@localhost:5432/yhub
+          POSTGRES_TESTING=postgres://yhub:yhub@localhost:5432/yhub-testing
+          LOG=*
+          EOF
+
+      - name: Initialize databases
+        run: node --env-file .env --env-file .env.testing ./bin/init-db.js
+
+      - name: Run tests
+        run: node --expose-gc --max-old-space-size=8192 --env-file .env --env-file .env.testing tests/index.js | pino-pretty -S -L debug

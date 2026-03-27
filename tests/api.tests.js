@@ -421,6 +421,21 @@ export const testActivityContentIdsFilter = async tc => {
   t.assert(filteredActivity[0].from === allActivity[0].from, 'filtered entry should match the someattr change timestamp')
 }
 
+/**
+ * @param {t.TestCase} tc
+ */
+export const testWorkerTasksCleanup = async tc => {
+  const { yhub, createWsClient } = await utils.createTestCase(tc)
+  const { ydoc } = await createWsClient({ waitForSync: true, syncAwareness: false })
+  ydoc.get().setAttr('key1', 'val1')
+  await promise.wait(100)
+  const pendingTasks = await yhub.stream.redis.xLen(yhub.stream.workerStreamName)
+  t.assert(pendingTasks > 0, 'expected pending tasks after writing to doc')
+  await utils.waitTasksProcessed(yhub)
+  const remainingTasks = await yhub.stream.redis.xLen(yhub.stream.workerStreamName)
+  t.assert(remainingTasks === 0, 'expected all tasks to be processed')
+}
+
 // /**
 //  * Regression test: uploading a specific problematic ydoc+contentmap combination and calling the
 //  * activity API with delta=true and group=false previously caused errors.

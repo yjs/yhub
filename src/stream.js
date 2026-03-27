@@ -162,6 +162,8 @@ export class Stream {
             local minidTs = tonumber(string.match(minid, "^(%d+)"))
             if minidTs < minidLifetime then
               minidLifetime = incStreamId(minid)
+            else
+              minidLifetime = tostring(minidLifetime)
             end
             redis.call("XTRIM", KEYS[1], "MINID", minidLifetime)
             if redis.call("XLEN", KEYS[1]) == 0 then

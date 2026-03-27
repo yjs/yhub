@@ -21,13 +21,13 @@ services:
     depends_on:
       init:
         condition: service_completed_successfully
-  valkey:
-    image: valkey/valkey:alpine
+  redis6:
+    image: redis:6.0-alpine
     profiles: ["all", "db"]
     ports:
       - "6379:6379"
     healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -71,7 +71,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      valkey:
+      redis6:
         condition: service_healthy
       minio:
         condition: service_healthy

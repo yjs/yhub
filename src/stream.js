@@ -66,6 +66,39 @@ export const maxRedisClock = (a, b) => isSmallerRedisClock(a, b) ? b : a
  */
 export const minRedisClock = (a, b) => isSmallerRedisClock(a, b) ? a : b
 
+/**
+ * @typedef {{ messages: Array<{ id: string, message: { [key: string]: string } } | null>, deletedMessages: Array<string> }} XAutoClaimResult
+ */
+
+/**
+ * Polyfill-aware XAUTOCLAIM. Uses the native command when available, falls back
+ * to XPENDING + XCLAIM for Redis < 6.2.
+ *
+ * @param {Stream} stream
+ * @param {number} count
+ * @return {Promise<XAutoClaimResult>}
+ */
+const xAutoClaim = async (stream, count) => {
+  if (!stream._useXAutoClaimPolyfill) {
+    try {
+      return await stream.redis.xAutoClaim(stream.workerStreamName, stream.workerGroupName, stream.consumername, stream.taskDebounce, '0', { COUNT: count })
+    } catch (err) {
+      if (err instanceof redis.ErrorReply) {
+        log.warn({ err }, 'XAUTOCLAIM not supported, falling back to XPENDING+XCLAIM polyfill')
+        stream._useXAutoClaimPolyfill = true
+      } else {
+        throw err
+      }
+    }
+  }
+  const pending = await stream.redis.xPendingRange(stream.workerStreamName, stream.workerGroupName, '-', '+', count)
+  const idlePending = pending.filter(p => p.millisecondsSinceLastDelivery >= stream.taskDebounce)
+  if (idlePending.length === 0) return { messages: [], deletedMessages: [] }
+  const ids = idlePending.map(p => p.id)
+  const messages = await stream.redis.xClaim(stream.workerStreamName, stream.workerGroupName, stream.consumername, stream.taskDebounce, ids)
+  return { messages, deletedMessages: [] }
+}
+
 export class Stream {
   /**
    * @param {import('./types.js').YHubConfig} config
@@ -162,8 +195,14 @@ export class Stream {
             local minidTs = tonumber(string.match(minid, "^(%d+)"))
             if minidTs < minidLifetime then
               minidLifetime = incStreamId(minid)
+            else
+              minidLifetime = tostring(minidLifetime)
             end
-            redis.call("XTRIM", KEYS[1], "MINID", minidLifetime)
+            local entries = redis.call("XRANGE", KEYS[1], "-", "+")
+            for i, entry in ipairs(entries) do
+              if entry[1] >= minidLifetime then break end
+              redis.call("XDEL", KEYS[1], entry[1])
+            end
             if redis.call("XLEN", KEYS[1]) == 0 then
               redis.call("DEL", KEYS[1])
             elseif acked == 1 then
@@ -194,6 +233,7 @@ export class Stream {
      */
     this.redisSubscriptions = null
     this._subRunning = false
+    this._useXAutoClaimPolyfill = false
   }
 
   async getPendingTasksSize () {
@@ -335,7 +375,7 @@ export class Stream {
    * @return {Promise<Array<t.Task & { redisClock: string }>>}
    */
   async claimTasks (count) {
-    const reclaimedTasks = await this.redis.xAutoClaim(this.workerStreamName, this.workerGroupName, this.consumername, this.taskDebounce, '0', { COUNT: count })
+    const reclaimedTasks = await xAutoClaim(this, count)
     if (reclaimedTasks.deletedMessages != null && reclaimedTasks.deletedMessages.length > 0) {
       log.warn({ deletedMessages: reclaimedTasks.deletedMessages }, 'deleting ghost tasks from stream')
       const multi = this.redis.multi()

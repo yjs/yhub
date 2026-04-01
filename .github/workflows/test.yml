@@ -44,10 +44,10 @@ jobs:
         ports:
           - 9000:9000
         options: >-
-          --health-cmd "mc ready local"
+          --health-cmd "curl -sf http://localhost:9000/minio/health/live"
           --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
 
     steps:
       - uses: actions/checkout@v4

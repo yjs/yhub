@@ -36,21 +36,17 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-      minio:
-        image: minio/minio
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports:
-          - 9000:9000
-        options: >-
-          --health-cmd "curl -sf http://localhost:9000/minio/health/live"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
     steps:
       - uses: actions/checkout@v4
+
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data
+          until curl -sf http://localhost:9000/minio/health/live; do sleep 1; done
 
       - uses: actions/setup-node@v4
         with:

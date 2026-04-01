@@ -77,7 +77,7 @@ CREATE TABLE yhub_ydoc_v1 (
 
 This simplified table layout provides several advantages:
 
-1. **Persistence Plugin Integration**: Each column stores schema-encoded assets that can be intercepted by persistence plugins (e.g., S3) before storage. When a plugin handles an asset, a `asset:retrievable:v1` reference is stored instead.
+1. **Persistence Plugin Integration**: Each column stores schema-encoded assets that can be intercepted by persistence plugins (e.g., S3 via `S3PersistenceV1`, or any cloud storage via `BlobPersistence`) before storage. When a plugin handles an asset, a `asset:retrievable:v1` reference is stored instead.
 
 2. **Partial Non-GC Document Retrieval**: By storing non-garbage-collected documents (`nongcDoc`) at regular intervals with timestamps, we can query for recent non-GC states without loading years of history. This enables efficient retrieval of document versions with full edit history for recent changes only.
 
@@ -294,13 +294,47 @@ interface PersistencePlugin {
 }
 ```
 
-### Built-in: S3 Persistence
+### Built-in: S3 Persistence (`S3PersistenceV1`)
 
-The `S3PersistenceV1` plugin offloads assets to S3:
+The `S3PersistenceV1` plugin offloads assets to S3-compatible storage (MinIO, AWS S3) using the `minio` SDK:
 
 - **Storage Path**: Uses asset ID string as S3 object key
-- **Branch Filter**: Only stores assets from `main` branch by default
+- **Branch Filter**: Only stores assets from `main` branch
+- **Retries**: Handles transient network errors (connection resets, 503, 429) with one automatic retry
 - **Returns**: `{ type: 'asset:retrievable:v1', plugin: 'S3Persistence:v1' }`
+
+Import: `import { S3PersistenceV1 } from '@y/hub/plugins/s3'`
+
+### Generic: Blob Persistence (`BlobPersistence`)
+
+The `BlobPersistence` plugin is a generic alternative to `S3PersistenceV1` for cloud storage backends that are not S3-compatible (Azure Blob Storage, Google Cloud Storage, etc.). Instead of bundling a specific SDK, the caller provides a simple adapter with four operations:
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `put` | `(path: string, data: Buffer) => Promise<void>` | Store a blob. Caller handles retries. |
+| `get` | `(path: string) => Promise<Buffer\|null>` | Retrieve a blob. Return `null` if not found. |
+| `del` | `(path: string) => Promise<void>` | Delete a blob. Must not throw if missing. |
+| `init` | `() => Promise<void>` | *(Optional)* One-time setup (e.g. create container/bucket). |
+
+- **Storage Path**: Same asset ID string format as S3PersistenceV1
+- **Branch Filter**: Only stores assets from `main` branch (same as S3)
+- **Encoding**: Same `lib0/buffer.encodeAny` / `decodeAny` as S3
+- **Deletion**: Delayed 10 seconds to prevent stale reads (same as S3)
+- **Returns**: `{ type: 'asset:retrievable:v1', plugin: '<pluginId>' }`
+
+Import: `import { BlobPersistence } from '@y/hub/plugins/blob'`
+
+```javascript
+// Azure Blob Storage example
+const plugin = new BlobPersistence('AzureBlob:v1', {
+  init: () => container.createIfNotExists(),
+  put: (path, data) => container.getBlockBlobClient(path).upload(data, data.length),
+  get: async (path) => { /* return Buffer or null on 404 */ },
+  del: (path) => container.getBlockBlobClient(path).deleteIfExists()
+})
+
+createYHub({ persistence: [plugin], ... })
+```
 
 ### Plugin Chain
 

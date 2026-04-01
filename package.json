@@ -40,7 +40,11 @@
     },
     "./plugins/s3": {
       "default": "./src/plugins/s3.js",
-      "types": "./dist/src/storage/s3.d.ts"
+      "types": "./dist/src/plugins/s3.d.ts"
+    },
+    "./plugins/blob": {
+      "default": "./src/plugins/blob.js",
+      "types": "./dist/src/plugins/blob.d.ts"
     }
   },
   "repository": {

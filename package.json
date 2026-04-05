@@ -9,7 +9,7 @@
     "url": "https://github.com/sponsors/dmonad"
   },
   "scripts": {
-    "start": "docker compose --profile all up",
+    "start": "docker build -f docker-standalone/Dockerfile -t yhub-standalone . && docker run --rm -p 3002:3002 yhub-standalone 2>&1 | pino-pretty -S",
     "start:dbs": "docker compose --profile db up",
     "start:minio": "docker compose --profile db up minio",
     "start:server": "node --env-file .env ./bin/yhub.js | pino-pretty -S",

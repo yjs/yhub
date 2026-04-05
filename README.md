@@ -358,7 +358,6 @@ y/hub is designed for horizontal scaling:
 I'm looking for sponsors that want to sponsor the following work:
 
 - Ability to kick out users when permissions on a document changed
-- Configurable docker containers for y/hub server & worker
 - Helm chart
 - More exhaustive logging and reporting of possible issues
 - More exhaustive testing
@@ -368,6 +367,29 @@ I'm looking for sponsors that want to sponsor the following work:
 
 If you are interested in sponsoring some of this work, please send a mail to
 <kevin.jahns at pm.me>.
+
+# Quick Start (standalone Docker)
+
+The fastest way to try y/hub. A single container runs PostgreSQL, Valkey
+(Redis), and y/hub together — no external services required.
+
+```bash
+docker run -p 3002:3002 ghcr.io/yjs/yhub/standalone:latest
+```
+
+Data is stored inside the container and lost when it stops. To persist data
+across restarts, mount a volume:
+
+```bash
+docker run -p 3002:3002 -v yhub-data:/data ghcr.io/yjs/yhub/standalone:latest
+```
+
+Connect a Yjs client to `ws://localhost:3002/ws/my-org/my-doc` and start
+collaborating.
+
+> **Note:** The standalone container uses open authentication (any client can
+> read/write any document). It is intended for development and evaluation. For
+> production, use the full setup below with a proper auth callback.
 
 # Quick Start (docker-compose)
 

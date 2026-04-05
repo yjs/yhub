@@ -78,7 +78,7 @@ jobs:
           EOF
 
       - name: Initialize databases
-        run: node --env-file .env --env-file .env.testing ./bin/init-db.js
+        run: node --env-file .env ./bin/init-db.js
 
       - name: Run tests
-        run: node --expose-gc --max-old-space-size=8192 --env-file .env --env-file .env.testing tests/index.js | pino-pretty -S -L debug
+        run: node --expose-gc --max-old-space-size=8192 --env-file .env tests/index.js | pino-pretty -S -L debug

@@ -24,7 +24,7 @@
     "clean": "rm -rf **/dist "
   },
   "bin": {
-    "yhub": "./bin/yhub.js"
+    "yhub": "bin/yhub.js"
   },
   "files": [
     "dist/*",

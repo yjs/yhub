@@ -27,7 +27,8 @@
     "yhub": "bin/yhub.js"
   },
   "files": [
-    "dist/*",
+    "dist/src",
+    "dist/bin",
     "bin/*",
     "src/*"
   ],

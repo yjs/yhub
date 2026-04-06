@@ -9,6 +9,7 @@ import * as server from './server.js'
 import * as math from 'lib0/math'
 import { createComputePool } from './compute.js'
 import { logger } from './logger.js'
+import * as time from 'lib0/time'
 
 export { createAuthPlugin } from './types.js'
 export { logger } from './logger.js'
@@ -54,29 +55,35 @@ export class YHub {
         await promise.all(tasks.map(async task => {
           const taskLog = log.child({ taskType: task.type, room: task.room })
           if (task.type === 'compact') {
-            const _taskTs = Date.now()
-            this.conf.worker?.events?.taskStart?.({ room: task.room, timestamp: _taskTs })
-            /** @type {Error | undefined} */
-            let _taskErr
+            const taskTs = time.getUnixTime()
+            this.conf.worker?.events?.taskStart?.({ room: task.room, timestamp: taskTs })
+            /**
+             * @type {Error | null}
+             */
+            let taskErr = null
             try {
-            taskLog.info('task started')
-            // execute compact task
-            const d = await this.getDoc(task.room, { gc: true, nongc: true, contentmap: true, contentids: true, references: true })
-            if (!strm.isSmallerRedisClock(d.lastPersistedClock, d.lastClock)) {
-              taskLog.debug('nothing to compact, trimming only')
-              await this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
-              taskLog.info('task completed (trim only)')
-              return null
+              taskLog.info('task started')
+              // execute compact task
+              const d = await this.getDoc(task.room, { gc: true, nongc: true, contentmap: true, contentids: true, references: true })
+              if (!strm.isSmallerRedisClock(d.lastPersistedClock, d.lastClock)) {
+                taskLog.debug('nothing to compact, trimming only')
+                await this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
+                taskLog.info('task completed (trim only)')
+                return null
+              }
+              this.conf.worker?.events?.docUpdate?.(object.assign({}, d, { references: null }))
+              await this.persistence.store(task.room, d)
+              await promise.all([
+                this.persistence.deleteReferences(d.references),
+                this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
+              ])
+              taskLog.info({ gcDocSize: d.gcDoc?.byteLength, nongcDocSize: d.nongcDoc?.byteLength, refsDeleted: d.references?.length ?? 0 }, 'task completed')
+            } catch (e) {
+              taskErr = /** @type {Error} */ (e)
+              throw e
+            } finally {
+              this.conf.worker?.events?.taskComplete?.({ room: task.room, duration: time.getUnixTime() - taskTs, error: taskErr })
             }
-            this.conf.worker?.events?.docUpdate?.(object.assign({}, d, { references: null }))
-            await this.persistence.store(task.room, d)
-            await promise.all([
-              this.persistence.deleteReferences(d.references),
-              this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
-            ])
-            taskLog.info({ gcDocSize: d.gcDoc?.byteLength, nongcDocSize: d.nongcDoc?.byteLength, refsDeleted: d.references?.length ?? 0 }, 'task completed')
-            } catch (e) { _taskErr = e; throw e }
-            finally { this.conf.worker?.events?.taskComplete?.({ room: task.room, duration: Date.now() - _taskTs, error: _taskErr }) }
           }
         }))
         tasks.length && log.info({ taskCount: tasks.length }, 'completed tasks')

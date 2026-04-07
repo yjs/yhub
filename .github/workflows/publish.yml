@@ -13,8 +13,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
-      - name: Check if version is already published
+          node-version: 24
         id: version-check
         run: |
           NAME=$(node -p "require('./package.json').name")
@@ -48,8 +47,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
-      - run: npm install -g npm --force
+          node-version: 24
       - run: npm ci
       - name: Build
         run: npm run dist

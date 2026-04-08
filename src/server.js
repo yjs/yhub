@@ -528,7 +528,7 @@ class WSUser {
             break
           }
           default: {
-            s.$never.expect(message)
+            this.log.error('unexpected message type on stream: ' + /** @type {any} */ (message).type)
           }
         }
       })
@@ -566,6 +566,7 @@ class WSUser {
 
   destroy () {
     if (!this.isDestroyed) {
+      this.isDestroyed = true
       this.yhub.stream.unsubscribe(this.room, this)
       this.awarenessId && this.yhub.stream.addMessage(this.room, { type: 'awareness:v1', update: protocol.encodeAwarenessUserDisconnected(this.awarenessId, this.awarenessLastClock) }).catch(err => {
         this.log.error({ err }, 'error adding message to redis')

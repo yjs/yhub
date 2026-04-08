@@ -18,6 +18,7 @@ const log = logger.child({ module: 'stream' })
  * @typedef {object} StreamSubscriber
  * @property {(room: t.Room, ms:Array<t.Message & { redisClock: string }>)=>any} onStreamMessage
  * @property {()=>void} destroy
+ * @property {(code: number, message: string)=>void} closeWithError
  * @property {string} lastReceivedClock
  */
 
@@ -234,9 +235,13 @@ export class Stream {
               sub.subs.forEach(s => {
                 const filteredMessages = m.messages.filter(m => isSmallerRedisClock(s.lastReceivedClock, m.redisClock))
                 if (filteredMessages.length > 0) {
-                  s.lastReceivedClock = m.lastClock
                   nsubCounter++
-                  s.onStreamMessage(m.room, filteredMessages)
+                  try {
+                    s.onStreamMessage(m.room, filteredMessages)
+                    s.lastReceivedClock = m.lastClock
+                  } catch (err) {
+                    s.closeWithError(1011, 'unexpected error when sending stream data')
+                  }
                 }
               })
               sub.lastReceivedClock = m.lastClock

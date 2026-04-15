@@ -516,15 +516,18 @@ class WSUser {
    */
   onStreamMessage (_room, ms) {
     if (ms.length > 0) {
-      const encoder = encoding.createEncoder()
+      /** @type {Array<Uint8Array<ArrayBuffer>>} */
+      const ydocUpdates = []
+      /** @type {Array<Uint8Array<ArrayBuffer>>} */
+      const awarenessUpdates = []
       ms.forEach(message => {
         switch (message.type) {
           case 'ydoc:update:v1': {
-            protocol.writeSyncUpdate(encoder, message.update)
+            ydocUpdates.push(message.update)
             break
           }
           case 'awareness:v1': {
-            protocol.writeAwarenessUpdate(encoder, message.update)
+            awarenessUpdates.push(message.update)
             break
           }
           default: {
@@ -532,7 +535,13 @@ class WSUser {
           }
         }
       })
-      this.sendData(encoding.toUint8Array(encoder))
+      // @todo send this as a single update message
+      if (ydocUpdates.length > 0) {
+        this.sendData(protocol.encodeSyncUpdate(Y.mergeUpdates(ydocUpdates)))
+      }
+      if (awarenessUpdates.length > 0) {
+        this.sendData(protocol.mergeAwarenessUpdates(awarenessUpdates))
+      }
     }
   }
 

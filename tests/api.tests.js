@@ -99,6 +99,42 @@ export const testChangesetRestApi = async tc => {
 }
 
 /**
+ *
+ * This example shows how to retrieve all attributes for all insertions using the changeset api.
+ * Note, that you must retrieve the most up-to-date changeset whenever you want to render a ydoc,
+ * otherwise, some attributions might be missing.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testAttributeInsertedContent = async tc => {
+  const { org, createWsClient } = await utils.createTestCase(tc)
+  const { ydoc } = createWsClient()
+  console.log('creating documents')
+  const ytype = ydoc.get()
+  ytype.applyDelta(delta.create().insert('hello world').setAttr('a', 42).setAttr('b', '42').done())
+  ytype.applyDelta(delta.create().delete(6).deleteAttr('b').done())
+  await promise.wait(500)
+  // @todo this is not ideal. this requests *all attributions ever created*!
+  /**
+   * @type {{ attributions: Uint8Array }}
+   */
+  const response = await fetchYhubResponse(`/changeset/${org}/${ydoc.guid}?&attributions=true`)
+  const attributions = Y.decodeContentMap(response.attributions)
+  // render all inserts (extracting deletions from the equation so they stay properly deleted)
+  console.log({ attributions })
+  const deltaWithAttributedInserts = ytype.toDelta(new Y.TwosetAttributionManager(Y.diffIdMap(attributions.inserts, attributions.deletes), Y.createIdMap()))
+
+  console.log({
+    attrResult: JSON.stringify(deltaWithAttributedInserts.toJSON())
+    // => {"type":"delta","attrs":{"a":{"type":"insert","value":42,"attribution":{"insert":["user1"],"insertAt":1776717007942}}},"children":[{"type":"insert","insert":"world","attribution":{"insert":["user1"],"insertAt":1776717007942}}]}
+  })
+  // ensure that we actually have the attribution property
+  t.assert((delta.$textOp.cast(deltaWithAttributedInserts.children.start).attribution?.insert?.length || 0) > 0)
+  t.assert((delta.$setAttrOp.cast(deltaWithAttributedInserts.attrs.a).attribution?.insert?.length || 0) > 0)
+  t.assert(deltaWithAttributedInserts.childCnt === 5)
+}
+
+/**
  * @param {t.TestCase} tc
  */
 export const testUpdateApiMessages = async tc => {

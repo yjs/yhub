@@ -18,8 +18,8 @@
     "dist": "npm run types",
     "types": "tsc --skipLibCheck",
     "lint": "standard && tsc --skipLibCheck",
-    "test": "FORCE_COLOR=true node --expose-gc --max-old-space-size=8192 --env-file .env $(test -f .env.testing && echo '--env-file .env.testing') tests/index.js | pino-pretty -S -L debug",
-    "debug:test": "FORCE_COLOR=true node --expose-gc --max-old-space-size=8192 --env-file .env $(test -f .env.testing && echo '--env-file .env.testing') --inspect-brk tests/index.js | pino-pretty -S",
+    "test": "sh -c 'FORCE_COLOR=true node --expose-gc --max-old-space-size=8192 --env-file .env $(test -f .env.testing && echo --env-file .env.testing) tests/index.js \"$@\" | pino-pretty -S -L debug' --",
+    "debug:test": "sh -c 'FORCE_COLOR=true node --expose-gc --max-old-space-size=8192 --env-file .env $(test -f .env.testing && echo --env-file .env.testing) --inspect-brk tests/index.js \"$@\" | pino-pretty -S' --",
     "preversion": "npm run lint && npm run dist",
     "clean": "rm -rf **/dist "
   },

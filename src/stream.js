@@ -41,6 +41,13 @@ export const decodeRoomName = (rediskey, expectedPrefix) => {
 }
 
 /**
+ * @param {t.Room} room
+ * @param {string} prefix
+ * @param {string} qid
+ */
+export const encodeQuarantineName = (room, prefix, qid) => `${prefix}:quarantine_room:${encodeURIComponent(room.org)}:${encodeURIComponent(room.docid)}:${encodeURIComponent(room.branch)}:${qid}`
+
+/**
  * @param {string} a
  * @param {string} b
  * @return {boolean} iff a < b
@@ -304,6 +311,85 @@ export class Stream {
    */
   addMessage (room, m) {
     return this.redis.addMessage(encodeRoomName(room, this.prefix), Buffer.from(buffer.encodeAny(m)))
+  }
+
+  /**
+   * Move the live stream for `room` into a quarantine key with a fresh qid.
+   *
+   * Atomically renames the live stream and inserts a NOP entry into the (now empty) live
+   * key. The NOP uses field `nop` (not `m`), so every read path — which filters on
+   * `.message.m != null` — ignores it. The reason to leave a NOP behind is that any compact
+   * task enqueued before the quarantine is still pending in the worker queue; a fresh write
+   * after quarantine would otherwise see `EXISTS(live) == 0` and enqueue a second compact
+   * task, causing two workers to persist the same `lastClock` concurrently (duplicate PK).
+   *
+   * @param {t.Room} room
+   * @returns {Promise<string | null>} the qid of the created quarantine, or null if nothing to quarantine
+   */
+  async quarantine (room) {
+    const live = encodeRoomName(room, this.prefix)
+    const qid = random.uuidv4()
+    const quar = encodeQuarantineName(room, this.prefix, qid)
+    try {
+      await this.redis.multi()
+        .rename(live, quar)
+        .xAdd(live, '*', { nop: '1' })
+        .exec()
+    } catch (e) {
+      const err = /** @type {any} */ (e)
+      // MULTI runs every queued command; if RENAME fails with "no such key" the XADD still
+      // ran and left an orphan NOP in the live stream. Clean it up and report the no-op.
+      const renameErr = err.replies?.[0]
+      if (renameErr instanceof Error && renameErr.message?.includes('no such key')) {
+        await this.redis.del(live)
+        return null
+      }
+      throw e
+    }
+    log.warn({ room, qid }, 'quarantined stream')
+    return qid
+  }
+
+  /**
+   * List the qids of all quarantined streams for `room`.
+   *
+   * @param {t.Room} room
+   * @returns {Promise<string[]>}
+   */
+  async getQuarantinedStreams (room) {
+    const pattern = `${this.prefix}:quarantine_room:${encodeURIComponent(room.org)}:${encodeURIComponent(room.docid)}:${encodeURIComponent(room.branch)}:*`
+    const keys = await this.redis.keys(pattern)
+    return keys.map(k => k.slice(k.lastIndexOf(':') + 1))
+  }
+
+  /**
+   * Re-inject a quarantined stream back into the live stream for `room`, then delete the
+   * quarantine key. Each stored message is re-XADD'd to the live stream (with a fresh redis
+   * clock), which re-enqueues the compact worker task if the live stream was empty.
+   *
+   * @param {t.Room} room
+   * @param {string} qid
+   * @returns {Promise<number>} number of messages re-injected
+   */
+  async unquarantine (room, qid) {
+    const quar = encodeQuarantineName(room, this.prefix, qid)
+    const live = encodeRoomName(room, this.prefix)
+    // Quarantined streams are expected to be read-only after quarantine() — nothing in the
+    // system writes to `quarantine_room:*` keys. We rely on that here: we XRANGE the full
+    // contents, then DEL the key in a follow-up write. If a concurrent writer could add to
+    // the quarantine stream between these calls, the DEL would silently drop those messages.
+    const entries = await this.redis.withTypeMapping({
+      [redis.RESP_TYPES.BLOB_STRING]: Buffer
+    }).xRange(quar, '-', '+')
+    const multi = this.redis.multi()
+    for (const entry of entries) {
+      const m = entry.message.m
+      if (m != null) multi.addMessage(live, /** @type {Buffer} */ (m))
+    }
+    multi.del(quar)
+    await multi.exec()
+    log.info({ room, qid, count: entries.length }, 'unquarantined stream')
+    return entries.length
   }
 
   /**

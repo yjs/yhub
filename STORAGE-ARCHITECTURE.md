@@ -224,6 +224,8 @@ Currently, the task queue supports document compaction tasks:
 4. **Completion**: Task removed, Redis stream trimmed
 5. **Continuation**: If messages remain after trim, a new task is re-queued
 
+The creation step relies on `EXISTS(liveStream) == 0` as the signal to enqueue, which means there is at most one pending task per live room at any time. Operations that remove the live key (notably `Stream.quarantine`) must leave a NOP entry behind so this invariant is preserved across the operation.
+
 ### Use Cases
 
 The task queue triggers actions when document events occur:
@@ -260,7 +262,8 @@ Messages distributed via Redis Streams follow versioned schemas:
 ### Stream Storage Format
 
 - **Room Streams**: `{prefix}:room:{org}:{docid}:{branch}` (URL-encoded components)
-- **Message Field**: Each message stored with field `m` containing the encoded buffer
+- **Quarantined Room Streams**: `{prefix}:quarantine_room:{org}:{docid}:{branch}:{qid}` (see [Quarantine](#quarantine))
+- **Message Field**: Each message stored with field `m` containing the encoded buffer. Entries whose field is something other than `m` are skipped by every read path (used for NOP markers — see [Quarantine](#quarantine)).
 - **Clock Format**: `"{timestamp}-{sequence}"` (e.g., `"1704067200000-5"`)
 
 ### Message Lifecycle
@@ -269,6 +272,15 @@ Messages distributed via Redis Streams follow versioned schemas:
 2. Subscribers receive messages via `XREAD` with blocking
 3. Messages retained for minimum lifetime (default: 1 minute)
 4. Trimmed during compaction based on age
+
+### Quarantine
+
+Operational recovery path for rooms whose updates repeatedly fail to compact. Exposed on the `Stream` instance as `quarantine(room)`, `getQuarantinedStreams(room)`, and `unquarantine(room, qid)`.
+
+- **Quarantine key**: `{prefix}:quarantine_room:{org}:{docid}:{branch}:{qid}`. One key per quarantined snapshot; `qid` is a fresh UUID, so repeated quarantines on the same room accumulate rather than overwrite.
+- **Invariant preserved**: the compact worker queue holds at most one pending task per live room. `quarantine` atomically renames the live stream to a quarantine key and inserts a NOP entry (field `nop`, not `m`) into the now-empty live key. The NOP keeps `EXISTS(live) == 1`, so a subsequent `addMessage` does not enqueue a second compact task alongside the pre-quarantine one. Without the NOP, two tasks for the same room would race the worker into duplicate `persistence.store` calls at the same `lastClock`.
+- **Quarantined streams are read-only by convention**: nothing in the system writes to `quarantine_room:*` keys. `unquarantine` relies on this when it XRANGEs the contents and then DELs the key in a follow-up write — concurrent writers would silently lose data.
+- **NOP entries** are ignored by the normal read path (`getMessages` filters on `message.m != null`) and trimmed by the usual `XTRIM MINID` when they age past `minMessageLifetime`.
 
 ---
 

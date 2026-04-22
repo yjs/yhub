@@ -458,6 +458,64 @@ export const testActivityContentIdsFilter = async tc => {
 }
 
 /**
+ * Quarantine moves the live stream into a qid-suffixed key and leaves a NOP entry in the
+ * live stream so a subsequent write doesn't enqueue a second compact task. Unquarantine
+ * re-injects the messages back into the live stream and deletes the quarantine.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testQuarantineRoundtrip = async tc => {
+  const { yhub, defaultRoom } = await utils.createTestCase(tc)
+  const s = yhub.stream
+  const liveKey = stream.encodeRoomName(defaultRoom, s.prefix)
+
+  // seed the live stream directly (bypass the server)
+  await s.addMessage(defaultRoom, { type: 'awareness:v1', update: new Uint8Array([1, 2, 3]) })
+  await s.addMessage(defaultRoom, { type: 'awareness:v1', update: new Uint8Array([4, 5, 6]) })
+  t.assert(await s.redis.exists(liveKey) === 1, 'live stream exists after seeding')
+  t.assert(await s.redis.xLen(liveKey) === 2, 'live stream has 2 messages')
+  const workerTasksBefore = await s.redis.xLen(s.workerStreamName)
+  t.assert(workerTasksBefore >= 1, 'seed produced at least one pending compact task')
+
+  // quarantine: live moves to a quarantine key, NOP keeps live non-empty
+  const qid = await s.quarantine(defaultRoom)
+  t.assert(qid != null, 'quarantine returns a qid')
+  const qKey = stream.encodeQuarantineName(defaultRoom, s.prefix, /** @type {string} */ (qid))
+  t.assert(await s.redis.exists(liveKey) === 1, 'live key still present after quarantine (NOP)')
+  t.assert(await s.redis.xLen(liveKey) === 1, 'live stream holds a single NOP entry')
+  t.assert(await s.redis.exists(qKey) === 1, 'quarantine key created')
+  t.assert(await s.redis.xLen(qKey) === 2, 'quarantined stream has the 2 messages')
+
+  // quarantine of a truly absent live stream is a no-op
+  const emptyRoom = { org: defaultRoom.org, docid: defaultRoom.docid + '-empty', branch: 'main' }
+  t.assert(await s.quarantine(emptyRoom) === null, 'quarantine no-op when live stream absent')
+  t.assert(await s.redis.exists(stream.encodeRoomName(emptyRoom, s.prefix)) === 0, 'empty room did not get an orphan NOP')
+
+  // listing quarantines
+  t.compare(await s.getQuarantinedStreams(defaultRoom), [qid], 'getQuarantinedStreams returns only this qid')
+
+  // a fresh write after quarantine must NOT enqueue a second compact task, because the NOP
+  // keeps the live key non-empty (addMessage's EXISTS check returns 1)
+  await s.addMessage(defaultRoom, { type: 'awareness:v1', update: new Uint8Array([7]) })
+  t.assert(await s.redis.xLen(liveKey) === 2, 'live stream now holds NOP + fresh message')
+  t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore, 'no additional compact task enqueued after quarantine + write')
+
+  // unquarantine: messages move back to live, quarantine key deleted
+  const moved = await s.unquarantine(defaultRoom, /** @type {string} */ (qid))
+  t.assert(moved === 2, 'unquarantine re-injected 2 messages')
+  t.assert(await s.redis.exists(qKey) === 0, 'quarantine key gone')
+  t.assert(await s.redis.xLen(liveKey) === 4, 'live stream holds NOP + fresh + 2 re-injected')
+  t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore, 'unquarantine did not enqueue an extra compact task')
+  t.compare(await s.getQuarantinedStreams(defaultRoom), [], 'no quarantines remain')
+
+  // unquarantine of an unknown qid is a no-op
+  t.assert(await s.unquarantine(defaultRoom, 'does-not-exist') === 0, 'unquarantine no-op on unknown qid')
+
+  // let the worker drain the live stream
+  await utils.waitTasksProcessed(yhub)
+}
+
+/**
  * @param {t.TestCase} tc
  */
 export const testWorkerTasksCleanup = async tc => {

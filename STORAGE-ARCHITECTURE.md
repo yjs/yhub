@@ -275,7 +275,7 @@ Messages distributed via Redis Streams follow versioned schemas:
 
 ### Quarantine
 
-Operational recovery path for rooms whose updates repeatedly fail to compact. Exposed on the `Stream` instance as `quarantine(room)`, `getQuarantinedStreams(room)`, and `unquarantine(room, qid)`.
+Operational recovery path for rooms whose updates repeatedly fail to compact. Exposed on the `Stream` instance as `quarantine(room)`, `getQuarantineStreams(room)`, `getAllQuarantineStreams()`, and `unquarantine(room, qid)`.
 
 - **Quarantine key**: `{prefix}:quarantine_room:{org}:{docid}:{branch}:{qid}`. One key per quarantined snapshot; `qid` is a fresh UUID, so repeated quarantines on the same room accumulate rather than overwrite.
 - **Invariant preserved**: the compact worker queue holds at most one pending task per live room. `quarantine` atomically renames the live stream to a quarantine key and inserts a NOP entry (field `nop`, not `m`) into the now-empty live key. The NOP keeps `EXISTS(live) == 1`, so a subsequent `addMessage` does not enqueue a second compact task alongside the pre-quarantine one. Without the NOP, two tasks for the same room would race the worker into duplicate `persistence.store` calls at the same `lastClock`.

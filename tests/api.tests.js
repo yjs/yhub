@@ -492,7 +492,7 @@ export const testQuarantineRoundtrip = async tc => {
   t.assert(await s.redis.exists(stream.encodeRoomName(emptyRoom, s.prefix)) === 0, 'empty room did not get an orphan NOP')
 
   // listing quarantines
-  t.compare(await s.getQuarantinedStreams(defaultRoom), [qid], 'getQuarantinedStreams returns only this qid')
+  t.compare(await s.getQuarantineStreams(defaultRoom), [qid], 'getQuarantineStreams returns only this qid')
 
   // a fresh write after quarantine must NOT enqueue a second compact task, because the NOP
   // keeps the live key non-empty (addMessage's EXISTS check returns 1)
@@ -506,7 +506,7 @@ export const testQuarantineRoundtrip = async tc => {
   t.assert(await s.redis.exists(qKey) === 0, 'quarantine key gone')
   t.assert(await s.redis.xLen(liveKey) === 4, 'live stream holds NOP + fresh + 2 re-injected')
   t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore, 'unquarantine did not enqueue an extra compact task')
-  t.compare(await s.getQuarantinedStreams(defaultRoom), [], 'no quarantines remain')
+  t.compare(await s.getQuarantineStreams(defaultRoom), [], 'no quarantines remain')
 
   // unquarantine of an unknown qid is a no-op
   t.assert(await s.unquarantine(defaultRoom, 'does-not-exist') === 0, 'unquarantine no-op on unknown qid')

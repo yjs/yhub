@@ -351,15 +351,32 @@ export class Stream {
   }
 
   /**
-   * List the qids of all quarantined streams for `room`.
+   * List the qids of all quarantine streams for `room`.
    *
    * @param {t.Room} room
    * @returns {Promise<string[]>}
    */
-  async getQuarantinedStreams (room) {
+  async getQuarantineStreams (room) {
     const pattern = `${this.prefix}:quarantine_room:${encodeURIComponent(room.org)}:${encodeURIComponent(room.docid)}:${encodeURIComponent(room.branch)}:*`
     const keys = await this.redis.keys(pattern)
     return keys.map(k => k.slice(k.lastIndexOf(':') + 1))
+  }
+
+  /**
+   * List every quarantine stream across all rooms.
+   *
+   * @returns {Promise<Array<{ room: t.Room, qid: string }>>}
+   */
+  async getAllQuarantineStreams () {
+    const keys = await this.redis.keys(`${this.prefix}:quarantine_room:*`)
+    return keys.map(k => {
+      const m = k.match(/^.*:quarantine_room:([^:]+):([^:]+):([^:]+):([^:]+)$/)
+      if (m == null) throw new Error(`Malformed quarantine key: ${k}`)
+      return {
+        room: { org: decodeURIComponent(m[1]), docid: decodeURIComponent(m[2]), branch: decodeURIComponent(m[3]) },
+        qid: m[4]
+      }
+    })
   }
 
   /**

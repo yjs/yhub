@@ -8,7 +8,7 @@
 
 - **Stream quarantine API.** Three new methods on `Stream` for operationally isolating a room whose updates repeatedly fail to compact, without taking the room offline:
   - `stream.quarantine(room)` — atomically renames the live Redis stream to `{prefix}:quarantine_room:{org}:{docid}:{branch}:{qid}` and inserts a NOP entry into the (now empty) live key. The NOP uses a non-`m` field so every read path ignores it; its purpose is to keep the live key non-empty so a subsequent write doesn't enqueue a duplicate compact task alongside the pre-quarantine one. Returns the generated `qid`, or `null` if there is no live stream to quarantine.
-  - `stream.getQuarantinedStreams(room)` — returns the list of qids currently parked for a room.
+  - `stream.getQuarantineStreams(room)` — returns the list of qids currently parked for a room. `stream.getAllQuarantineStreams()` returns `{room, qid}` pairs across every room.
   - `stream.unquarantine(room, qid)` — re-injects every message from the quarantined stream back into the live stream via the standard `addMessage` path (re-enqueueing the compact task if the live stream had been drained) and deletes the quarantine key. Returns the number of messages re-injected. The read + re-inject + delete is batched in a single `MULTI/EXEC`; quarantined streams are read-only by convention, so nothing writes between the XRANGE and the DEL.
 
 ## [0.2.12] - 2026-03-18

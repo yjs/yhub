@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.17] - 2026-04-22
+
 ### New Features
 
 - **Stream quarantine API.** Three new methods on `Stream` for operationally isolating a room whose updates repeatedly fail to compact, without taking the room offline:

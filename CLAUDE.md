@@ -41,6 +41,8 @@ npm run debug:test     # Tests with --inspect-brk
 
 Environment variables needed for tests: `REDIS`, `POSTGRES`, `S3_ENDPOINT`, `S3_PORT`, `S3_SSL`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_YHUB_TEST_BUCKET`. See `.env.template`.
 
+**When writing or running tests, use the `lib0-testing` skill** for guidance on the `lib0/testing` and `lib0/prng` APIs, test structure, fuzz/property-based testing patterns, and runner setup.
+
 ## Architecture
 
 ### Components

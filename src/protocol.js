@@ -13,6 +13,12 @@ export const messageSyncStep2 = 1
 export const messageSyncUpdate = 2
 
 /**
+ * Merge a batch of raw awareness updates into a single wire-format awareness message.
+ *
+ * Encodes from `aw.meta.keys()` rather than `aw.states.keys()` so that clients removed
+ * via a `state=null` entry are still emitted (with `state=null`). Using `states.keys()`
+ * would silently drop disconnect signals, leaving ghost cursors on receiving pods.
+ *
  * @param {Array<Uint8Array>} ms
  */
 export const mergeAwarenessUpdates = ms => {
@@ -20,7 +26,7 @@ export const mergeAwarenessUpdates = ms => {
   ms.forEach(m => {
     awarenessProtocol.applyAwarenessUpdate(aw, m, null)
   })
-  const awBin = encodeAwareness(aw, array.from(aw.states.keys()))
+  const awBin = encodeAwareness(aw, array.from(aw.meta.keys()))
   aw.doc.destroy()
   aw.destroy()
   return awBin

@@ -1,5 +1,6 @@
 import * as t from 'lib0/testing'
 import * as promise from 'lib0/promise'
+import * as encoding from 'lib0/encoding'
 import * as utils from './utils.js'
 
 /**
@@ -52,6 +53,40 @@ export const testSyncAndCleanup = async tc => {
   t.info('map retrieved')
   // should delete old references
   t.assert(references2.length === 1 * 2)
+}
+
+/**
+ * A disconnect awareness update (state=null) seeded in the Redis stream must be
+ * delivered to a freshly connecting client. Previously `mergeAwarenessUpdates`
+ * encoded from `aw.states.keys()`, which dropped removed clients on the floor and
+ * left ghost cursors on receiving pods.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testAwarenessDisconnectDeliveredOnConnect = async tc => {
+  const { createWsClient, yhub, defaultRoom } = await utils.createTestCase(tc)
+  const fakeClientid = 0xfeed
+  /**
+   * @param {number} clientid
+   * @param {number} clock
+   * @param {any} state
+   */
+  const encodeOneEntry = (clientid, clock, state) => encoding.encode(encoder => {
+    encoding.writeVarUint(encoder, 1)
+    encoding.writeVarUint(encoder, clientid)
+    encoding.writeVarUint(encoder, clock)
+    encoding.writeVarString(encoder, JSON.stringify(state))
+  })
+  // fake client appears with a state, then disconnects
+  await yhub.stream.addMessage(defaultRoom, { type: 'awareness:v1', update: encodeOneEntry(fakeClientid, 1, { user: 'alice' }) })
+  await yhub.stream.addMessage(defaultRoom, { type: 'awareness:v1', update: encodeOneEntry(fakeClientid, 2, null) })
+
+  const { provider } = await createWsClient({ waitForSync: true })
+  await promise.wait(200) // give the awareness snapshot a moment to be applied
+
+  t.assert(!provider.awareness.states.has(fakeClientid), 'disconnected client absent from awareness.states')
+  const meta = provider.awareness.meta.get(fakeClientid)
+  t.assert(meta?.clock === 2, 'disconnect recorded in awareness.meta with preserved clock')
 }
 
 /**

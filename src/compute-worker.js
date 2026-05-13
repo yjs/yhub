@@ -1,10 +1,14 @@
 import { parentPort } from 'node:worker_threads'
 import * as Y from '@y/y'
+import * as env from 'lib0/environment'
 import * as time from 'lib0/time'
 import * as encoding from 'lib0/encoding'
+import { ynMergeUpdates } from './yn.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'compute-worker' })
+
+const mergeUpdates = env.hasConf('use-y-crdt') ? ynMergeUpdates : Y.mergeUpdates
 
 if (parentPort == null) {
   throw new Error('Unable to run node worker!')
@@ -80,7 +84,7 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       break
     }
     case 'mergeUpdates': {
-      const result = Y.mergeUpdates(msg.updates)
+      const result = mergeUpdates(msg.updates)
       port.postMessage(result, [result.buffer])
       break
     }

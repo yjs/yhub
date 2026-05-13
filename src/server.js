@@ -4,6 +4,7 @@ import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 import * as promise from 'lib0/promise'
 import * as Y from '@y/y'
+import * as env from 'lib0/environment'
 import * as s from 'lib0/schema'
 import * as time from 'lib0/time'
 import * as number from 'lib0/number'
@@ -11,9 +12,12 @@ import * as t from './types.js'
 import * as protocol from './protocol.js'
 import * as math from 'lib0/math'
 import * as buffer from 'lib0/buffer'
+import { ynMergeUpdates } from './yn.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'ws' })
+
+const mergeUpdates = env.hasConf('use-y-crdt') ? ynMergeUpdates : Y.mergeUpdates
 
 /**
  * @param {Y.ContentIds} contentids
@@ -553,7 +557,7 @@ class WSUser {
       })
       // @todo send this as a single update message
       if (ydocUpdates.length > 0) {
-        this.sendData(protocol.encodeSyncUpdate(Y.mergeUpdates(ydocUpdates)))
+        this.sendData(protocol.encodeSyncUpdate(mergeUpdates(ydocUpdates)))
       }
       if (awarenessUpdates.length > 0) {
         this.sendData(protocol.mergeAwarenessUpdates(awarenessUpdates))

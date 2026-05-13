@@ -18,6 +18,7 @@
     "dist": "npm run types",
     "types": "tsc --skipLibCheck",
     "lint": "standard && tsc --skipLibCheck",
+    "build:yn": "scripts/build-yn.sh",
     "test": "sh -c 'FORCE_COLOR=true node --expose-gc --max-old-space-size=8192 --env-file .env $(test -f .env.testing && echo --env-file .env.testing) tests/index.js \"$@\" | pino-pretty -S -L debug' --",
     "debug:test": "sh -c 'FORCE_COLOR=true node --expose-gc --max-old-space-size=8192 --env-file .env $(test -f .env.testing && echo --env-file .env.testing) --inspect-brk tests/index.js \"$@\" | pino-pretty -S' --",
     "preversion": "npm run lint && npm run dist",
@@ -71,7 +72,8 @@
     "pino": "^10.3.1",
     "postgres": "^3.4.3",
     "redis": "^5.10.0",
-    "uws": "github:uNetworking/uWebSockets.js#v20.57.0"
+    "uws": "github:uNetworking/uWebSockets.js#v20.57.0",
+    "yn": "github:y-crdt/yn"
   },
   "engines": {
     "npm": ">=8.0.0",

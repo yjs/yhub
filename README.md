@@ -368,6 +368,67 @@ I'm looking for sponsors that want to sponsor the following work:
 If you are interested in sponsoring some of this work, please send a mail to
 <kevin.jahns at pm.me>.
 
+## Experimental: native merge via yrs (y-crdt/yn)
+
+> :warning: **Highly experimental.** Off by default. Do not enable in production.
+
+y/hub can optionally use [y-crdt/yn](https://github.com/y-crdt/yn) — a thin
+Node.js binding (via [neon](https://neon-rs.dev/)) over [yrs](https://github.com/y-crdt/y-crdt),
+the Rust port of Yjs — to perform `mergeUpdates` natively instead of in
+JavaScript. This is intended for benchmarking the merge hot path; everything
+else (sync protocol, attribution metadata, delta/changeset computation,
+awareness, snapshots, undo) continues to run on `@y/y`.
+
+**Scope.** Only the three `Y.mergeUpdates` call sites are affected:
+
+- the inline fast path on the main thread (`src/compute.js`)
+- the worker-thread merge task (`src/compute-worker.js`)
+- the WebSocket sync fan-out (`src/server.js`)
+
+When the flag is off, behavior is unchanged — the `yn` module is not even
+loaded.
+
+**Caveats.**
+
+- Upstream y-crdt/yn has no npm release, no prebuilt binaries, and exposes a
+  single function (`applyUpdates(gc, updates)`). v2 update encoding is not
+  supported.
+- Protocol compatibility between yrs and `@y/y` 14's attribution-laden updates
+  is **not verified**. Updates may round-trip incorrectly. Test against your
+  workload before drawing any conclusions.
+- The native binary must be rebuilt after every `npm install` (npm wipes
+  `node_modules/yn/` and upstream has no `prepare` script).
+
+### Build the native binding
+
+Requires [Rust](https://rustup.rs/) ≥ 1.85 (edition 2024) and `git`:
+
+```bash
+npm run build:yn
+```
+
+This clones `y-crdt/yn`, runs `cargo build --release` + `neon dist`, and
+installs the resulting `index.node` into `node_modules/yn/`. Override the
+upstream ref with `YN_REF=<branch|tag|sha> npm run build:yn`.
+
+### Run with native merge enabled
+
+After the standard setup (see the **Integration Guide** above), set
+`USE_Y_CRDT=1` in your environment (or pass `--use-y-crdt` on the CLI):
+
+```bash
+# one-off
+USE_Y_CRDT=1 node --env-file .env ./bin/yhub.js
+
+# or in your .env (or .env.testing)
+echo 'USE_Y_CRDT=1' >> .env
+npm run start:server
+```
+
+The flag is read via `lib0/environment.hasConf`, so both `USE_Y_CRDT=…` and
+`--use-y-crdt` work. Server and worker each evaluate the flag independently;
+set it for both processes if you want native merges everywhere.
+
 # Quick Start (standalone Docker)
 
 The fastest way to try y/hub. A single container runs PostgreSQL, Valkey

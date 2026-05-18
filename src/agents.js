@@ -59,9 +59,9 @@ export const agentTask = async (
   { clearAwareness = 0, author, displayedAuthor = author, promptBy, customAttributions = [] } = /** @type {AgentTaskOptions} */ ({}),
   handler
 ) => {
-  const doctable = await yhub.getDoc(room, { nongc: true })
+  const doctable = await yhub.getDoc(room, { gc: true })
   const ydoc = new Y.Doc()
-  if (doctable.nongcDoc) Y.applyUpdate(ydoc, doctable.nongcDoc)
+  if (doctable.gcDoc) Y.applyUpdate(ydoc, doctable.gcDoc)
   const awareness = new awarenessProtocol.Awareness(ydoc)
   const mergedAttrs = promptBy != null ? customAttributions.concat([{ k: 'promptBy', v: promptBy }]) : customAttributions
   /** @type {Error | null} */

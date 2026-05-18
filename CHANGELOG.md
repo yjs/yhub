@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### New Features
+
+- **`yhub.agentTask(room, opts, handler)`** — new import-API method for running LLM agent tasks against a room. The handler receives a freshly hydrated `Y.Doc` (gc'd snapshot of the room's current state) and an `Awareness` instance bound to it; edits to either are streamed live to all connected clients with attribution. Options: `author` (user-id, mapped to `insert`/`delete` content attributes), `displayedAuthor` (awareness `user.name`, defaults to `author`, never recorded in the contentmap), `promptBy` (sugar for `customAttributions: [{ k: 'promptBy', v: promptBy }]`), `customAttributions` (full `Array<{ k, v }>` matching the WS/REST shape), and `clearAwareness` (seconds — `0` = clear immediately on exit, `false` = leave in place; errors always clear immediately). The returned promise resolves only after the awareness disconnect has been broadcast. Errors from the handler or from stream forwarding are surfaced to the caller. ([`src/agents.js`](src/agents.js), [API docs](API.md#yhubagenttaskroom-opts-handler))
+- **`PATCH /ydoc/{org}/{docid}` awareness support.** Body shape is now `{ update?, awareness?, customAttributions? }` with both `update` and `awareness` optional (at least one required). `awareness` carries bare `encodeAwarenessUpdate(...)` bytes — the same format the WS path puts on the stream — and is distributed to all connected clients through the same Redis channel. `customAttributions` only applies to `update`. ([API docs](API.md#patch-ydocorgdocid), [`src/server.js`](src/server.js))
+- **`GET /ydoc/{org}/{docid}?awareness=true`.** Returns `{ doc, awareness? }` with `awareness` as the merged room awareness in bare-bytes format — round-trippable through PATCH and directly consumable by `applyAwarenessUpdate`. Omitted when the room has no awareness state. Default response shape (no flag) is unchanged. ([API docs](API.md#get-ydocorgdocid), [`src/server.js`](src/server.js))
+
+### Bug Fixes
+
+- **Strip phantom local client in `mergeAwarenessUpdates`.** The y-protocols `Awareness` constructor seeds its own `clientID` via `setLocalState({})`, which leaked as a phantom empty-state client to every consumer of the merged bytes (WS initial sync, GET `/ydoc?awareness=true`). The merger now removes its own clientID before encoding, so the `byteLength > 3` "empty awareness" check on the WS initial-sync path is now actually correct. ([`src/protocol.js`](src/protocol.js))
+
 ## [0.2.18] - 2026-04-22
 
 ### New Features

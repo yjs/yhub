@@ -142,6 +142,7 @@ export const createYHubServer = async (yhub, conf) => {
   app.get('/ydoc/:org/:docid', async (res, req) => {
     const room = reqToRoom(req)
     const gc = req.getQuery('gc') !== 'false'
+    const includeAwareness = req.getQuery('awareness') === 'true'
     log.debug({ endpoint: 'GET /ydoc', room }, 'api request')
     let aborted = false
     res.onAborted(() => {
@@ -153,11 +154,21 @@ export const createYHubServer = async (yhub, conf) => {
       return
     }
     try {
-      const { gcDoc, nongcDoc } = await yhub.getDoc(room, { gc, nongc: !gc }, { gcOnMerge: false })
+      const { gcDoc, nongcDoc, awareness } = await yhub.getDoc(room, { gc, nongc: !gc, awareness: includeAwareness }, { gcOnMerge: false })
       const ydoc = gcDoc || nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
       if (aborted) return
+      /** @type {{ doc: Uint8Array, awareness?: Uint8Array }} */
+      const body = { doc: ydoc }
+      // mergeAwarenessUpdates returns wire-format (messageAwareness uint + varUint8Array).
+      // Strip the wrapper so the caller gets bare bytes consumable by applyAwarenessUpdate
+      // and by the PATCH /ydoc `awareness` field.
+      if (awareness != null && awareness.byteLength > 3) {
+        const dec = decoding.createDecoder(awareness)
+        decoding.readVarUint(dec)
+        body.awareness = decoding.readVarUint8Array(dec)
+      }
       const encoder = encoding.createEncoder()
-      encoding.writeAny(encoder, { doc: ydoc })
+      encoding.writeAny(encoder, body)
       const response = encoding.toUint8Array(encoder)
       res.cork(() => {
         setCorsHeaders(res)

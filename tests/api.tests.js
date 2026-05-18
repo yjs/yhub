@@ -11,6 +11,7 @@ import * as math from 'lib0/math'
 import * as fs from 'node:fs'
 import * as prng from 'lib0/prng'
 import * as buffer from 'lib0/buffer'
+import * as awarenessProtocol from '@y/protocols/awareness'
 
 /**
  * @param {string} path
@@ -610,6 +611,58 @@ export const testPatchEmptyBodyIs400 = async tc => {
   const { ydoc } = await createWsClient({ waitForSync: true, syncAwareness: false })
   const res = await patchYhubRequest(`/ydoc/${org}/${ydoc.guid}`, {})
   t.assert(res.error === 'Invalid request body', `expected 400 error body, got ${JSON.stringify(res)}`)
+}
+
+/**
+ * GET /ydoc with `?awareness=true` returns the room's merged awareness state as
+ * bare bytes that are directly consumable by `applyAwarenessUpdate` (and round-
+ * trippable through PATCH).
+ *
+ * @param {t.TestCase} tc
+ */
+export const testGetYdocWithAwareness = async tc => {
+  const { org, defaultRoom } = await utils.createTestCase(tc)
+  const fakeClientid = 0xabba
+  // Seed awareness via the already-validated PATCH path.
+  await patchYhubRequest(`/ydoc/${org}/${defaultRoom.docid}`, {
+    awareness: encodeOneEntry(fakeClientid, 1, { user: 'alice' })
+  })
+  const res = await fetchYhubResponse(`/ydoc/${org}/${defaultRoom.docid}?awareness=true`)
+  t.assert(res.doc instanceof Uint8Array, 'doc returned as Uint8Array')
+  t.assert(res.awareness instanceof Uint8Array, 'awareness returned as Uint8Array')
+  // Confirm the bytes are bare-format by feeding them directly to applyAwarenessUpdate.
+  const testAw = new awarenessProtocol.Awareness(new Y.Doc())
+  awarenessProtocol.applyAwarenessUpdate(testAw, res.awareness, null)
+  t.compare(testAw.states.get(fakeClientid), { user: 'alice' })
+}
+
+/**
+ * Default GET (no `awareness` flag) returns only `doc`, even when the room has
+ * awareness state — preserves the legacy response shape.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testGetYdocWithoutAwarenessFlagOmitsField = async tc => {
+  const { org, defaultRoom } = await utils.createTestCase(tc)
+  await patchYhubRequest(`/ydoc/${org}/${defaultRoom.docid}`, {
+    awareness: encodeOneEntry(0xface, 1, { user: 'someone' })
+  })
+  const res = await fetchYhubResponse(`/ydoc/${org}/${defaultRoom.docid}`)
+  t.assert(res.doc instanceof Uint8Array, 'doc returned as Uint8Array')
+  t.assert(!('awareness' in res), 'awareness field omitted without ?awareness=true')
+}
+
+/**
+ * `?awareness=true` on a room with no awareness state omits the field rather
+ * than returning the empty-marker bytes.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testGetYdocEmptyAwarenessOmitsField = async tc => {
+  const { org, defaultRoom } = await utils.createTestCase(tc)
+  const res = await fetchYhubResponse(`/ydoc/${org}/${defaultRoom.docid}?awareness=true`)
+  t.assert(res.doc instanceof Uint8Array, 'doc returned as Uint8Array')
+  t.assert(!('awareness' in res), 'awareness field omitted when room has no awareness state')
 }
 
 // /**

@@ -23,6 +23,11 @@ export const messageSyncUpdate = 2
  */
 export const mergeAwarenessUpdates = ms => {
   const aw = new awarenessProtocol.Awareness(new Y.Doc())
+  // The Awareness constructor seeds `setLocalState({})` for its own clientID,
+  // which would leak as a phantom client to every consumer of the merged bytes.
+  // Strip it so the merged update reflects only the input messages.
+  aw.states.delete(aw.clientID)
+  aw.meta.delete(aw.clientID)
   ms.forEach(m => {
     awarenessProtocol.applyAwarenessUpdate(aw, m, null)
   })

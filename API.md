@@ -37,11 +37,12 @@ Retrieve and update the Yjs document via REST API.
 
 Retrieve the current state of the Yjs document.
 
-* `GET /ydoc/{org}/{docid}` parameters: `{ gc?: boolean, branch?: string }`
+* `GET /ydoc/{org}/{docid}` parameters: `{ gc?: boolean, branch?: string, awareness?: boolean }`
   * `gc=true` (default): retrieve the garbage-collected document
   * `gc=false`: retrieve the full document history (non-gc version)
   * `branch="main"` (default): the branch to retrieve
-  * Returns `{ doc: Uint8Array }` - the encoded Yjs document update
+  * `awareness=true`: also include the room's merged awareness state in the response (default: omitted)
+  * Returns `{ doc: Uint8Array, awareness?: Uint8Array }`. `doc` is the encoded Yjs document update. `awareness`, when requested and non-empty, contains the bare awareness update bytes (same format as `encodeAwarenessUpdate(...)` and as the `awareness` field accepted by `PATCH /ydoc`) — directly consumable by `applyAwarenessUpdate`. Omitted when the room has no awareness state.
 
 #### PATCH /ydoc/{org}/{docid}
 

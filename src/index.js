@@ -8,6 +8,7 @@ import * as protocol from './protocol.js'
 import * as server from './server.js'
 import * as math from 'lib0/math'
 import { createComputePool } from './compute.js'
+import { agentTask } from './agents.js'
 import { logger } from './logger.js'
 import * as time from 'lib0/time'
 
@@ -176,6 +177,17 @@ export class YHub {
     }
     const contentmap = Y.createContentMapFromContentIds(contentids, insertAttrs, deleteAttrs)
     await this.persistence.store(room, { lastClock, gcDoc: ydoc, nongcDoc: ydoc, contentids: Y.encodeContentIds(contentids), contentmap: Y.encodeContentMap(contentmap) })
+  }
+
+  /**
+   * @template R
+   * @param {t.Room} room
+   * @param {import('./agents.js').AgentTaskOptions} opts
+   * @param {(ydoc: Y.Doc, awareness: import('@y/protocols/awareness').Awareness) => Promise<R> | R} handler
+   * @returns {Promise<R>}
+   */
+  agentTask (room, opts, handler) {
+    return agentTask(this, room, opts, handler)
   }
 }
 

@@ -299,3 +299,47 @@ await yhub.unsafePersistDoc(
   { by: 'import-script' }
 )
 ```
+
+#### `yhub.agentTask(room, opts, handler)`
+
+Run an LLM agent task against a room. The handler receives a freshly hydrated `Y.Doc` (snapshot of the room's current state) and a new `Awareness` instance bound to it. Edits made inside the handler are streamed to all connected clients in real time with attribution derived from the options. The returned promise resolves with the handler's return value **only after** the agent's awareness has been cleared.
+
+```ts
+yhub.agentTask(
+  room: { org: string, docid: string, branch: string },
+  opts: {
+    author?: string,             // user-id recorded as `insert` / `delete`
+    displayedAuthor?: string,    // awareness `user.name` (defaults to `author`)
+    promptBy?: string,           // sugar for customAttributions: [{ k: 'promptBy', v: promptBy }]
+    customAttributions?: Array<{ k: string, v: string }>,
+    clearAwareness?: number | false  // seconds; 0 = immediate (default); false = leave in place
+  },
+  handler: (ydoc: Y.Doc, awareness: Awareness) => Promise<R> | R
+): Promise<R>
+```
+
+Behavior:
+
+* The handler's `ydoc` is a snapshot at task start; concurrent edits from other clients during the task are **not** merged back in. The handler's own edits are still distributed live.
+* `author` flows into the standard `insert` / `delete` content attributions, the same way the authenticated user-id does on the WS and REST paths. `customAttributions` entries become `insert:${k}` / `delete:${k}` attributions, matching the `customAttributions` shape accepted by `PATCH /ydoc` and the WebSocket query param. `promptBy` is sugar for one such entry and is merged with any explicit `customAttributions`.
+* `displayedAuthor` is pre-seeded into the agent's awareness as `{ user: { name: displayedAuthor } }` so other clients can render the agent (cursor labels, presence panels). It is **never** recorded in the contentmap. The handler can replace or augment it with `awareness.setLocalState(...)`.
+* On success, awareness is cleared after `clearAwareness` seconds (default `0` = immediately; `false` = don't clear). On any error — from the handler or from the underlying stream forwarding — awareness is cleared **immediately** regardless of `clearAwareness`, and the error is re-thrown from the returned promise.
+
+**Example**
+
+```js
+await yhub.agentTask(
+  { org: 'my-org', docid: 'my-doc', branch: 'main' },
+  {
+    author: 'agent-user-id',
+    displayedAuthor: 'Claude',
+    promptBy: 'kevin-user-id',
+    customAttributions: [{ k: 'model', v: 'opus-4.7' }],
+    clearAwareness: 20
+  },
+  async (ydoc, awareness) => {
+    // awareness already advertises { user: { name: 'Claude' } }
+    ydoc.get().applyDelta(delta.create().insert('Hello from the agent').done())
+  }
+)
+```

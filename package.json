@@ -1,6 +1,6 @@
 {
   "name": "@y/hub",
-  "version": "0.2.18",
+  "version": "0.2.19",
   "description": "Scalable websocket provider for Yjs",
   "sideEffects": false,
   "type": "module",
@@ -65,8 +65,8 @@
   },
   "dependencies": {
     "@y/protocols": "^1.0.6-rc.1",
-    "@y/y": "^14.0.0-rc.9",
-    "lib0": "^1.0.0-rc.5",
+    "@y/y": "^14.0.0-rc.16",
+    "lib0": "^1.0.0-rc.13",
     "minio": "^8.0.6",
     "pino": "^10.3.1",
     "postgres": "^3.4.3",

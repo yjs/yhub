@@ -530,6 +530,88 @@ export const testWorkerTasksCleanup = async tc => {
   t.assert(remainingTasks === 0, 'expected all tasks to be processed')
 }
 
+/**
+ * Build a raw awareness wire update for a single entry. Mirrors the encoding
+ * `encodeAwarenessUpdate` produces for one client, so we can drive the PATCH
+ * endpoint without spinning up an Awareness instance.
+ *
+ * @param {number} clientid
+ * @param {number} clock
+ * @param {any} state
+ */
+const encodeOneEntry = (clientid, clock, state) => encoding.encode(encoder => {
+  encoding.writeVarUint(encoder, 1)
+  encoding.writeVarUint(encoder, clientid)
+  encoding.writeVarUint(encoder, clock)
+  encoding.writeVarString(encoder, JSON.stringify(state))
+})
+
+/**
+ * PATCH with only an `awareness` field (no `update`) distributes the awareness
+ * state to connected WS clients. A follow-up PATCH carrying a state=null entry
+ * removes the client from `states` while preserving the bumped clock in `meta`.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testPatchAwarenessOnly = async tc => {
+  const { org, createWsClient } = await utils.createTestCase(tc)
+  const { ydoc, provider } = await createWsClient({ waitForSync: true })
+  const fakeClientid = 0xfeed
+
+  const presentRes = await patchYhubRequest(`/ydoc/${org}/${ydoc.guid}`, {
+    awareness: encodeOneEntry(fakeClientid, 1, { user: 'alice' })
+  })
+  t.assert(presentRes.success === true, 'awareness-only PATCH succeeded')
+  await promise.wait(200)
+  t.compare(provider.awareness.states.get(fakeClientid), { user: 'alice' })
+
+  const disconnectRes = await patchYhubRequest(`/ydoc/${org}/${ydoc.guid}`, {
+    awareness: encodeOneEntry(fakeClientid, 2, null)
+  })
+  t.assert(disconnectRes.success === true, 'awareness disconnect PATCH succeeded')
+  await promise.wait(200)
+  t.assert(!provider.awareness.states.has(fakeClientid), 'disconnected client absent from states')
+  t.assert(provider.awareness.meta.get(fakeClientid)?.clock === 2, 'disconnect clock recorded in meta')
+}
+
+/**
+ * A single PATCH carrying both `update` and `awareness` delivers both to
+ * connected WS clients.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testPatchUpdateAndAwarenessTogether = async tc => {
+  const { org, createWsClient } = await utils.createTestCase(tc)
+  const { ydoc, provider } = await createWsClient({ waitForSync: true })
+
+  const local = new Y.Doc({ guid: ydoc.guid })
+  local.get().applyDelta(delta.create().insert('hi').done())
+  const update = Y.encodeStateAsUpdate(local)
+  const fakeClientid = 0xbeef
+
+  const res = await patchYhubRequest(`/ydoc/${org}/${ydoc.guid}`, {
+    update,
+    awareness: encodeOneEntry(fakeClientid, 1, { user: 'bob' })
+  })
+  t.assert(res.success === true, 'combined PATCH succeeded')
+  await promise.wait(500)
+
+  t.compare(ydoc.get().toDelta(), delta.create(delta.$deltaAny).insert('hi'))
+  t.compare(provider.awareness.states.get(fakeClientid), { user: 'bob' })
+}
+
+/**
+ * PATCH with neither `update` nor `awareness` is rejected.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testPatchEmptyBodyIs400 = async tc => {
+  const { org, createWsClient } = await utils.createTestCase(tc)
+  const { ydoc } = await createWsClient({ waitForSync: true, syncAwareness: false })
+  const res = await patchYhubRequest(`/ydoc/${org}/${ydoc.guid}`, {})
+  t.assert(res.error === 'Invalid request body', `expected 400 error body, got ${JSON.stringify(res)}`)
+}
+
 // /**
 //  * Regression test: uploading a specific problematic ydoc+contentmap combination and calling the
 //  * activity API with delta=true and group=false previously caused errors.

@@ -47,14 +47,14 @@ Retrieve the current state of the Yjs document.
 
 Update the Yjs document with new changes. Requires write access.
 
-* `PATCH /ydoc/{org}/{docid}` body: `{ update: Uint8Array, customAttributions?: Array<{ k: string, v: string }> }` parameters: `{ branch?: string }`
-  * `update`: a Yjs update (encoded via `Y.encodeStateAsUpdate` or similar)
+* `PATCH /ydoc/{org}/{docid}` body: `{ update?: Uint8Array, awareness?: Uint8Array, customAttributions?: Array<{ k: string, v: string }> }` parameters: `{ branch?: string }`
+  * `update`: optional Yjs update (encoded via `Y.encodeStateAsUpdate` or similar). Diffed against the current document state — only new content is applied and attributed. Attributions are automatically assigned to the authenticated user.
+  * `awareness`: optional awareness update bytes — the bare output of `encodeAwarenessUpdate(awareness, clientIds)` from `@y/protocols/awareness` (no `messageAwareness` wire-format prefix). Distributed to connected clients through the same Redis channel the WebSocket path uses.
+  * `customAttributions`: optional array of key-value pairs to attach as custom attributions to the `update`'s changes. Stored as `insert:<key>` / `delete:<key>` attribution attributes alongside the standard ones. Has no effect when only `awareness` is supplied.
   * `branch="main"` (default): the branch to update
-  * `customAttributions`: optional array of key-value pairs to attach as custom attributions to the changes. These are stored as `insert:<key>` / `delete:<key>` attribution attributes alongside the standard ones.
-  * The update is diffed against the current document state - only new content is applied and attributed
-  * Attributions are automatically assigned to the authenticated user
-  * Changes are distributed to connected WebSocket clients
-  * Returns `{ success: true, message: string }` on success
+  * At least one of `update` or `awareness` must be present; an empty body returns `400 Bad Request`.
+  * Changes are distributed to connected WebSocket clients.
+  * Returns `{ success: true, message: string }` on success.
 
 #### Example
 

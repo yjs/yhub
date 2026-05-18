@@ -195,19 +195,24 @@ export const createYHubServer = async (yhub, conf) => {
       try {
         const decoder = decoding.createDecoder(buffer)
         const decodedBody = decoding.readAny(decoder)
-        if (s.$object({ update: s.$uint8Array, customAttributions: s.$array(s.$object({ k: s.$string, v: s.$string })).optional }).check(decodedBody)) {
-          const { update, customAttributions = [] } = decodedBody
-          // Get current document state to diff against
-          const { gcDoc, nongcDoc } = await yhub.getDoc(room, { gc: true, nongc: false }, { gcOnMerge: false })
-          const currentDoc = gcDoc || nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
-          const result = await yhub.computePool.patchYdoc({
-            update,
-            currentDoc,
-            userid: authResult.authInfo.userid,
-            customAttributions
-          }, { room })
-          if (result != null) {
-            await yhub.stream.addMessage(room, { type: 'ydoc:update:v1', contentmap: result.contentmap, update: result.update })
+        if (s.$object({ update: s.$uint8Array.optional, awareness: s.$uint8Array.optional, customAttributions: s.$array(s.$object({ k: s.$string, v: s.$string })).optional }).check(decodedBody) && (decodedBody.update != null || decodedBody.awareness != null)) {
+          const { update, awareness, customAttributions = [] } = decodedBody
+          if (update != null) {
+            // Get current document state to diff against
+            const { gcDoc, nongcDoc } = await yhub.getDoc(room, { gc: true, nongc: false }, { gcOnMerge: false })
+            const currentDoc = gcDoc || nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
+            const result = await yhub.computePool.patchYdoc({
+              update,
+              currentDoc,
+              userid: authResult.authInfo.userid,
+              customAttributions
+            }, { room })
+            if (result != null) {
+              await yhub.stream.addMessage(room, { type: 'ydoc:update:v1', contentmap: result.contentmap, update: result.update })
+            }
+          }
+          if (awareness != null) {
+            await yhub.stream.addMessage(room, { type: 'awareness:v1', update: awareness })
           }
           if (!aborted) {
             const encoder = encoding.createEncoder()

@@ -21,6 +21,10 @@ const $computeTask = s.$union(
     updates: s.$array(s.$uint8Array)
   }),
   s.$object({
+    type: s.$literal('computeStateVector'),
+    update: s.$uint8Array
+  }),
+  s.$object({
     type: s.$literal('changeset'),
     nongcDoc: s.$uint8Array,
     contentmapBin: s.$uint8Array,
@@ -271,6 +275,27 @@ class ComputePool {
       return promise.resolveWith(Y.mergeUpdates(updates))
     }
     return this.run({ type: 'mergeUpdates', updates }, [], logContext)
+  }
+
+  /**
+   * Computes the state vector from an encoded update.
+   *
+   * `encodeStateVectorFromUpdate` is a full linear scan of the update binary
+   * (measured at ~30-40 MB/s), so it runs synchronously for updates < 512kb
+   * (under ~15ms). Larger updates are offloaded to a worker. The buffer can't
+   * be transferred (the caller reuses it for syncStep2), so the main thread
+   * still pays a structured-clone copy on postMessage — but that copy is
+   * ~32x cheaper than the scan (e.g. ~0.8ms vs ~25ms for a 1mb update).
+   *
+   * @param {Uint8Array<ArrayBuffer>} update
+   * @param {Object<string, any>} logContext
+   * @returns {Promise<Uint8Array<ArrayBuffer>>}
+   */
+  computeStateVector (update, logContext = {}) {
+    if (update.byteLength < 512 * 1024) {
+      return promise.resolveWith(Y.encodeStateVectorFromUpdate(update))
+    }
+    return this.run({ type: 'computeStateVector', update }, [], logContext)
   }
 
   /**

@@ -667,9 +667,10 @@ const registerWebsocketServer = (yhub, app) => {
       try {
         const doctable = await yhub.getDoc(user.room, { gc: user.gc, nongc: !user.gc, awareness: true }, { gcOnMerge: false })
         const ydoc = doctable.gcDoc || doctable.nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
+        const sv = await yhub.computePool.computeStateVector(ydoc, { room: user.room })
         if (user.isClosed) return
         ws.cork(() => {
-          user.sendData(protocol.encodeSyncStep1(Y.encodeStateVectorFromUpdate(ydoc)))
+          user.sendData(protocol.encodeSyncStep1(sv))
           user.sendData(protocol.encodeSyncStep2(ydoc))
           user.log.debug('sent syncstep2 to client')
           const aw = doctable.awareness

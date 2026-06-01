@@ -84,6 +84,11 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       port.postMessage(result, [result.buffer])
       break
     }
+    case 'computeStateVector': {
+      const result = Y.encodeStateVectorFromUpdate(msg.update)
+      port.postMessage(result, [result.buffer])
+      break
+    }
     case 'changeset': {
       const { nongcDoc: nongcDocBin, contentmapBin, from, to, by, withCustomAttributions, includeYdoc, includeDelta, includeAttributions } = msg
       const contentmap = Y.decodeContentMap(contentmapBin)

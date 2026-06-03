@@ -554,7 +554,7 @@ class WSUser {
       })
       // @todo send this as a single update message
       if (ydocUpdates.length > 0) {
-        this.sendData(protocol.encodeSyncUpdate(mergeUpdates(ydocUpdates)))
+        this.sendData(protocol.encodeSyncUpdate(mergeUpdates(false, ydocUpdates)))
       }
       if (awarenessUpdates.length > 0) {
         this.sendData(protocol.mergeAwarenessUpdates(awarenessUpdates))

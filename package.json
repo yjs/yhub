@@ -64,6 +64,7 @@
     ]
   },
   "dependencies": {
+    "@y-crdt/yn": "^0.1.2",
     "@y/protocols": "^1.0.6-rc.1",
     "@y/y": "^14.0.0-rc.16",
     "lib0": "^1.0.0-rc.13",
@@ -71,8 +72,7 @@
     "pino": "^10.3.1",
     "postgres": "^3.4.3",
     "redis": "^5.10.0",
-    "uws": "github:uNetworking/uWebSockets.js#v20.57.0",
-    "yn": "@y-crdt/yn"
+    "uws": "github:uNetworking/uWebSockets.js#v20.57.0"
   },
   "engines": {
     "npm": ">=8.0.0",

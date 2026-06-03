@@ -1,14 +1,11 @@
 import { parentPort } from 'node:worker_threads'
 import * as Y from '@y/y'
-import * as env from 'lib0/environment'
 import * as time from 'lib0/time'
 import * as encoding from 'lib0/encoding'
-import { ynMergeUpdates } from './yn.js'
+import { mergeUpdates } from './y-utils.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'compute-worker' })
-
-const mergeUpdates = env.hasConf('use-y-crdt') ? ynMergeUpdates : Y.mergeUpdates
 
 if (parentPort == null) {
   throw new Error('Unable to run node worker!')

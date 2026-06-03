@@ -385,48 +385,33 @@ awareness, snapshots, undo) continues to run on `@y/y`.
 - the worker-thread merge task (`src/compute-worker.js`)
 - the WebSocket sync fan-out (`src/server.js`)
 
-When the flag is off, behavior is unchanged — the `yn` module is not even
-loaded.
+When the flag is off, behavior is unchanged — `mergeUpdates` resolves to
+`Y.mergeUpdates` (see `src/y-utils.js`).
 
 **Caveats.**
 
-- Upstream y-crdt/yn has no npm release, no prebuilt binaries, and exposes a
-  single function (`applyUpdates(gc, updates)`). v2 update encoding is not
-  supported.
+- `@y-crdt/yn` exposes a single function (`applyUpdates(gc, updates)`). v2
+  update encoding is not supported.
 - Protocol compatibility between yrs and `@y/y` 14's attribution-laden updates
   is **not verified**. Updates may round-trip incorrectly. Test against your
   workload before drawing any conclusions.
-- The native binary must be rebuilt after every `npm install` (npm wipes
-  `node_modules/yn/` and upstream has no `prepare` script).
-
-### Build the native binding
-
-Requires [Rust](https://rustup.rs/) ≥ 1.85 (edition 2024) and `git`:
-
-```bash
-npm run build:yn
-```
-
-This clones `y-crdt/yn`, runs `cargo build --release` + `neon dist`, and
-installs the resulting `index.node` into `node_modules/yn/`. Override the
-upstream ref with `YN_REF=<branch|tag|sha> npm run build:yn`.
 
 ### Run with native merge enabled
 
 After the standard setup (see the **Integration Guide** above), set
-`USE_Y_CRDT=1` in your environment (or pass `--use-y-crdt` on the CLI):
+`USE_Y_NATIVE=1` in your environment (or pass `--use-y-native` on the CLI):
 
 ```bash
 # one-off
-USE_Y_CRDT=1 node --env-file .env ./bin/yhub.js
+USE_Y_NATIVE=1 node --env-file .env ./bin/yhub.js
 
 # or in your .env (or .env.testing)
-echo 'USE_Y_CRDT=1' >> .env
+echo 'USE_Y_NATIVE=1' >> .env
 npm run start:server
 ```
 
-The flag is read via `lib0/environment.hasConf`, so both `USE_Y_CRDT=…` and
-`--use-y-crdt` work. Server and worker each evaluate the flag independently;
+The flag is read via `lib0/environment.hasConf`, so both `USE_Y_NATIVE=…` and
+`--use-y-native` work. Server and worker each evaluate the flag independently;
 set it for both processes if you want native merges everywhere.
 
 # Quick Start (standalone Docker)

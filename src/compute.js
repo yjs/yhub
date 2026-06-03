@@ -4,14 +4,11 @@ import * as time from 'lib0/time'
 import * as s from 'lib0/schema'
 import * as promise from 'lib0/promise'
 import * as Y from '@y/y'
-import * as env from 'lib0/environment'
 import * as math from 'lib0/math'
-import { ynMergeUpdates } from './yn.js'
+import { mergeUpdates } from './y-utils.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'compute' })
-
-const mergeUpdates = env.hasConf('use-y-crdt') ? ynMergeUpdates : Y.mergeUpdates
 
 const workerUrl = new URL('./compute-worker.js', import.meta.url)
 

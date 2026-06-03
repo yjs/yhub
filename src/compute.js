@@ -5,6 +5,7 @@ import * as s from 'lib0/schema'
 import * as promise from 'lib0/promise'
 import * as Y from '@y/y'
 import * as math from 'lib0/math'
+import { mergeUpdates } from './y-utils.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'compute' })
@@ -13,11 +14,8 @@ const workerUrl = new URL('./compute-worker.js', import.meta.url)
 
 const $computeTask = s.$union(
   s.$object({
-    type: s.$literal('mergeUpdatesAndGc'),
-    updates: s.$array(s.$uint8Array)
-  }),
-  s.$object({
     type: s.$literal('mergeUpdates'),
+    gc: s.$boolean,
     updates: s.$array(s.$uint8Array)
   }),
   s.$object({
@@ -250,31 +248,24 @@ class ComputePool {
   }
 
   /**
-   * @param {Array<Uint8Array<ArrayBuffer>>} updates
-   * @param {Object<string, any>} logContext
-   * @returns {Promise<Uint8Array<ArrayBuffer>>}
-   */
-  mergeUpdatesAndGc (updates, logContext = {}) {
-    return this.run({ type: 'mergeUpdatesAndGc', updates }, [], logContext)
-  }
-
-  /**
    * Merges updates synchronously if there are 0-1 updates or the total size
-   * is <= 5kb. Otherwise offloads to a worker thread.
+   * is <= 5kb. Otherwise offloads to a worker thread. When `gc` is `true`,
+   * deleted content is garbage-collected.
    *
+   * @param {boolean} gc
    * @param {Array<Uint8Array<ArrayBuffer>>} updates
    * @param {Object<string, any>} logContext
    * @returns {Promise<Uint8Array<ArrayBuffer>>}
    */
-  mergeUpdates (updates, logContext = {}) {
+  mergeUpdates (gc, updates, logContext = {}) {
     let totalSize = 0
     for (let i = 0; i < updates.length; i++) {
       totalSize += updates[i].byteLength
     }
     if (totalSize <= 5120 || updates.length <= 1) {
-      return promise.resolveWith(Y.mergeUpdates(updates))
+      return promise.resolveWith(mergeUpdates(gc, updates))
     }
-    return this.run({ type: 'mergeUpdates', updates }, [], logContext)
+    return this.run({ type: 'mergeUpdates', gc, updates }, [], logContext)
   }
 
   /**

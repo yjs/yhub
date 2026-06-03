@@ -2,6 +2,7 @@ import { parentPort } from 'node:worker_threads'
 import * as Y from '@y/y'
 import * as time from 'lib0/time'
 import * as encoding from 'lib0/encoding'
+import { mergeUpdates } from './y-utils.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'compute-worker' })
@@ -67,20 +68,8 @@ const port = parentPort
 port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg => {
   log.debug({ type: msg.type }, 'new compute task')
   switch (msg.type) {
-    case 'mergeUpdatesAndGc': {
-      const ydoc = new Y.Doc()
-      ydoc.transact(() => {
-        msg.updates.forEach(/** @param {Uint8Array} update */ update => {
-          Y.applyUpdate(ydoc, update)
-        })
-      })
-      const result = Y.encodeStateAsUpdate(ydoc)
-      ydoc.destroy()
-      port.postMessage(result, [result.buffer])
-      break
-    }
     case 'mergeUpdates': {
-      const result = Y.mergeUpdates(msg.updates)
+      const result = mergeUpdates(msg.gc, msg.updates)
       port.postMessage(result, [result.buffer])
       break
     }

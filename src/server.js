@@ -11,6 +11,7 @@ import * as t from './types.js'
 import * as protocol from './protocol.js'
 import * as math from 'lib0/math'
 import * as buffer from 'lib0/buffer'
+import { mergeUpdates } from './y-utils.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'ws' })
@@ -553,7 +554,7 @@ class WSUser {
       })
       // @todo send this as a single update message
       if (ydocUpdates.length > 0) {
-        this.sendData(protocol.encodeSyncUpdate(Y.mergeUpdates(ydocUpdates)))
+        this.sendData(protocol.encodeSyncUpdate(mergeUpdates(false, ydocUpdates)))
       }
       if (awarenessUpdates.length > 0) {
         this.sendData(protocol.mergeAwarenessUpdates(awarenessUpdates))

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.21] - 2026-06-03
+
+### New Features
+
+- **Experimental native merge via yrs (`@y-crdt/yn`).** y/hub can optionally delegate `mergeUpdates` to [y-crdt/yn](https://github.com/y-crdt/yn) — a thin Node.js binding over [yrs](https://github.com/y-crdt/y-crdt), the Rust port of Yjs — instead of running it in JavaScript. **Off by default and not production-ready**; intended for benchmarking the merge hot path. Enable with `USE_Y_NATIVE=1` (or `--use-y-native`), read via `lib0/environment.hasConf`. Server and worker evaluate the flag independently. Only the three `Y.mergeUpdates` call sites are affected — the inline fast path ([`src/compute.js`](src/compute.js)), the worker-thread merge task ([`src/compute-worker.js`](src/compute-worker.js)), and the WebSocket sync fan-out ([`src/server.js`](src/server.js)); everything else (sync protocol, attribution metadata, delta/changeset computation, awareness, snapshots, undo) continues to run on `@y/y`. When the flag is off, behavior is unchanged. Caveats: `@y-crdt/yn` exposes only `applyUpdates(gc, updates)` (no v2 update encoding), and protocol compatibility between yrs and `@y/y` 14's attribution-laden updates is **not verified**. See the [README](README.md#experimental-native-merge-via-yrs-y-crdtyn) for details. ([`src/y-utils.js`](src/y-utils.js))
+
+### Internal
+
+- **Consolidated `mergeUpdates` and `mergeUpdatesAndGc`.** The compute pool's two merge entry points are now a single `mergeUpdates(gc, updates, logContext)` where `gc` selects whether deleted content is garbage-collected. The shared merge implementation lives in [`src/y-utils.js`](src/y-utils.js) and is used by both the main thread and the worker pool, so the native/JS switch applies uniformly. ([`src/compute.js`](src/compute.js), [`src/compute-worker.js`](src/compute-worker.js))
+
 ## [0.2.19] - 2026-04-22
 
 ### New Features

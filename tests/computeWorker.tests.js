@@ -14,7 +14,7 @@ export const testMergeUpdatesAndGc = async _tc => {
   Y.applyUpdate(doc2, update1)
   doc2.get('test').insert(5, ' world')
   const update2 = Y.encodeStateAsUpdate(doc2)
-  const merged = await pool.mergeUpdatesAndGc([update1, update2])
+  const merged = await pool.mergeUpdates(true, [update1, update2])
   const resultDoc = new Y.Doc()
   Y.applyUpdate(resultDoc, merged)
   t.assert(resultDoc.get('test').toString() === 'hello world')
@@ -36,7 +36,7 @@ export const testMergeUpdates = async _tc => {
   Y.applyUpdate(doc2, update1)
   doc2.get('test').insert(5, ' world')
   const update2 = Y.encodeStateAsUpdate(doc2)
-  const merged = await pool.mergeUpdates([update1, update2])
+  const merged = await pool.mergeUpdates(false, [update1, update2])
   const resultDoc = new Y.Doc()
   Y.applyUpdate(resultDoc, merged)
   t.assert(resultDoc.get('test').toString() === 'hello world')
@@ -97,7 +97,7 @@ export const testInvalidUpdate = async _tc => {
   let failed = false
   try {
     const invalidUpdate = new Uint8Array([])
-    const mergeResult = await pool.mergeUpdates([invalidUpdate, invalidUpdate])
+    const mergeResult = await pool.mergeUpdates(false, [invalidUpdate, invalidUpdate])
     console.log({ mergeResult })
   } catch (_err) {
     failed = true
@@ -107,7 +107,7 @@ export const testInvalidUpdate = async _tc => {
   const doc = new Y.Doc()
   doc.get('test').insert(0, 'still works')
   const update = Y.encodeStateAsUpdate(doc)
-  const merged = await pool.mergeUpdates([update])
+  const merged = await pool.mergeUpdates(false, [update])
   const resultDoc = new Y.Doc()
   Y.applyUpdate(resultDoc, merged)
   t.assert(resultDoc.get('test').toString() === 'still works', 'pool should recover after error')

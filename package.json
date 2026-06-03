@@ -1,6 +1,6 @@
 {
   "name": "@y/hub",
-  "version": "0.2.20",
+  "version": "0.2.21",
   "description": "Scalable websocket provider for Yjs",
   "sideEffects": false,
   "type": "module",
@@ -64,6 +64,7 @@
     ]
   },
   "dependencies": {
+    "@y-crdt/yn": "^0.1.2",
     "@y/protocols": "^1.0.6-rc.1",
     "@y/y": "^14.0.0-rc.16",
     "lib0": "^1.0.0-rc.13",

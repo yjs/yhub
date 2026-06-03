@@ -141,6 +141,7 @@ export class Stream {
       ...this.redisClientConf,
       // scripting: https://github.com/redis/node-redis/#lua-scripts
       scripts: {
+        ...this.redisClientConf.scripts,
         addMessage: redis.defineScript({
           NUMBER_OF_KEYS: 1,
           SCRIPT: `

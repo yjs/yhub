@@ -23,6 +23,10 @@ const log = logger.child({ module: 'stream' })
  */
 
 /**
+ * @typedef {Pick<ReturnType<typeof redis.createClient>, 'withTypeMapping'>} RedisReadClient
+ */
+
+/**
  * @param {t.Room} room
  * @param {string} prefix
  */
@@ -111,8 +115,7 @@ export class Stream {
      * @type {Map<string, { lastReceivedClock: string, subs: Set<StreamSubscriber> }>}
      */
     this.subUpdates = new Map()
-    const redisClientOptions = /** @type {import('@redis/client').RedisClientOptions} */ ({ ...(config.redis.clientOptions ?? {}) })
-    delete redisClientOptions.scripts
+    const redisClientOptions = config.redis.clientOptions ?? {}
     this.redisClientConf = /** @type {import('@redis/client').RedisClientOptions} */ ({
       ...redisClientOptions,
       url: config.redis.url,
@@ -273,18 +276,19 @@ export class Stream {
   /**
    * @param {Array<{room: t.Room|string, clock: string}>} rooms room-clock pairs
    * @param {object} opts
-   * @param {any} [opts.redisClient]
+   * @param {RedisReadClient} [opts.redisClient]
    * @param {boolean} [opts.blocking]
    * @return {Promise<Array<{ room: t.Room, messages: Array<t.Message & { redisClock: string }>, lastClock: string, streamName: string }>>}
    */
-  async getMessages (rooms, { redisClient = this.redis, blocking = false } = {}) {
+  async getMessages (rooms, { redisClient, blocking = false } = {}) {
     if (rooms.length === 0) {
       await promise.wait(50)
       return []
     }
     const streams = rooms.map(asset => ({ key: s.$string.check(asset.room) ? asset.room : encodeRoomName(asset.room, this.prefix), id: asset.clock || '0' }))
     log.debug({ streamCount: streams.length }, 'retrieving messages')
-    const reads = /** @type {Array<{name: Buffer, messages: Array<{id: Buffer, message: Record<string, Buffer>}>}> | null} */ (await redisClient.withTypeMapping({
+    const readClient = redisClient ?? this.redis
+    const reads = /** @type {Array<{name: Buffer, messages: Array<{id: Buffer, message: Record<string, Buffer>}>}> | null} */ (await readClient.withTypeMapping({
       [redis.RESP_TYPES.BLOB_STRING]: Buffer
     }).xRead(
       streams,

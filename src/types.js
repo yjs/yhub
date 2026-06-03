@@ -253,6 +253,12 @@ export const $config = s.$object({
      */
     cacheTtl: s.$number.optional,
     /**
+     * Additional options passed to the Redis client.
+     * Merged before YHub's required url, socket defaults, and scripts.
+     * @type {s.$Optional<s.Schema<Omit<import('@redis/client').RedisClientOptions, 'url' | 'scripts'>>>}
+     */
+    clientOptions: /** @type {s.$Optional<s.Schema<Omit<import('@redis/client').RedisClientOptions, 'url' | 'scripts'>>>} */ (s.$any.optional),
+    /**
      * Custom socket options passed to the Redis client (e.g. `{ tls: true, rejectUnauthorized: false, ca: '...' }`).
      * Merged into the default socket config (which sets connectTimeout and reconnectStrategy).
      * @type {s.$Optional<s.Schema<import('@redis/client').RedisClientOptions['socket']>>}
@@ -268,7 +274,7 @@ export const $config = s.$object({
     taskConcurrency: s.$number,
     events: s.$object({
       docUpdate: /** @type {s.$Optional<s.Schema<(doctable:DocTable<{ gc: true, nongc: true, contentmap: true, contentids: true }>) => void>>} */ (s.$function.optional),
-      taskStart: /** @type {s.$Optional<s.Schema<(event: { room: Room, timestamp: number }) => void>>} */ (s.$function.optional),
+      taskStart: /** @type {s.$Optional<s.Schema<(event: { room: Room, timestamp: number }) => void | Promise<void>>>} */ (s.$function.optional),
       taskComplete: /** @type {s.$Optional<s.Schema<(event: { room: Room, duration: number, error: Error|null }) => void>>} */ (s.$function.optional)
     }).optional
   }).nullable.optional,

@@ -111,9 +111,12 @@ export class Stream {
      * @type {Map<string, { lastReceivedClock: string, subs: Set<StreamSubscriber> }>}
      */
     this.subUpdates = new Map()
-    this.redisClientConf = {
+    const redisClientOptions = /** @type {import('@redis/client').RedisClientOptions} */ ({ ...(config.redis.clientOptions ?? {}) })
+    delete redisClientOptions.scripts
+    this.redisClientConf = /** @type {import('@redis/client').RedisClientOptions} */ ({
+      ...redisClientOptions,
       url: config.redis.url,
-      socket: {
+      socket: /** @type {import('@redis/client').RedisClientOptions['socket']} */ ({
         connectTimeout: 20000,
         /**
          * @param {number} retries
@@ -127,9 +130,10 @@ export class Stream {
           log.warn({ retries, delayMs: delay }, 'redis reconnecting')
           return delay
         },
+        ...redisClientOptions?.socket,
         ...config.redis.socket
-      }
-    }
+      })
+    })
     this.redis = redis.createClient({
       ...this.redisClientConf,
       // scripting: https://github.com/redis/node-redis/#lua-scripts
@@ -200,7 +204,7 @@ export class Stream {
     /**
      * Second instance to fetch things concurrent to the other connection.
      *
-     * @type {typeof this.redis | null}
+     * @type {ReturnType<typeof redis.createClient> | null}
      */
     this.redisSubscriptions = null
     this._subRunning = false
@@ -217,10 +221,12 @@ export class Stream {
   async _runSub () {
     if (!this._subRunning) {
       this._subRunning = true
-      if (this.redisSubscriptions === null) {
-        this.redisSubscriptions = redis.createClient(this.redisClientConf)
-        this.redisSubscriptions.on('error', /** @param {Error} err */ err => log.error({ err }, 'Redis subscription client error'))
-        await this.redisSubscriptions.connect()
+      let redisSubscriptions = this.redisSubscriptions
+      if (redisSubscriptions === null) {
+        redisSubscriptions = redis.createClient(this.redisClientConf)
+        redisSubscriptions.on('error', /** @param {Error} err */ err => log.error({ err }, 'Redis subscription client error'))
+        await redisSubscriptions.connect()
+        this.redisSubscriptions = redisSubscriptions
       }
       while (this.subs.size > 0 || this.subUpdates.size > 0) {
         // update subs
@@ -233,7 +239,7 @@ export class Stream {
         })
         this.subUpdates.clear()
         try {
-          const ms = await this.getMessages(array.from(this.subs.entries()).map(([room, s]) => ({ room, clock: s.lastReceivedClock })), { redisClient: this.redisSubscriptions, blocking: true })
+          const ms = await this.getMessages(array.from(this.subs.entries()).map(([room, s]) => ({ room, clock: s.lastReceivedClock })), { redisClient: redisSubscriptions, blocking: true })
           let nsubCounter = 0
           for (let i = 0; i < ms.length; i++) {
             const m = ms[i]
@@ -267,7 +273,7 @@ export class Stream {
   /**
    * @param {Array<{room: t.Room|string, clock: string}>} rooms room-clock pairs
    * @param {object} opts
-   * @param {typeof this.redis} [opts.redisClient]
+   * @param {any} [opts.redisClient]
    * @param {boolean} [opts.blocking]
    * @return {Promise<Array<{ room: t.Room, messages: Array<t.Message & { redisClock: string }>, lastClock: string, streamName: string }>>}
    */

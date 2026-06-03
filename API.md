@@ -179,6 +179,7 @@ const yhub = await createYHub(config)
 | `redis.taskDebounce` | `number` | no | Milliseconds before a worker picks up a compaction task. Default: 120 000 |
 | `redis.minMessageLifetime` | `number` | no | Minimum time in ms that update messages are kept in Redis streams before compaction. Default: 60 000 |
 | `redis.cacheTtl` | `number` | no | TTL in seconds for cached API responses. Default: 10 |
+| `redis.clientOptions` | `object` | no | Additional options passed to the node-redis client, e.g. `{ pingInterval: 10000 }`. YHub still controls `url` and its Lua `scripts`; `redis.socket` is merged into the final socket config. |
 | `redis.socket` | `object` | no | Custom socket options merged into the Redis client socket config. See [node-redis socket options](https://github.com/redis/node-redis/blob/master/docs/client-configuration.md#socket-options) for available options. |
 | `postgres` | `string` | yes | PostgreSQL connection string |
 | `persistence` | `PersistencePlugin[]` | yes | One or more storage plugins (e.g. `S3PersistenceV1`). At least one is required. |
@@ -189,6 +190,8 @@ const yhub = await createYHub(config)
 | `worker` | `object \| null` | no | Background compaction worker config. Set to `null` to disable. |
 | `worker.taskConcurrency` | `number` | yes* | Maximum number of compaction tasks to process in parallel |
 | `worker.events.docUpdate` | `function` | no | Called after each compaction with the merged `DocTable` |
+| `worker.events.taskStart` | `function` | no | Called before a compaction task starts. May return a promise; YHub waits for it before compacting. |
+| `worker.events.taskComplete` | `function` | no | Called after a compaction task completes or fails. |
 
 **Example: full server setup**
 
@@ -200,6 +203,8 @@ const yhub = await createYHub({
   redis: {
     url: 'redis://localhost:6379',
     prefix: 'yhub:prod',
+    // Optional: pass node-redis client options, such as keepalive PINGs.
+    // clientOptions: { pingInterval: 10000 },
     // Optional: custom socket options for TLS, etc.
     // socket: { rejectUnauthorized: false, ca: fs.readFileSync('/path/to/ca.pem', 'utf-8') }
   },

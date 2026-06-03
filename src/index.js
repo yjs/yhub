@@ -57,7 +57,7 @@ export class YHub {
           const taskLog = log.child({ taskType: task.type, room: task.room })
           if (task.type === 'compact') {
             const taskTs = time.getUnixTime()
-            this.conf.worker?.events?.taskStart?.({ room: task.room, timestamp: taskTs })
+            await this.conf.worker?.events?.taskStart?.({ room: task.room, timestamp: taskTs })
             /**
              * @type {Error | null}
              */

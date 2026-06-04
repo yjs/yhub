@@ -253,6 +253,12 @@ export const $config = s.$object({
      */
     cacheTtl: s.$number.optional,
     /**
+     * Additional options passed to the Redis client.
+     * Merged before YHub's required url and socket defaults. Custom scripts are merged with YHub scripts.
+     * @type {s.$Optional<s.Schema<Omit<import('@redis/client').RedisClientOptions, 'url'>>>}
+     */
+    clientOptions: /** @type {s.$Optional<s.Schema<Omit<import('@redis/client').RedisClientOptions, 'url'>>>} */ (s.$any.optional),
+    /**
      * Custom socket options passed to the Redis client (e.g. `{ tls: true, rejectUnauthorized: false, ca: '...' }`).
      * Merged into the default socket config (which sets connectTimeout and reconnectStrategy).
      * @type {s.$Optional<s.Schema<import('@redis/client').RedisClientOptions['socket']>>}

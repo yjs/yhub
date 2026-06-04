@@ -56,13 +56,13 @@ export class YHub {
         await promise.all(tasks.map(async task => {
           const taskLog = log.child({ taskType: task.type, room: task.room })
           if (task.type === 'compact') {
-            const taskTs = time.getUnixTime()
-            this.conf.worker?.events?.taskStart?.({ room: task.room, timestamp: taskTs })
             /**
              * @type {Error | null}
              */
             let taskErr = null
+            const taskTs = time.getUnixTime()
             try {
+              this.conf.worker?.events?.taskStart?.({ room: task.room, timestamp: taskTs })
               taskLog.info('task started')
               // execute compact task
               const d = await this.getDoc(task.room, { gc: true, nongc: true, contentmap: true, contentids: true, references: true })

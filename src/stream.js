@@ -101,6 +101,7 @@ export class Stream {
     this.cacheTtl = config.redis.cacheTtl ?? 5
     this.workerStreamName = this.prefix + ':worker'
     this.workerGroupName = this.prefix + ':worker'
+    this.compactionDisabledSetName = this.prefix + ':compaction_disabled'
     this._destroyed = false
     /**
      * lastReceivedId: the last id we received. Next time we fetch we will request lastReceivedId+1.
@@ -145,7 +146,7 @@ export class Stream {
         addMessage: redis.defineScript({
           NUMBER_OF_KEYS: 1,
           SCRIPT: `
-            if redis.call("EXISTS", KEYS[1]) == 0 then
+            if redis.call("EXISTS", KEYS[1]) == 0 and redis.call("SISMEMBER", "${this.compactionDisabledSetName}", KEYS[1]) == 0 then
               redis.call("XADD", "${this.workerStreamName}", "*", "compact", KEYS[1])
               redis.call("XREADGROUP", "GROUP", "${this.workerGroupName}", "pending", "COUNT", 1, "STREAMS", "${this.workerStreamName}", ">")
             end
@@ -199,6 +200,44 @@ export class Stream {
           parseCommand (parser, streamName, minId, maxAgeMs, taskId) {
             parser.pushKey(streamName)
             parser.push(minId, maxAgeMs.toString(), taskId)
+          },
+          transformReply (reply) { return reply }
+        }),
+        disableCompaction: redis.defineScript({
+          NUMBER_OF_KEYS: 1,
+          SCRIPT: `
+            redis.call("SADD", "${this.compactionDisabledSetName}", KEYS[1])
+            local tasks = redis.call("XRANGE", "${this.workerStreamName}", "-", "+")
+            for _, task in ipairs(tasks) do
+              if task[2][1] == "compact" and task[2][2] == KEYS[1] then
+                redis.call("XACK", "${this.workerStreamName}", "${this.workerGroupName}", task[1])
+                redis.call("XDEL", "${this.workerStreamName}", task[1])
+              end
+            end
+          `,
+          /**
+           * @param {import('@redis/client').CommandParser} parser
+           * @param {string} streamName
+           */
+          parseCommand (parser, streamName) {
+            parser.pushKey(streamName)
+          },
+          transformReply (reply) { return reply }
+        }),
+        enableCompaction: redis.defineScript({
+          NUMBER_OF_KEYS: 1,
+          SCRIPT: `
+            if redis.call("SREM", "${this.compactionDisabledSetName}", KEYS[1]) == 1 and redis.call("EXISTS", KEYS[1]) == 1 then
+              redis.call("XADD", "${this.workerStreamName}", "*", "compact", KEYS[1])
+              redis.call("XREADGROUP", "GROUP", "${this.workerGroupName}", "pending", "COUNT", 1, "STREAMS", "${this.workerStreamName}", ">")
+            end
+          `,
+          /**
+           * @param {import('@redis/client').CommandParser} parser
+           * @param {string} streamName
+           */
+          parseCommand (parser, streamName) {
+            parser.pushKey(streamName)
           },
           transformReply (reply) { return reply }
         })
@@ -418,6 +457,39 @@ export class Stream {
     await multi.exec()
     log.info({ room, qid, count: entries.length }, 'unquarantined stream')
     return entries.length
+  }
+
+  /**
+   * Stop workers from compacting `room`. Atomically removes the pending compact task from the
+   * worker queue and adds the room to the disabled set. While disabled, no new compact task is
+   * enqueued for the room (addMessage checks the set), so its stream is neither persisted nor
+   * trimmed until compaction is enabled again.
+   *
+   * @param {t.Room} room
+   */
+  async disableCompaction (room) {
+    await this.redis.disableCompaction(encodeRoomName(room, this.prefix))
+    log.warn({ room }, 'disabled compaction')
+  }
+
+  /**
+   * Re-enable compaction for `room`. Removes the room from the disabled set and re-enqueues a
+   * compact task if its stream exists. No-op if the room wasn't disabled.
+   *
+   * @param {t.Room} room
+   */
+  async enableCompaction (room) {
+    await this.redis.enableCompaction(encodeRoomName(room, this.prefix))
+    log.info({ room }, 'enabled compaction')
+  }
+
+  /**
+   * List all rooms with disabled compaction.
+   *
+   * @return {Promise<Array<t.Room>>}
+   */
+  async getDisabledCompactionRooms () {
+    return (await this.redis.sMembers(this.compactionDisabledSetName)).map(k => decodeRoomName(k, this.prefix))
   }
 
   /**

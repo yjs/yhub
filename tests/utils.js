@@ -69,6 +69,7 @@ export const yhub = await createYHub({
   if (qKeys.length > 0) {
     await redis.del(qKeys)
   }
+  await redis.del(yhub.stream.compactionDisabledSetName)
   try {
     await redis.multi()
       .xGroupDestroy(yhub.stream.workerStreamName, yhub.stream.workerGroupName)

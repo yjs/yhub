@@ -517,6 +517,54 @@ export const testQuarantineRoundtrip = async tc => {
 }
 
 /**
+ * Disabling compaction removes the room's compact task from the worker queue and parks the room
+ * in the disabled set; while disabled, writes don't enqueue new compact tasks. Enabling moves the
+ * task back into the queue.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testDisableCompactionRoundtrip = async tc => {
+  const { yhub, defaultRoom } = await utils.createTestCase(tc)
+  const s = yhub.stream
+  const liveKey = stream.encodeRoomName(defaultRoom, s.prefix)
+
+  // seed the live stream directly (bypass the server)
+  await s.addMessage(defaultRoom, { type: 'awareness:v1', update: new Uint8Array([1, 2, 3]) })
+  const workerTasksBefore = await s.redis.xLen(s.workerStreamName)
+  t.assert(workerTasksBefore >= 1, 'seed produced at least one pending compact task')
+
+  // disable: task removed from worker queue, room listed as disabled
+  await s.disableCompaction(defaultRoom)
+  t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore - 1, 'compact task removed from worker queue')
+  t.compare(await s.getDisabledCompactionRooms(), [defaultRoom], 'room listed as disabled')
+
+  // writes while disabled don't enqueue a compact task
+  await s.addMessage(defaultRoom, { type: 'awareness:v1', update: new Uint8Array([4, 5, 6]) })
+  t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore - 1, 'no compact task enqueued while disabled')
+
+  // the addMessage guard also holds when the disabled room's stream doesn't exist yet
+  const freshRoom = { org: defaultRoom.org, docid: defaultRoom.docid + '-fresh', branch: 'main' }
+  await s.disableCompaction(freshRoom)
+  await s.addMessage(freshRoom, { type: 'awareness:v1', update: new Uint8Array([7]) })
+  t.assert(await s.redis.exists(stream.encodeRoomName(freshRoom, s.prefix)) === 1, 'fresh stream created')
+  t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore - 1, 'no compact task enqueued for fresh disabled room')
+
+  // enable: tasks re-enqueued, disabled set empty
+  await s.enableCompaction(defaultRoom)
+  await s.enableCompaction(freshRoom)
+  t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore + 1, 'compact tasks re-enqueued for both rooms')
+  t.compare(await s.getDisabledCompactionRooms(), [], 'no rooms remain disabled')
+
+  // enable on a never-disabled room is a no-op
+  await s.enableCompaction(defaultRoom)
+  t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore + 1, 'enable on enabled room did not enqueue an extra task')
+  t.assert(await s.redis.exists(liveKey) === 1, 'live stream still present')
+
+  // let the worker drain both streams
+  await utils.waitTasksProcessed(yhub)
+}
+
+/**
  * @param {t.TestCase} tc
  */
 export const testWorkerTasksCleanup = async tc => {

@@ -87,7 +87,7 @@ export class Stream {
     this.prefix = config.redis.prefix || 'yhub'
     this.consumername = random.uuidv4()
     /**
-     * After this timeout, a worker will pick up a task and clean up a stream. (default: 60 seconds)
+     * After this timeout, a worker will pick up a task and clean up a stream. (default: 120 seconds)
      */
     this.taskDebounce = config.redis.taskDebounce ?? 120000
     /**
@@ -174,20 +174,27 @@ export class Stream {
             end
             local acked = redis.call("XACK", "${this.workerStreamName}", "${this.workerGroupName}", ARGV[3])
             redis.call("XDEL", "${this.workerStreamName}", ARGV[3])
-            local minidLifetime = (redis.call("TIME")[1] * 1000) - tonumber(ARGV[2])
-            local minid = ARGV[1]
-            local minidTs = tonumber(string.match(minid, "^(%d+)"))
-            if minidTs < minidLifetime then
-              minidLifetime = incStreamId(minid)
-            else
-              minidLifetime = tostring(minidLifetime)
-            end
-            redis.call("XTRIM", KEYS[1], "MINID", minidLifetime)
-            if redis.call("XLEN", KEYS[1]) == 0 then
-              redis.call("DEL", KEYS[1])
-            elseif acked == 1 then
-              redis.call("XADD", "${this.workerStreamName}", "*", "compact", KEYS[1])
-              redis.call("XREADGROUP", "GROUP", "${this.workerGroupName}", "pending", "COUNT", 1, "STREAMS", "${this.workerStreamName}", ">")
+            -- acked == 0 means another worker reclaimed this task (long-running worker completing
+            -- late) and its trimMessages already ran — that invocation owns the stream's lifecycle.
+            -- A late worker must not touch the stream: trimming/DELeting it here could delete the
+            -- key while the successor task is still pending, so the next write would enqueue a
+            -- second compact task and spawn a concurrent task chain for the same room.
+            if acked == 1 then
+              local minidLifetime = (redis.call("TIME")[1] * 1000) - tonumber(ARGV[2])
+              local minid = ARGV[1]
+              local minidTs = tonumber(string.match(minid, "^(%d+)"))
+              if minidTs < minidLifetime then
+                minidLifetime = incStreamId(minid)
+              else
+                minidLifetime = tostring(minidLifetime)
+              end
+              redis.call("XTRIM", KEYS[1], "MINID", minidLifetime)
+              if redis.call("XLEN", KEYS[1]) == 0 then
+                redis.call("DEL", KEYS[1])
+              else
+                redis.call("XADD", "${this.workerStreamName}", "*", "compact", KEYS[1])
+                redis.call("XREADGROUP", "GROUP", "${this.workerGroupName}", "pending", "COUNT", 1, "STREAMS", "${this.workerStreamName}", ">")
+              end
             end
           `,
           /**

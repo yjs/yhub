@@ -565,6 +565,45 @@ export const testDisableCompactionRoundtrip = async tc => {
 }
 
 /**
+ * A worker whose task was reclaimed (it ran longer than taskDebounce) completes late: its
+ * trimMessages call must be a no-op. If it trimmed/deleted the stream, the key could vanish while
+ * the successor task is still pending, and the next write would enqueue a second compact task —
+ * spawning a concurrent task chain for the same room.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testTrimMessagesLateWorker = async tc => {
+  const { yhub, defaultRoom } = await utils.createTestCase(tc)
+  const s = yhub.stream
+  const liveKey = stream.encodeRoomName(defaultRoom, s.prefix)
+
+  // seed the live stream directly (bypass the server)
+  await s.addMessage(defaultRoom, { type: 'awareness:v1', update: new Uint8Array([1, 2, 3]) })
+  const taskid = /** @type {string} */ ((await s.redis.xRange(s.workerStreamName, '-', '+')).find(e => e.message.compact === liveKey)?.id)
+  t.assert(taskid != null, 'seed produced a pending compact task')
+  const lastClock = array.last(await s.redis.xRange(liveKey, '-', '+')).id
+
+  // first completion (the worker that reclaimed the task): acks + re-enqueues a successor task
+  await s.trimMessages(defaultRoom, lastClock, 100000, taskid)
+  t.assert(await s.redis.xLen(liveKey) === 1, 'young message survived the trim')
+  const successorTasks = await s.redis.xRange(s.workerStreamName, '-', '+')
+  t.assert(successorTasks.length === 1 && successorTasks[0].id !== taskid, 'task acked and successor enqueued')
+
+  // late completion (the original long-running worker, same taskid): must not touch the stream
+  await s.trimMessages(defaultRoom, lastClock, 0, taskid)
+  t.assert(await s.redis.exists(liveKey) === 1, 'late trim did not delete the stream key')
+  t.assert(await s.redis.xLen(liveKey) === 1, 'late trim did not trim the stream')
+  t.assert(await s.redis.xLen(s.workerStreamName) === 1, 'late trim did not enqueue another task')
+
+  // a write must not spawn a second task chain
+  await s.addMessage(defaultRoom, { type: 'awareness:v1', update: new Uint8Array([4]) })
+  t.assert(await s.redis.xLen(s.workerStreamName) === 1, 'no duplicate compact task after write')
+
+  // let the worker drain the live stream
+  await utils.waitTasksProcessed(yhub)
+}
+
+/**
  * @param {t.TestCase} tc
  */
 export const testWorkerTasksCleanup = async tc => {

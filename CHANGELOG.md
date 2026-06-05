@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.22] - 2026-06-05
+
+### New Features
+
+- **Per-room compaction disable API.** Three new methods on `Stream` for operationally freezing a room's Redis stream (e.g. for inspection or maintenance) without taking the room offline:
+  - `stream.disableCompaction(room)` — atomically removes the room's pending compact task from the worker queue and adds the room to the `{prefix}:compaction_disabled` set. While disabled, workers never pick up the room and writes don't enqueue new compact tasks (the `addMessage` script checks the set), so the room's stream is neither persisted nor trimmed; live update distribution to connected clients is unaffected.
+  - `stream.enableCompaction(room)` — removes the room from the disabled set and re-enqueues a compact task if the room's stream exists. No-op for rooms that aren't disabled.
+  - `stream.getDisabledCompactionRooms()` — lists all rooms with disabled compaction.
+
+  ([`src/stream.js`](src/stream.js))
+- **`redis.clientOptions` config.** Additional options passed through to the node-redis client, e.g. `{ pingInterval: 10000 }` for keepalive PINGs. y/hub still controls `url`; `redis.socket` is merged into the final socket config; `clientOptions.scripts` are merged with y/hub's Lua scripts. ([API docs](API.md#configuration), [`src/stream.js`](src/stream.js), [`src/types.js`](src/types.js))
+
+### Bug Fixes
+
+- **A late-completing worker can no longer spawn a duplicate compact-task chain.** When a worker runs longer than `taskDebounce`, its compact task is reclaimed by another worker; both eventually finish and call `trimMessages` with the same task id. The XACK guard already prevented a duplicate *re-enqueue*, but the stream trim and the delete-when-empty ran unconditionally — so the late worker could DEL the room stream key while the reclaiming worker's successor task was still pending, and the next write (`EXISTS == 0`) would enqueue a second compact task. The result was two concurrent task chains for the same room: redundant compactions and recurring duplicate-key errors on persist (the hazard described in the `quarantine()` comment). `trimMessages` now gates all stream mutations (trim, delete, successor re-enqueue) on winning the XACK; a late completion is a pure no-op. ([`src/stream.js`](src/stream.js))
+
 ## [0.2.21] - 2026-06-03
 
 ### New Features

@@ -23,6 +23,10 @@ const log = logger.child({ module: 'stream' })
  */
 
 /**
+ * @typedef {Pick<ReturnType<typeof redis.createClient>, 'withTypeMapping'>} RedisReadClient
+ */
+
+/**
  * @param {t.Room} room
  * @param {string} prefix
  */
@@ -111,9 +115,11 @@ export class Stream {
      * @type {Map<string, { lastReceivedClock: string, subs: Set<StreamSubscriber> }>}
      */
     this.subUpdates = new Map()
-    this.redisClientConf = {
+    const redisClientOptions = config.redis.clientOptions ?? {}
+    this.redisClientConf = /** @type {import('@redis/client').RedisClientOptions} */ ({
+      ...redisClientOptions,
       url: config.redis.url,
-      socket: {
+      socket: /** @type {import('@redis/client').RedisClientOptions['socket']} */ ({
         connectTimeout: 20000,
         /**
          * @param {number} retries
@@ -127,13 +133,15 @@ export class Stream {
           log.warn({ retries, delayMs: delay }, 'redis reconnecting')
           return delay
         },
+        ...redisClientOptions?.socket,
         ...config.redis.socket
-      }
-    }
+      })
+    })
     this.redis = redis.createClient({
       ...this.redisClientConf,
       // scripting: https://github.com/redis/node-redis/#lua-scripts
       scripts: {
+        ...this.redisClientConf.scripts,
         addMessage: redis.defineScript({
           NUMBER_OF_KEYS: 1,
           SCRIPT: `
@@ -200,7 +208,7 @@ export class Stream {
     /**
      * Second instance to fetch things concurrent to the other connection.
      *
-     * @type {typeof this.redis | null}
+     * @type {ReturnType<typeof redis.createClient> | null}
      */
     this.redisSubscriptions = null
     this._subRunning = false
@@ -217,10 +225,12 @@ export class Stream {
   async _runSub () {
     if (!this._subRunning) {
       this._subRunning = true
-      if (this.redisSubscriptions === null) {
-        this.redisSubscriptions = redis.createClient(this.redisClientConf)
-        this.redisSubscriptions.on('error', /** @param {Error} err */ err => log.error({ err }, 'Redis subscription client error'))
-        await this.redisSubscriptions.connect()
+      let redisSubscriptions = this.redisSubscriptions
+      if (redisSubscriptions === null) {
+        redisSubscriptions = redis.createClient(this.redisClientConf)
+        redisSubscriptions.on('error', /** @param {Error} err */ err => log.error({ err }, 'Redis subscription client error'))
+        await redisSubscriptions.connect()
+        this.redisSubscriptions = redisSubscriptions
       }
       while (this.subs.size > 0 || this.subUpdates.size > 0) {
         // update subs
@@ -233,7 +243,7 @@ export class Stream {
         })
         this.subUpdates.clear()
         try {
-          const ms = await this.getMessages(array.from(this.subs.entries()).map(([room, s]) => ({ room, clock: s.lastReceivedClock })), { redisClient: this.redisSubscriptions, blocking: true })
+          const ms = await this.getMessages(array.from(this.subs.entries()).map(([room, s]) => ({ room, clock: s.lastReceivedClock })), { redisClient: redisSubscriptions, blocking: true })
           let nsubCounter = 0
           for (let i = 0; i < ms.length; i++) {
             const m = ms[i]
@@ -267,18 +277,19 @@ export class Stream {
   /**
    * @param {Array<{room: t.Room|string, clock: string}>} rooms room-clock pairs
    * @param {object} opts
-   * @param {typeof this.redis} [opts.redisClient]
+   * @param {RedisReadClient} [opts.redisClient]
    * @param {boolean} [opts.blocking]
    * @return {Promise<Array<{ room: t.Room, messages: Array<t.Message & { redisClock: string }>, lastClock: string, streamName: string }>>}
    */
-  async getMessages (rooms, { redisClient = this.redis, blocking = false } = {}) {
+  async getMessages (rooms, { redisClient, blocking = false } = {}) {
     if (rooms.length === 0) {
       await promise.wait(50)
       return []
     }
     const streams = rooms.map(asset => ({ key: s.$string.check(asset.room) ? asset.room : encodeRoomName(asset.room, this.prefix), id: asset.clock || '0' }))
     log.debug({ streamCount: streams.length }, 'retrieving messages')
-    const reads = /** @type {Array<{name: Buffer, messages: Array<{id: Buffer, message: Record<string, Buffer>}>}> | null} */ (await redisClient.withTypeMapping({
+    const readClient = redisClient ?? this.redis
+    const reads = /** @type {Array<{name: Buffer, messages: Array<{id: Buffer, message: Record<string, Buffer>}>}> | null} */ (await readClient.withTypeMapping({
       [redis.RESP_TYPES.BLOB_STRING]: Buffer
     }).xRead(
       streams,

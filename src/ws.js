@@ -146,25 +146,45 @@ export const registerYWebsocketServer = async (app, pattern, store, checkAuth, {
       const user = ws.getUserData()
       log(() => ['client connected (uid=', user.id, ', ip=', Buffer.from(ws.getRemoteAddressAsText()).toString(), ')'])
       const stream = api.computeRedisRoomStreamName(user.room, 'index', redisPrefix)
-      user.subs.add(stream)
-      ws.subscribe(stream)
-      user.initialRedisSubId = subscriber.subscribe(stream, redisMessageSubscriber).redisId
-      const indexDoc = await client.getDoc(user.room, 'index')
-      if (indexDoc.ydoc.store.clients.size === 0) {
-        initDocCallback(user.room, 'index', client)
-      }
-      if (user.isClosed) return
-      ws.cork(() => {
-        ws.send(protocol.encodeSyncStep1(Y.encodeStateVector(indexDoc.ydoc)), true, false)
-        ws.send(protocol.encodeSyncStep2(Y.encodeStateAsUpdate(indexDoc.ydoc)), true, true)
-        if (indexDoc.awareness.states.size > 0) {
-          ws.send(protocol.encodeAwarenessUpdate(indexDoc.awareness, array.from(indexDoc.awareness.states.keys())), true, true)
+      // uWS does not await the async open callback, so a throw inside the
+      // body lands as an unhandled rejection on Node's microtask queue —
+      // invisible without a global listener, and on some configurations
+      // silently dropped. Wrap the whole body so the room context reaches
+      // the logs synchronously; otherwise a per-room failure (e.g. a Yjs
+      // decode throw inside getDoc/applyUpdateV2, or a downstream encode)
+      // shows up at the load balancer as a 502 with no server-side trace.
+      try {
+        user.subs.add(stream)
+        ws.subscribe(stream)
+        user.initialRedisSubId = subscriber.subscribe(stream, redisMessageSubscriber).redisId
+        const indexDoc = await client.getDoc(user.room, 'index')
+        if (indexDoc.ydoc.store.clients.size === 0) {
+          initDocCallback(user.room, 'index', client)
         }
-      })
-      if (api.isSmallerRedisId(indexDoc.redisLastId, user.initialRedisSubId)) {
-        // our subscription is newer than the content that we received from the api
-        // need to renew subscription id and make sure that we catch the latest content.
-        subscriber.ensureSubId(stream, indexDoc.redisLastId)
+        if (user.isClosed) return
+        ws.cork(() => {
+          ws.send(protocol.encodeSyncStep1(Y.encodeStateVector(indexDoc.ydoc)), true, false)
+          ws.send(protocol.encodeSyncStep2(Y.encodeStateAsUpdate(indexDoc.ydoc)), true, true)
+          if (indexDoc.awareness.states.size > 0) {
+            ws.send(protocol.encodeAwarenessUpdate(indexDoc.awareness, array.from(indexDoc.awareness.states.keys())), true, true)
+          }
+        })
+        if (api.isSmallerRedisId(indexDoc.redisLastId, user.initialRedisSubId)) {
+          // our subscription is newer than the content that we received from the api
+          // need to renew subscription id and make sure that we catch the latest content.
+          subscriber.ensureSubId(stream, indexDoc.redisLastId)
+        }
+      } catch (err) {
+        const msg = err && err.message ? err.message : String(err)
+        console.error(`[y-redis ws.open] FAILED room="${user.room}" uid=${user.id} err=${msg}`)
+        if (err && err.stack) console.error(err.stack)
+        // Close the WS so the client and the load balancer see a clean
+        // termination instead of a stalled half-open connection. Best-effort
+        // — if `ws` is already torn down `end` throws and we have nothing
+        // useful to do with that second error.
+        try {
+          ws.end(1011, 'open handler error')
+        } catch (_) {}
       }
     },
     message: (ws, messageBuffer) => {

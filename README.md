@@ -161,9 +161,6 @@ POSTGRES=postgres://user:pass@localhost:5432/yhub
 # Authentication keys (generate with: npx 0ecdsa-generate-keypair --name auth)
 AUTH_PUBLIC_KEY={"kty":"EC",...}
 AUTH_PRIVATE_KEY={"kty":"EC",...}
-
-# Permission callback URL (your backend)
-AUTH_PERM_CALLBACK=http://localhost:5173/auth/perm
 ```
 
 ### Optional Settings
@@ -175,9 +172,6 @@ PORT=3002
 # Testing database (for running tests)
 POSTGRES_TESTING=postgres://user:pass@localhost:5432/yhub-testing
 S3_YHUB_TEST_BUCKET=yhub-testing
-
-# Document update callback (called when documents change)
-YDOC_UPDATE_CALLBACK=http://localhost:5173/ydoc
 
 # Logging (regex pattern)
 LOG=*                             # Log everything
@@ -309,35 +303,6 @@ npm start
 # Or start them separately
 npm run start:server
 npm run start:worker
-```
-
-## Optional: Document Update Callback
-
-If you set `YDOC_UPDATE_CALLBACK`, y/hub will call your endpoint when documents
-change. This is useful for indexing, backups, or triggering other workflows:
-
-```javascript
-import formidable from 'formidable'
-import * as Y from 'yjs'
-
-app.put('/ydoc/:room', async (req, res) => {
-  const room = req.params.room
-
-  // Parse the multipart form data
-  const form = formidable({})
-  const [fields, files] = await form.parse(req)
-
-  if (files.ydoc) {
-    const ydocUpdate = await fs.readFile(files.ydoc[0].filepath)
-    const ydoc = new Y.Doc()
-    Y.applyUpdateV2(ydoc, ydocUpdate)
-
-    // Do something with the document (index, backup, etc.)
-    console.log('Document updated:', ydoc.toJSON())
-  }
-
-  res.sendStatus(200)
-})
 ```
 
 ## Scaling

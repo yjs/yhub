@@ -165,12 +165,6 @@ app.get('/auth/perm/:room/:userid', async (req, res) => {
 })
 ```
 
-**Environment variable:**
-
-```bash
-AUTH_PERM_CALLBACK=https://your-app.com/auth/perm
-```
-
 ---
 
 ## 5. Full Environment Configuration
@@ -194,13 +188,9 @@ S3_YHUB_BUCKET=yhub
 # Authentication
 AUTH_PUBLIC_KEY=...
 AUTH_PRIVATE_KEY=...
-AUTH_PERM_CALLBACK=https://your-app.com/api/yhub/perm
 
 # Server (optional)
 PORT=3002
-
-# Callbacks (optional)
-YDOC_UPDATE_CALLBACK=https://your-app.com/api/yhub/update
 
 # Logging (optional)
 LOG=*

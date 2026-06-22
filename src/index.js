@@ -137,15 +137,54 @@ export class YHub {
         contentids.push(mcontentids)
       }
     })
+    // prune directives garbage-collect churned history: drop the referenced IdSet from the
+    // nongc doc, the contentmap, and the contentids. Applied unconditionally (idempotent).
+    const pruneMsgs = cachedMessages.messages.filter(m => t.$pruneMessage.check(m))
+    const pruneSet = pruneMsgs.length > 0 ? Y.mergeIdSets(pruneMsgs.map(m => Y.decodeIdSet(m.prune))) : null
+    const mergedContentmap = contentmap != null ? Y.mergeContentMaps(contentmap) : null
+    const mergedCids = Y.mergeContentIds(contentids)
+    if (pruneSet != null) {
+      if (mergedContentmap != null) {
+        mergedContentmap.inserts = Y.diffIdMap(mergedContentmap.inserts, pruneSet)
+        mergedContentmap.deletes = Y.diffIdMap(mergedContentmap.deletes, pruneSet)
+      }
+      mergedCids.inserts = Y.diffIdSet(mergedCids.inserts, pruneSet)
+      mergedCids.deletes = Y.diffIdSet(mergedCids.deletes, pruneSet)
+    }
+    const pruneBin = pruneSet != null ? Y.encodeIdSet(pruneSet) : undefined
     return {
       gcDoc: /** @type {Include['gc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (gcDoc ? await this.computePool.mergeUpdates(gcOnMerge, gcDoc, { room }) : null),
-      nongcDoc: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (nongcDoc ? await this.computePool.mergeUpdates(false, nongcDoc, { room }) : null),
-      contentmap: /** @type {Include['contentmap'] extends true ? Uint8Array<ArrayBuffer> : null} */ (contentmap ? Y.encodeContentMap(Y.mergeContentMaps(contentmap)) : null),
-      contentids: /** @type {Include['contentids'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.contentids === true ? Y.encodeContentIds(Y.mergeContentIds(contentids)) : null),
+      nongcDoc: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (nongcDoc ? await this.computePool.mergeUpdates(false, nongcDoc, { room }, pruneBin) : null),
+      contentmap: /** @type {Include['contentmap'] extends true ? Uint8Array<ArrayBuffer> : null} */ (mergedContentmap != null ? Y.encodeContentMap(mergedContentmap) : null),
+      contentids: /** @type {Include['contentids'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.contentids === true ? Y.encodeContentIds(mergedCids) : null),
       lastClock,
       lastPersistedClock: persistedDoc.lastClock,
       references,
       awareness
+    }
+  }
+
+  /**
+   * Permanently prunes churned history: content that was both inserted and deleted within the
+   * filtered range is garbage-collected and removed from the activity history. This is
+   * irreversible. The prune is distributed as a directive on the redis stream and baked into
+   * persistence the next time the document is compacted.
+   *
+   * @param {t.Room} room
+   * @param {object} filters
+   * @param {number} [filters.from]
+   * @param {number} [filters.to]
+   * @param {string} [filters.by]
+   * @param {Uint8Array<ArrayBuffer>} [filters.contentIds]
+   * @param {Array<{k: string, v: string}>|null} [filters.withCustomAttributions]
+   * @returns {Promise<void>}
+   */
+  async pruneDoc (room, filters) {
+    const { contentmap } = await this.getDoc(room, { contentmap: true })
+    if (contentmap == null) return
+    const prune = await this.computePool.computePruneSet({ contentmapBin: contentmap, ...filters }, { room })
+    if (prune != null) {
+      await this.stream.addMessage(room, { type: 'prune:v1', prune })
     }
   }
 

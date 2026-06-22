@@ -151,6 +151,67 @@ the activity API and the changeset API to reconstruct an editing trail.
   * Returns `Array<{ from: number, to: number, by: string?, delta?: Delta, customAttributions?: Array<{ k: string, v: string }> }>`
     * `customAttributions` is only present when `customAttributions=true`
 
+### Prune
+
+Permanently prune *churned* history — content that was both inserted **and** deleted within the
+requested range. The pruned content is garbage-collected from the document's history so it no longer
+appears in the [activity](#activity) or [changeset](#changeset) APIs, making the stored history more
+compact. Content that is still live (inserted but never deleted) and the document's *current visible
+state* are never affected.
+
+> **Warning:** pruning is irreversible. Once a worker bakes the prune into persistence, the removed
+> history cannot be recovered. The operation is distributed as a directive on the Redis stream and
+> applied the next time the document is retrieved or compacted.
+
+* `POST /prune/{org}/{docid}` body: `{ from?: number, to?: number, by?: string, contentIds?: Y.ContentIds, withCustomAttributions?: Array<{ k: string, v: string }> }`
+  * `from`/`to`: unix timestamp range filter. Only content whose insertion **and** deletion *both* fall within `[from, to]` is pruned.
+  * `by=string`: comma-separated list of user-ids that matches the attributions
+  * `contentIds`: restrict pruning to the changes described by a `Y.ContentIds`
+  * `withCustomAttributions`: only prune content whose attributions match all specified key-value pairs
+  * At least one filter is required; an empty body is rejected with `400`.
+  * Returns `{ success: true }`.
+
+#### Example
+
+Given the edits `insert "a"` → `delete "a"` → `insert "b"`, the activity API can reconstruct all
+three steps. Pruning a range that contains all three collapses the churned `"a"`, so only
+`insert "b"` remains visible — the insertion of `"b"` is kept because it was never deleted.
+
+* Compact all churn within an editing interval: `POST /prune/{org}/{docid}` body: `{ from: X, to: Y }`
+* Compact only a specific user's churn in that interval: body: `{ from: X, to: Y, by: U }`
+* Compact the **entire** document history — pass an all-encompassing range: body: `{ from: 0, to: Number.MAX_SAFE_INTEGER }`
+
+```js
+import * as buffer from 'lib0/buffer'
+
+const prune = body => fetch(`http://${yhubHost}/prune/${org}/${docid}`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/octet-stream' },
+  body: buffer.encodeAny(body)
+})
+
+// prune churn within a specific editing interval
+await prune({ from: startTimestamp, to: endTimestamp })
+
+// prune the entire history of the document
+await prune({ from: 0, to: Number.MAX_SAFE_INTEGER })
+```
+
+The [activity](#activity) API supplies the timestamps that drive a prune. Pruning the range spanned
+by two activity entries removes all the churn between them — effectively **merging** those two
+entries into a single step in the timeline:
+
+```js
+import * as buffer from 'lib0/buffer'
+
+// read the editing timeline (responses are lib0-encoded binary)
+const res = await fetch(`http://${yhubHost}/activity/${org}/${docid}?group=false`)
+const activity = buffer.decodeAny(new Uint8Array(await res.arrayBuffer()))
+
+// merge activity entries `i..j`: prune everything that was inserted and deleted between them
+await prune({ from: activity[i].from, to: activity[j].to })
+```
+
 ### YHub Import API
 
 The `YHub` class is available when importing `@y/hub` directly. It exposes methods for reading and writing documents programmatically, bypassing the WebSocket and REST layers. This is useful for server-side scripts, migrations, and data pipelines.
@@ -292,6 +353,42 @@ await yhub.unsafePersistDoc(
   Y.encodeStateAsUpdate(ydoc),
   { by: 'import-script' }
 )
+```
+
+#### `yhub.pruneDoc(room, filters)`
+
+Permanently prune *churned* history — content that was both inserted **and** deleted within the
+filtered range. The prune is distributed via the Redis stream and baked into persistence on the next
+compaction. This is the programmatic equivalent of `POST /prune/{org}/{docid}`.
+
+> **Warning:** pruning is irreversible. Live content (inserted but never deleted) and the current
+> visible document state are never affected.
+
+```ts
+yhub.pruneDoc(
+  room: { org: string, docid: string, branch: string },
+  filters: {
+    from?: number,
+    to?: number,
+    by?: string,
+    contentIds?: Uint8Array,                              // encoded Y.ContentIds
+    withCustomAttributions?: Array<{ k: string, v: string }> | null
+  }
+): Promise<void>
+```
+
+Provide at least one filter. If no churned content matches the filters, the call is a no-op.
+
+**Example**
+
+```js
+const room = { org: 'my-org', docid: 'my-doc', branch: 'main' }
+
+// Compact all churn from the last hour
+await yhub.pruneDoc(room, { from: Date.now() - 60 * 60 * 1000, to: Date.now() })
+
+// Compact the entire document history
+await yhub.pruneDoc(room, { from: 0, to: Number.MAX_SAFE_INTEGER })
 ```
 
 #### `yhub.agentTask(room, opts, handler)`

@@ -166,11 +166,11 @@ export const testAttributionRecorded = async tc => {
   const verify = new Y.Doc()
   Y.applyUpdate(verify, /** @type {Uint8Array} */ (nongcDoc))
   const attributions = Y.decodeContentMap(/** @type {Uint8Array} */ (contentmap))
-  const rendered = verify.get().toDelta(new Y.TwosetAttributionManager(Y.diffIdMap(attributions.inserts, attributions.deletes), Y.createIdMap()))
+  const rendered = verify.get().toDelta({ renderer: new Y.TwosetRenderer(Y.diffIdMap(attributions.inserts, attributions.deletes), Y.createIdMap()) })
   const op = delta.$textOp.cast(rendered.children.start)
   const attr = /** @type {Record<string, any> | null | undefined} */ (op.attribution)
   console.log('rendered attribution', JSON.stringify(attr))
-  // `insert` is multi-valued (array) by Y.TwosetAttributionManager convention;
+  // `insert` is multi-valued (array) by Y.TwosetRenderer convention;
   // custom attribution keys like `insert:promptBy` are rendered as the raw value.
   /**
    * @param {string} key

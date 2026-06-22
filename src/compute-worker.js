@@ -69,8 +69,23 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
   log.debug({ type: msg.type }, 'new compute task')
   switch (msg.type) {
     case 'mergeUpdates': {
-      const result = mergeUpdates(msg.gc, msg.updates)
+      const result = mergeUpdates(msg.gc, msg.updates, msg.prune)
       port.postMessage(result, [result.buffer])
+      break
+    }
+    case 'computePruneSet': {
+      const { contentmapBin, from, to, by, contentIds: contentIdsBin, withCustomAttributions = null } = msg
+      const contentmap = Y.decodeContentMap(contentmapBin)
+      const contentIds = contentIdsBin && Y.decodeContentIds(contentIdsBin)
+      const filtered = filterContentMap(contentmap, from, to, by, contentIds, withCustomAttributions)
+      const { inserts, deletes } = Y.createContentIdsFromContentMap(filtered)
+      const pruneSet = Y.intersectSets(inserts, deletes)
+      if (pruneSet.clients.size === 0) {
+        port.postMessage(null)
+      } else {
+        const result = Y.encodeIdSet(pruneSet)
+        port.postMessage(result, [result.buffer])
+      }
       break
     }
     case 'computeStateVector': {
@@ -101,8 +116,8 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
           const nextDoc = new Y.Doc()
           Y.applyUpdate(prevDoc, prevDocUpdate)
           Y.applyUpdate(nextDoc, nextDocUpdate)
-          const am = Y.createAttributionManagerFromDiff(prevDoc, nextDoc, { attrs: filteredAttributions })
-          response.delta = nextDoc.get().toDelta(am).toJSON()
+          const renderer = Y.createDiffRenderer(prevDoc, nextDoc, { attrs: filteredAttributions })
+          response.delta = nextDoc.get().toDelta({ renderer }).toJSON()
           prevDoc.destroy()
           nextDoc.destroy()
         }
@@ -210,8 +225,8 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
           Y.applyUpdate(prevDoc, prevDocUpdate)
           Y.applyUpdate(nextDoc, nextDocUpdate)
           const attrs = Y.createContentMapFromContentIds(Y.createContentIdsFromContentMap(actAttributions), [Y.createContentAttribute('insert', act.by), Y.createContentAttribute('insertAt', act.from)], [Y.createContentAttribute('delete', act.by), Y.createContentAttribute('deleteAt', act.from)])
-          const am = Y.createAttributionManagerFromDiff(prevDoc, nextDoc, { attrs })
-          act.delta = nextDoc.get(nextDoc.share.keys().next().value || '').toDeltaDeep(am).toJSON()
+          const renderer = Y.createDiffRenderer(prevDoc, nextDoc, { attrs })
+          act.delta = nextDoc.get(nextDoc.share.keys().next().value || '').toDeltaDeep({ renderer }).toJSON()
           prevDoc.destroy()
           nextDoc.destroy()
         })
@@ -245,7 +260,7 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       Y.applyUpdate(ydoc, nongcDoc)
       let update = /** @type {Uint8Array<ArrayBuffer> | null} */ (null)
       ydoc.once('update', (/** @type {Uint8Array<ArrayBuffer>} */ u) => { update = u })
-      Y.undoContentIds(ydoc, revertIds, { ignoreRemoteMapChanges: true })
+      Y.undoContentIds(ydoc, revertIds, { ignoreRemoteAttributeChanges: true })
       ydoc.destroy()
       if (update != null) {
         const resultContentmap = createContentMap(Y.createContentIdsFromUpdate(update), userid, customAttributions)

@@ -100,6 +100,55 @@ export const testChangesetRestApi = async tc => {
 }
 
 /**
+ * Pruning permanently compacts churned history: content that was both inserted and deleted within
+ * the requested range is destroyed, so it no longer shows up in the activity API. Fresh insertions
+ * (never deleted) and the visible document content are untouched.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testPruneHistory = async tc => {
+  const { org, yhub, createWsClient } = await utils.createTestCase(tc)
+  const { ydoc } = createWsClient()
+  ydoc.get().applyDelta(delta.create().insert('hello world').done()) // 'hello ' is churn, 'world' survives
+  await promise.wait(100)
+  ydoc.get().applyDelta(delta.create().delete(6).done()) // delete 'hello ' -> 'world'
+  await promise.wait(100)
+  ydoc.get().applyDelta(delta.create().insert('hi ').done()) // fresh insertion -> 'hi world'
+  await utils.waitTasksProcessed(yhub)
+  // before pruning: insert('hello world'), delete('hello '), insert('hi ') => 3 activity events
+  const before = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)
+  console.log('activity before prune', before)
+  t.assert(before.length === 3)
+  const from = Math.min(...before.map((/** @type {{ from: number }} */ a) => a.from))
+  const to = Math.max(...before.map((/** @type {{ to: number }} */ a) => a.to))
+  // prune content inserted AND deleted within [from, to] -> the churned 'hello '
+  const pruneResult = await postYhubRequest(`/prune/${org}/${ydoc.guid}`, { from, to })
+  t.assert(pruneResult.success === true)
+  await utils.waitTasksProcessed(yhub)
+  // after pruning: the delete event for 'hello ' is gone (its insert+delete churn pruned) => 2 events
+  const after = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)
+  console.log('activity after prune', after)
+  t.assert(after.length === 2, 'pruning removes the churned insert+delete from history')
+  // the visible document is unchanged by pruning
+  const { ydoc: reloaded } = await createWsClient({ waitForSync: true })
+  t.compare(reloaded.get().toDelta(), delta.create(delta.$deltaAny).insert('hi world'))
+}
+
+/**
+ * Pruning with no filter is rejected.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testPruneHistoryRequiresFilter = async tc => {
+  const { org, createWsClient } = await utils.createTestCase(tc)
+  const { ydoc } = createWsClient()
+  ydoc.get().applyDelta(delta.create().insert('content').done())
+  await promise.wait(100)
+  const emptyPrune = await postYhubRequest(`/prune/${org}/${ydoc.guid}`, {})
+  t.assert(emptyPrune.error != null, 'prune without filters should return an error')
+}
+
+/**
  *
  * This example shows how to retrieve all attributes for all insertions using the changeset api.
  * Note, that you must retrieve the most up-to-date changeset whenever you want to render a ydoc,
@@ -123,7 +172,7 @@ export const testAttributeInsertedContent = async tc => {
   const attributions = Y.decodeContentMap(response.attributions)
   // render all inserts (extracting deletions from the equation so they stay properly deleted)
   console.log({ attributions })
-  const deltaWithAttributedInserts = ytype.toDelta(new Y.TwosetAttributionManager(Y.diffIdMap(attributions.inserts, attributions.deletes), Y.createIdMap()))
+  const deltaWithAttributedInserts = ytype.toDelta({ renderer: new Y.TwosetRenderer(Y.diffIdMap(attributions.inserts, attributions.deletes), Y.createIdMap()) })
 
   console.log({
     attrResult: JSON.stringify(deltaWithAttributedInserts.toJSON())

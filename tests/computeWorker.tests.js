@@ -115,3 +115,51 @@ export const testInvalidUpdate = async _tc => {
   doc.destroy()
   await pool.destroy()
 }
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testComputePruneSet = async _tc => {
+  const pool = createComputePool({ poolSize: 2 })
+  const doc = new Y.Doc({ gc: false })
+  const tp = doc.get('test')
+  /** @type {Array<Y.ContentMap>} */
+  const cms = []
+  /** @param {() => void} fn */
+  const cap = fn => { let u = /** @type {Uint8Array<ArrayBuffer>} */ (new Uint8Array()); doc.once('update', e => { u = e }); fn(); return u }
+  /** @param {Uint8Array<ArrayBuffer>} u @param {number} ts */
+  const stamp = (u, ts) => { cms.push(Y.createContentMapFromContentIds(Y.createContentIdsFromUpdate(u), [Y.createContentAttribute('insertAt', ts)], [Y.createContentAttribute('deleteAt', ts)])) }
+  stamp(cap(() => tp.insert(0, 'AAA')), 1000) // churn: inserted t1
+  stamp(cap(() => tp.insert(3, 'BBB')), 2000) // survivor: inserted t2, never deleted
+  stamp(cap(() => tp.delete(0, 3)), 3000) // churn: 'AAA' deleted t3
+  const nongcDoc = Y.encodeStateAsUpdate(doc)
+  const contentmapBin = Y.encodeContentMap(Y.mergeContentMaps(cms))
+
+  // content inserted AND deleted within [1000, 3000] -> 'AAA'
+  const prune = await pool.computePruneSet({ contentmapBin, from: 1000, to: 3000 })
+  t.assert(prune != null, 'should find churned content to prune')
+  const pruned = await pool.mergeUpdates(false, [nongcDoc], {}, /** @type {Uint8Array<ArrayBuffer>} */ (prune))
+  const verify = new Y.Doc({ gc: false })
+  Y.applyUpdate(verify, pruned)
+  t.assert(verify.get('test').toString() === 'BBB', 'survivor remains, churn pruned')
+  verify.destroy()
+
+  // nothing is fully contained in [2000, 2000] (BBB is never deleted) -> null
+  const empty = await pool.computePruneSet({ contentmapBin, from: 2000, to: 2000 })
+  t.assert(empty == null, 'no churn in range -> null prune set')
+
+  // gcIdSet only collects deleted content: a prune set covering a live id is a no-op for it
+  const liveDoc = new Y.Doc({ gc: false })
+  liveDoc.get('test').insert(0, 'XY')
+  const liveUpdate = Y.encodeStateAsUpdate(liveDoc)
+  const livePrune = Y.encodeIdSet(Y.createContentIdsFromUpdate(liveUpdate).inserts)
+  const mergedLive = await pool.mergeUpdates(false, [liveUpdate], {}, livePrune)
+  const verifyLive = new Y.Doc({ gc: false })
+  Y.applyUpdate(verifyLive, mergedLive)
+  t.assert(verifyLive.get('test').toString() === 'XY', 'gcIdSet skips non-deleted ids')
+  verifyLive.destroy()
+  liveDoc.destroy()
+
+  doc.destroy()
+  await pool.destroy()
+}

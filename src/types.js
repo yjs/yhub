@@ -145,10 +145,20 @@ export const $awarenessMessage = s.$({
 })
 
 /**
+ * Directive to permanently prune churned history. `prune` is an `IdSet` (serialized with
+ * `Y.encodeIdSet`) of content that was inserted and later deleted; it is garbage-collected
+ * from the nongc doc and removed from the contentmap when documents are merged.
+ */
+export const $pruneMessage = s.$({
+  type: s.$literal('prune:v1'),
+  prune: s.$uint8Array
+})
+
+/**
  * A Message contains information w want to distribute to clients. They are usually put on the
  * distribution stream.
  */
-export const $message = s.$union($updateMessage, $awarenessMessage)
+export const $message = s.$union($updateMessage, $awarenessMessage, $pruneMessage)
 
 /**
  * @typedef {s.Unwrap<typeof $message>} Message

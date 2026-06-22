@@ -340,6 +340,70 @@ export const createYHubServer = async (yhub, conf) => {
     })
   })
 
+  // POST /prune/{guid} - Permanently prune churned history (content inserted and deleted within the range)
+  app.post('/prune/:org/:docid', (res, req) => {
+    const room = reqToRoom(req)
+    log.debug({ endpoint: 'POST /prune', room }, 'api request')
+    const authPromise = authenticateRequest(req, room, 'rw')
+    let buffer = Buffer.allocUnsafe(0)
+    let aborted = false
+    res.onAborted(() => {
+      aborted = true
+    })
+    /**
+     * @param {Buffer} buffer
+     */
+    const handlePruneRequest = async buffer => {
+      const authResult = await authPromise
+      if (aborted) return
+      if ('error' in authResult) {
+        sendErrorResponse(res, authResult.status, { error: authResult.error })
+        return
+      }
+      try {
+        const decoder = decoding.createDecoder(buffer)
+        // body structure: { from?: number, to?: number, by?: string, contentIds?: buffer }
+        const decodedBody = decoding.readAny(decoder)
+        if (s.$object({ from: s.$number.optional, to: s.$number.optional, by: s.$string.optional, contentIds: s.$uint8Array.optional, withCustomAttributions: s.$array(s.$object({ k: s.$string, v: s.$string })).optional }).check(decodedBody)) {
+          const { from, to, by, contentIds, withCustomAttributions = null } = decodedBody
+          if (!from && !to && !by && !contentIds && (withCustomAttributions ?? []).length === 0) {
+            !aborted && sendErrorResponse(res, '400 Bad Request', { error: 'Prune requires at least one filter (from, to, by, contentIds, or withCustomAttributions)' })
+            return
+          }
+          await yhub.pruneDoc(room, { from, to, by, contentIds, withCustomAttributions })
+          if (!aborted) {
+            const encoder = encoding.createEncoder()
+            encoding.writeAny(encoder, { success: true, message: 'Prune completed' })
+            const response = encoding.toUint8Array(encoder)
+            res.cork(() => {
+              setCorsHeaders(res)
+              res.writeStatus('200 OK')
+              res.writeHeader('Content-Type', 'application/octet-stream')
+              res.end(response)
+            })
+          }
+          return
+        }
+        // couldn't parse correctly. throw error
+      } catch (err) {
+        log.warn({ err }, 'error parsing prune request')
+      }
+      if (!aborted) {
+        sendErrorResponse(res, '400 Bad Request', { error: 'error consuming request' })
+      }
+    }
+    res.onData((chunk, isLast) => {
+      const chunkBuffer = Buffer.from(chunk)
+      buffer = Buffer.concat([buffer, chunkBuffer])
+      if (isLast) {
+        handlePruneRequest(buffer).catch(err => {
+          log.error({ err }, 'error handling prune request')
+          if (!aborted) sendErrorResponse(res, '500 Internal Server Error', { error: 'Internal server error' })
+        })
+      }
+    })
+  })
+
   // GET /changeset/{guid} - Get attributed changes and document states
   app.get('/changeset/:org/:docid', async (res, req) => {
     const room = reqToRoom(req)
@@ -545,6 +609,10 @@ class WSUser {
           }
           case 'awareness:v1': {
             awarenessUpdates.push(message.update)
+            break
+          }
+          case 'prune:v1': {
+            // history-pruning directive: affects persisted history only, nothing to relay to clients
             break
           }
           default: {

@@ -16,21 +16,29 @@ if (useYNative) {
  * retained. With the `use-y-native` conf set, the merge is delegated to the
  * native yrs (Rust) binding (`@y-crdt/yn`); otherwise it runs on `@y/y`.
  *
+ * When `prune` (a serialized `IdSet`) is provided, the referenced content is
+ * garbage-collected after merging. This forces the `@y/y` path (the native
+ * binding can't `gcIdSet`) and is used to permanently prune churned history.
+ *
  * @param {boolean} gc
  * @param {Array<Uint8Array<ArrayBuffer>>} updates
+ * @param {Uint8Array<ArrayBuffer>} [prune]
  * @returns {Uint8Array<ArrayBuffer>}
  */
-export const mergeUpdates = (gc, updates) => {
-  if (useYNative) {
+export const mergeUpdates = (gc, updates, prune) => {
+  if (useYNative && prune == null) {
     return /** @type {Uint8Array<ArrayBuffer>} */ (applyUpdates(gc, updates))
   }
-  if (!gc) {
+  if (!gc && prune == null) {
     return Y.mergeUpdates(updates)
   }
-  const ydoc = new Y.Doc()
+  const ydoc = new Y.Doc({ gc })
   ydoc.transact(() => {
     updates.forEach(update => Y.applyUpdate(ydoc, update))
   })
+  if (prune != null) {
+    Y.gcIdSet(ydoc, Y.decodeIdSet(prune))
+  }
   const result = Y.encodeStateAsUpdate(ydoc)
   ydoc.destroy()
   return result

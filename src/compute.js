@@ -16,7 +16,17 @@ const $computeTask = s.$union(
   s.$object({
     type: s.$literal('mergeUpdates'),
     gc: s.$boolean,
-    updates: s.$array(s.$uint8Array)
+    updates: s.$array(s.$uint8Array),
+    prune: s.$uint8Array.optional
+  }),
+  s.$object({
+    type: s.$literal('computePruneSet'),
+    contentmapBin: s.$uint8Array,
+    from: s.$number.optional,
+    to: s.$number.optional,
+    by: s.$string.optional,
+    contentIds: s.$uint8Array.optional,
+    withCustomAttributions: s.$array(s.$object({ k: s.$string, v: s.$string })).nullable.optional
   }),
   s.$object({
     type: s.$literal('computeStateVector'),
@@ -252,20 +262,44 @@ class ComputePool {
    * is <= 5kb. Otherwise offloads to a worker thread. When `gc` is `true`,
    * deleted content is garbage-collected.
    *
+   * When `prune` (a serialized `IdSet`) is given, that content is
+   * garbage-collected after merging (used to prune churned history).
+   *
    * @param {boolean} gc
    * @param {Array<Uint8Array<ArrayBuffer>>} updates
    * @param {Object<string, any>} logContext
+   * @param {Uint8Array<ArrayBuffer>} [prune]
    * @returns {Promise<Uint8Array<ArrayBuffer>>}
    */
-  mergeUpdates (gc, updates, logContext = {}) {
+  mergeUpdates (gc, updates, logContext = {}, prune) {
     let totalSize = 0
     for (let i = 0; i < updates.length; i++) {
       totalSize += updates[i].byteLength
     }
     if (totalSize <= 5120 || updates.length <= 1) {
-      return promise.resolveWith(mergeUpdates(gc, updates))
+      return promise.resolveWith(mergeUpdates(gc, updates, prune))
     }
-    return this.run({ type: 'mergeUpdates', gc, updates }, [], logContext)
+    return this.run({ type: 'mergeUpdates', gc, updates, prune }, [], logContext)
+  }
+
+  /**
+   * Computes the prune set for a time/author/content range: the IDs that were
+   * both inserted and deleted within the filtered range (`intersectSets` of the
+   * in-range insertions and deletions). Returns the serialized `IdSet`, or
+   * `null` if nothing matches.
+   *
+   * @param {object} opts
+   * @param {Uint8Array<ArrayBuffer>} opts.contentmapBin
+   * @param {number} [opts.from]
+   * @param {number} [opts.to]
+   * @param {string} [opts.by]
+   * @param {Uint8Array<ArrayBuffer>} [opts.contentIds]
+   * @param {Array<{k: string, v: string}>|null} [opts.withCustomAttributions]
+   * @param {Object<string, any>} [logContext]
+   * @returns {Promise<Uint8Array<ArrayBuffer>|null>}
+   */
+  computePruneSet (opts, logContext = {}) {
+    return this.run({ type: 'computePruneSet', ...opts }, [], logContext)
   }
 
   /**

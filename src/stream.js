@@ -358,7 +358,7 @@ export class Stream {
         })
       })
     })
-    log.debug({ messages: res.map(r => ({ stream: r.streamName, ms: r.messages.map(m => ({ type: m.type, size: m.update.byteLength, rclock: m.redisClock })) })) }, 'retrieved messages')
+    log.debug({ messages: res.map(r => ({ stream: r.streamName, ms: r.messages.map(m => ({ type: m.type, size: (m.type === 'prune:v1' ? m.prune : m.update).byteLength, rclock: m.redisClock })) })) }, 'retrieved messages')
     return res
   }
 

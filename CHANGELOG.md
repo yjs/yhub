@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.25] - 2026-06-22
+
+### New Features
+
+- **History pruning API.** `POST /prune/{org}/{docid}` and the import-API method `yhub.pruneDoc(room, filters)` permanently compact *churned* history — content that was both inserted **and** deleted within a filtered range. Filters mirror `/rollback` (`from`/`to` unix timestamps, `by`, `contentIds`, `withCustomAttributions`); only content whose insertion *and* deletion both fall in the range is pruned. The matched content is garbage-collected from the non-GC document and removed from the contentmap, so it no longer appears in the [activity](API.md#activity) or [changeset](API.md#changeset) APIs and no longer occupies storage — while live content (inserted but never deleted) and the current visible document state are untouched. Pruning the span between two activity entries effectively *merges* them; pass `{ from: 0, to: Number.MAX_SAFE_INTEGER }` to compact a document's entire history. **Irreversible:** the prune is distributed as a `prune:v1` directive on the Redis stream and baked into persistence on the next compaction (store-before-trim, so there is no lossy window). Internally adds a `computePruneSet` compute task (the strict intersection — `Y.intersectSets` — of the in-range insertions and deletions) and threads an optional serialized `IdSet` through `mergeUpdates` to drive `Y.gcIdSet`. ([API docs](API.md#prune), [`src/server.js`](src/server.js), [`src/index.js`](src/index.js), [`src/compute.js`](src/compute.js), [`src/compute-worker.js`](src/compute-worker.js), [`src/y-utils.js`](src/y-utils.js), [`src/types.js`](src/types.js))
+
+### Bug Fixes
+
+- **`stream.getMessages` debug logging no longer assumes every message carries an `update`.** The retrieval debug log read `m.update.byteLength` for every message; the new `prune:v1` directive has no `update`, so this would throw whenever debug logging was enabled and a prune directive was on the stream. The log now narrows by message type. ([`src/stream.js`](src/stream.js))
+
+### Internal
+
+- **Migrated to `@y/y`'s Renderer API** (now `^14.0.0-rc.20`). The attribution-manager constructors were replaced by renderers: changeset/activity delta rendering uses `Y.createDiffRenderer(prevDoc, nextDoc, { attrs })` consumed via `toDelta({ renderer })` / `toDeltaDeep({ renderer })` (previously `Y.createAttributionManagerFromDiff` passed positionally), and `Y.TwosetRenderer` replaces `Y.TwosetAttributionManager`. The rollback undo option `ignoreRemoteMapChanges` was renamed to `ignoreRemoteAttributeChanges`. ([`src/compute-worker.js`](src/compute-worker.js))
+
 ## [0.2.22] - 2026-06-05
 
 ### New Features

@@ -66,7 +66,7 @@ export class YHub {
               taskLog.info('task started')
               // execute compact task
               const d = await this.getDoc(task.room, { gc: true, nongc: true, contentmap: true, contentids: true, references: true })
-              if (!strm.isSmallerRedisClock(d.lastPersistedClock, d.lastClock)) {
+              if (!strm.isSmallerRedisClock(d.lastPersistedClock, d.lastUpdateClock)) {
                 taskLog.debug('nothing to compact, trimming only')
                 await this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
                 taskLog.info('task completed (trim only)')
@@ -122,6 +122,12 @@ export class YHub {
     const references = persistedDoc.references
     const awareness = /** @type {Include['awareness'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.awareness ? protocol.mergeAwarenessUpdates(cachedMessages.messages.filter(m => m.type === 'awareness:v1').map(m => m.update)) : null)
     const lastClock = strm.maxRedisClock(persistedDoc.lastClock, cachedMessages.lastClock)
+    // last clock of a content-bearing message (update or prune). awareness messages don't
+    // change the document, so they must not trigger persistence (see worker compact guard).
+    const lastUpdateClock = cachedMessages.messages.reduce(
+      (clk, m) => m.type !== 'awareness:v1' ? strm.maxRedisClock(clk, m.redisClock) : clk,
+      persistedDoc.lastClock
+    )
     const mergedContentIds = Y.mergeContentIds(contentids)
     cachedMessages.messages.forEach(m => {
       // only add update messages that are newer that what we currently know
@@ -158,6 +164,7 @@ export class YHub {
       contentmap: /** @type {Include['contentmap'] extends true ? Uint8Array<ArrayBuffer> : null} */ (mergedContentmap != null ? Y.encodeContentMap(mergedContentmap) : null),
       contentids: /** @type {Include['contentids'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.contentids === true ? Y.encodeContentIds(mergedCids) : null),
       lastClock,
+      lastUpdateClock,
       lastPersistedClock: persistedDoc.lastClock,
       references,
       awareness

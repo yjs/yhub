@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.26] - 2026-06-24
+
+### Bug Fixes
+
+- **Awareness-only rooms are no longer persisted as empty documents.** The compaction guard decided whether there was anything to store by comparing the last persisted clock against `lastClock` — the id of the room stream's last entry *of any type*. Because `awareness:v1` messages live on the same stream, they advanced `lastClock`, so a room that only ever received awareness updates (presence/cursors, no document edits) would be persisted on every compaction as an empty Yjs document — a wasteful `yhub_ydoc_v1` row plus S3 assets, keyed at the awareness clock. The guard now compares against the last *content* clock: the newest `ydoc:update:v1` **or** `prune:v1` message, with awareness excluded. Awareness-only streams take the trim-only path and are never persisted (they are still trimmed, and the stream is deleted once its entries age past `minMessageLifetime`); prune directives still trigger compaction. ([`src/index.js`](src/index.js))
+
+### Internal
+
+- **Compaction skips the document fetch + merge when there is nothing new to persist.** The worker previously called `getDoc` — which pulls the persisted ydoc blobs from S3/Postgres and runs both `mergeUpdates` passes — *before* it could tell whether anything had changed, so every self-re-enqueued compaction cycle on a live room paid that cost just to discover there was nothing to do. The worker now does a cheap pre-check first: it pulls the Redis stream and the persisted clock (`persistence.retrieveDoc(room, {})` — a single `SELECT t`, no S3) concurrently, computes the last content clock, and on the no-op path trims **without** fetching or merging the document. `getDoc` gained an optional `cachedMessages` so the persist path reuses the stream already pulled instead of reading Redis a second time. ([`src/index.js`](src/index.js))
+
 ## [0.2.25] - 2026-06-22
 
 ### New Features

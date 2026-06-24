@@ -197,7 +197,6 @@ export const $task = $compactTask
  * @template {{ gc?: boolean, nongc?: boolean, contentmap?: boolean, references?: boolean, contentids?: boolean, awareness?: boolean }} [Include=any]
  * @typedef {import('lib0/ts').Prettify<{
  *   lastClock: string,
- *   lastUpdateClock: string,
  *   lastPersistedClock: string,
  *   gcDoc: IfHasConf<Include, 'gc', Uint8Array<ArrayBuffer>>,
  *   nongcDoc: IfHasConf<Include, 'nongc', Uint8Array<ArrayBuffer>>,

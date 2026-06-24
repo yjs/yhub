@@ -64,14 +64,25 @@ export class YHub {
             try {
               this.conf.worker?.events?.taskStart?.({ room: task.room, timestamp: taskTs })
               taskLog.info('task started')
-              // execute compact task
-              const d = await this.getDoc(task.room, { gc: true, nongc: true, contentmap: true, contentids: true, references: true })
-              if (!strm.isSmallerRedisClock(d.lastPersistedClock, d.lastUpdateClock)) {
+              // cheap pre-check: pull the stream and the persisted clock (no ydoc blobs, no S3) so
+              // we can skip the expensive fetch+merge when there is nothing new to persist. awareness
+              // messages don't change the document, so only update/prune messages advance lastUpdateClock.
+              const [cachedMessages, persisted] = await promise.all([
+                this.stream.getMessages([{ room: task.room, clock: '0' }]).then(ms => ms[0] || { messages: [], lastClock: '0' }),
+                this.persistence.retrieveDoc(task.room, {})
+              ])
+              const lastUpdateClock = cachedMessages.messages.reduce(
+                (clk, m) => m.type !== 'awareness:v1' ? strm.maxRedisClock(clk, m.redisClock) : clk,
+                persisted.lastClock
+              )
+              if (!strm.isSmallerRedisClock(persisted.lastClock, lastUpdateClock)) {
                 taskLog.debug('nothing to compact, trimming only')
-                await this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
+                await this.stream.trimMessages(task.room, strm.maxRedisClock(persisted.lastClock, cachedMessages.lastClock), this.stream.minMessageLifetime, task.redisClock)
                 taskLog.info('task completed (trim only)')
                 return null
               }
+              // there is new content: fetch + merge the ydoc, reusing the stream we already pulled
+              const d = await this.getDoc(task.room, { gc: true, nongc: true, contentmap: true, contentids: true, references: true }, { cachedMessages })
               this.conf.worker?.events?.docUpdate?.(object.assign({}, d, { references: null }))
               await this.persistence.store(task.room, d)
               await promise.all([
@@ -108,12 +119,13 @@ export class YHub {
    * @param {Include} includeContent
    * @param {object} opts
    * @param {boolean} [opts.gcOnMerge] whether to gc when merging updates. (default: true)
+   * @param {{ messages: Array<t.Message & { redisClock: string }>, lastClock: string }} [opts.cachedMessages] pre-fetched stream messages, to avoid pulling the redis stream again
    * @return {Promise<t.DocTable<Include>>}
    */
-  async getDoc (room, includeContent, { gcOnMerge = true } = {}) {
+  async getDoc (room, includeContent, { gcOnMerge = true, cachedMessages: prefetched } = {}) {
     const [persistedDoc, cachedMessages] = await promise.all([
       this.persistence.retrieveDoc(room, object.assign({}, includeContent, { contentids: /** @type {const} */ (true) })),
-      this.stream.getMessages([{ room, clock: '0' }]).then(ms => ms[0] || { messages: [], lastClock: '0' })
+      prefetched ?? this.stream.getMessages([{ room, clock: '0' }]).then(ms => ms[0] || { messages: [], lastClock: '0' })
     ])
     const gcDoc = persistedDoc.gcDoc
     const nongcDoc = persistedDoc.nongcDoc
@@ -122,12 +134,6 @@ export class YHub {
     const references = persistedDoc.references
     const awareness = /** @type {Include['awareness'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.awareness ? protocol.mergeAwarenessUpdates(cachedMessages.messages.filter(m => m.type === 'awareness:v1').map(m => m.update)) : null)
     const lastClock = strm.maxRedisClock(persistedDoc.lastClock, cachedMessages.lastClock)
-    // last clock of a content-bearing message (update or prune). awareness messages don't
-    // change the document, so they must not trigger persistence (see worker compact guard).
-    const lastUpdateClock = cachedMessages.messages.reduce(
-      (clk, m) => m.type !== 'awareness:v1' ? strm.maxRedisClock(clk, m.redisClock) : clk,
-      persistedDoc.lastClock
-    )
     const mergedContentIds = Y.mergeContentIds(contentids)
     cachedMessages.messages.forEach(m => {
       // only add update messages that are newer that what we currently know
@@ -164,7 +170,6 @@ export class YHub {
       contentmap: /** @type {Include['contentmap'] extends true ? Uint8Array<ArrayBuffer> : null} */ (mergedContentmap != null ? Y.encodeContentMap(mergedContentmap) : null),
       contentids: /** @type {Include['contentids'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.contentids === true ? Y.encodeContentIds(mergedCids) : null),
       lastClock,
-      lastUpdateClock,
       lastPersistedClock: persistedDoc.lastClock,
       references,
       awareness

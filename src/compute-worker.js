@@ -169,7 +169,7 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
             t = attr.val
           } else if (attr.name === 'delete') {
             actBy = attr.val
-          } else if (customAttributions != null && attr.name.startsWith('insert:')) {
+          } else if (customAttributions != null && attr.name.startsWith('delete:')) {
             customAttributions.push({ k: attr.name.slice(7), v: attr.val })
           }
         })

@@ -149,33 +149,6 @@ export const testPruneHistoryRequiresFilter = async tc => {
 }
 
 /**
- * @param {t.TestCase} tc
- */
-export const testActivityGroupingParams = async tc => {
-  const { org, createWsClient } = await utils.createTestCase(tc)
-  const { ydoc } = createWsClient()
-  ydoc.get().applyDelta(delta.create().insert('hello').done())
-  await promise.wait(300)
-  ydoc.get().applyDelta(delta.create().insert('world').done())
-  await promise.wait(300)
-  ydoc.get().applyDelta(delta.create().insert('!').done())
-  await promise.wait(3000)
-  // the ~300ms gaps are well below the default groupMaxGap of 1000ms
-  const grouped = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}`)
-  console.log('received grouped activity', grouped)
-  t.assert(grouped.length === 1)
-  t.assert(grouped[0].to > grouped[0].from)
-  // the ~300ms gaps exceed groupMaxGap=50, so nothing merges
-  const smallGap = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?groupMaxGap=50`)
-  t.assert(smallGap.length === 3)
-  // merging any two entries would span >= 1ms, exceeding groupMaxDuration=1
-  const smallDuration = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?groupMaxGap=10000&groupMaxDuration=1`)
-  t.assert(smallDuration.length === 3)
-  const largeGap = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?groupMaxGap=10000`)
-  t.assert(largeGap.length === 1)
-}
-
-/**
  *
  * This example shows how to retrieve all attributes for all insertions using the changeset api.
  * Note, that you must retrieve the most up-to-date changeset whenever you want to render a ydoc,

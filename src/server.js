@@ -470,6 +470,8 @@ export const createYHubServer = async (yhub, conf) => {
     const limit = number.parseInt(req.getQuery('limit') || number.MAX_SAFE_INTEGER.toString())
     const reverse = req.getQuery('order') === 'desc'
     const group = req.getQuery('group') !== 'false'
+    const groupMaxGap = number.parseInt(req.getQuery('groupMaxGap') || '1000')
+    const groupMaxDuration = number.parseInt(req.getQuery('groupMaxDuration') || number.MAX_SAFE_INTEGER.toString())
     const withCustomAttributionsParam = req.getQuery('withCustomAttributions')
     /** @type {Array<{k: string, v: string}>|null} */
     const withCustomAttributions = withCustomAttributionsParam ? parseCustomAttributionsParam(withCustomAttributionsParam) : null
@@ -487,7 +489,7 @@ export const createYHubServer = async (yhub, conf) => {
       return
     }
     try {
-      const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeDelta), String(limit), reverse ? 'desc' : 'asc', String(group), withCustomAttributionsParam || '', String(includeCustomAttributions), contentIdsParam || '']
+      const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeDelta), String(limit), reverse ? 'desc' : 'asc', String(group), String(groupMaxGap), String(groupMaxDuration), withCustomAttributionsParam || '', String(includeCustomAttributions), contentIdsParam || '']
       const responseData = await yhub.stream.cachedGet('activity', cacheArgs, async () => {
         const { contentmap: contentmapBin, nongcDoc } = await yhub.getDoc(room, { nongc: true, contentmap: true })
         return yhub.computePool.activity({
@@ -502,7 +504,9 @@ export const createYHubServer = async (yhub, conf) => {
           includeDelta,
           limit,
           reverse,
-          group
+          group,
+          groupMaxGap,
+          groupMaxDuration
         }, { room })
       })
       if (!aborted) {

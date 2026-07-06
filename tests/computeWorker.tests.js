@@ -1,5 +1,6 @@
 import * as t from 'lib0/testing'
 import * as Y from '@y/y'
+import * as decoding from 'lib0/decoding'
 import { createComputePool } from '../src/compute.js'
 
 /**
@@ -85,6 +86,70 @@ export const testRollback = async _tc => {
   console.log('verifyDoc', { s: verifyDoc.get('test').toDelta().toJSON(), nongcDoc, result })
   t.assert(verifyDoc.get('test').toString() === 'hello', 'rollback should revert user2 changes')
   verifyDoc.destroy()
+  doc.destroy()
+  await pool.destroy()
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testActivityGrouping = async _tc => {
+  const pool = createComputePool({ poolSize: 2 })
+  const doc = new Y.Doc({ gc: false })
+  // three edits by the same user at timestamps 1000, 1500, 2000
+  doc.get('test').insert(0, 'hello')
+  const contentIds1 = Y.createContentIdsFromUpdate(Y.encodeStateAsUpdate(doc))
+  const contentmap1 = Y.createContentMapFromContentIds(
+    contentIds1,
+    [Y.createContentAttribute('insert', 'user1'), Y.createContentAttribute('insertAt', 1000)],
+    [Y.createContentAttribute('delete', 'user1'), Y.createContentAttribute('deleteAt', 1000)]
+  )
+  doc.get('test').insert(5, ' world')
+  const contentIds2 = Y.createContentIdsFromUpdate(Y.encodeStateAsUpdate(doc))
+  const contentmap2 = Y.createContentMapFromContentIds(
+    Y.excludeContentIds(contentIds2, contentIds1),
+    [Y.createContentAttribute('insert', 'user1'), Y.createContentAttribute('insertAt', 1500)],
+    [Y.createContentAttribute('delete', 'user1'), Y.createContentAttribute('deleteAt', 1500)]
+  )
+  doc.get('test').insert(11, '!')
+  const nongcDoc = Y.encodeStateAsUpdate(doc)
+  const contentmap3 = Y.createContentMapFromContentIds(
+    Y.excludeContentIds(Y.createContentIdsFromUpdate(nongcDoc), contentIds2),
+    [Y.createContentAttribute('insert', 'user1'), Y.createContentAttribute('insertAt', 2000)],
+    [Y.createContentAttribute('delete', 'user1'), Y.createContentAttribute('deleteAt', 2000)]
+  )
+  const contentmapBin = Y.encodeContentMap(Y.mergeContentMaps([contentmap1, contentmap2, contentmap3]))
+  /**
+   * @param {object} opts
+   * @return {Promise<Array<{ from: number, to: number, by: string? }>>}
+   */
+  const activity = async (opts = {}) => decoding.readAny(decoding.createDecoder(await pool.activity({
+    nongcDoc,
+    contentmapBin,
+    from: 0,
+    to: Number.MAX_SAFE_INTEGER,
+    by: '',
+    withCustomAttributions: null,
+    includeCustomAttributions: false,
+    includeDelta: false,
+    limit: Number.MAX_SAFE_INTEGER,
+    reverse: false,
+    group: true,
+    groupMaxGap: 1000,
+    groupMaxDuration: Number.MAX_SAFE_INTEGER,
+    ...opts
+  })))
+  // default: 500ms gaps are below groupMaxGap=1000, everything merges
+  const grouped = await activity({})
+  t.compare(grouped.map(a => [a.from, a.to]), [[1000, 2000]])
+  // gaps exceed groupMaxGap=400, nothing merges
+  const smallGap = await activity({ groupMaxGap: 400 })
+  t.compare(smallGap.map(a => [a.from, a.to]), [[1000, 1000], [1500, 1500], [2000, 2000]])
+  // merging the third edit would span 1000ms >= groupMaxDuration=600, so it starts a new group
+  const capped = await activity({ groupMaxGap: 10000, groupMaxDuration: 600 })
+  t.compare(capped.map(a => [a.from, a.to]), [[1000, 1500], [2000, 2000]])
+  const ungrouped = await activity({ group: false })
+  t.assert(ungrouped.length === 3)
   doc.destroy()
   await pool.destroy()
 }

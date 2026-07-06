@@ -62,6 +62,10 @@
 
 - **Strip phantom local client in `mergeAwarenessUpdates`.** The y-protocols `Awareness` constructor seeds its own `clientID` via `setLocalState({})`, which leaked as a phantom empty-state client to every consumer of the merged bytes (WS initial sync, GET `/ydoc?awareness=true`). The merger now removes its own clientID before encoding, so the `byteLength > 3` "empty awareness" check on the WS initial-sync path is now actually correct. ([`src/protocol.js`](src/protocol.js))
 
+### New Features
+
+- **Configurable activity grouping.** The `GET /activity` endpoint accepts two new query parameters: `groupMaxGap` (maximum gap in milliseconds between consecutive changes by the same user that still merges them into one entry, default `1000` — previously hardcoded) and `groupMaxDuration` (maximum total span in milliseconds of a grouped entry, default unlimited). Both only apply when grouping is enabled.
+
 ## [0.2.18] - 2026-04-22
 
 ### New Features

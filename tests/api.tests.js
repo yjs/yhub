@@ -172,7 +172,7 @@ export const testAttributeInsertedContent = async tc => {
   const attributions = Y.decodeContentMap(response.attributions)
   // render all inserts (extracting deletions from the equation so they stay properly deleted)
   console.log({ attributions })
-  const deltaWithAttributedInserts = ytype.toDelta({ renderer: new Y.TwosetRenderer(Y.diffIdMap(attributions.inserts, attributions.deletes), Y.createIdMap()) })
+  const deltaWithAttributedInserts = ytype.toDelta({ renderer: new Y.AttributionsRenderer({ inserts: Y.diffIdMap(attributions.inserts, attributions.deletes), deletes: Y.createIdMap() }) })
 
   console.log({
     attrResult: JSON.stringify(deltaWithAttributedInserts.toJSON())

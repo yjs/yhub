@@ -185,8 +185,8 @@ export const createTestCase = async tc => {
 export const waitDocsSynced = (ydoc1, ydoc2) => {
   console.info('waiting for docs to sync...')
   return promise.until(100_000, () => {
-    const cids1 = Y.createContentIdsFromDoc(ydoc1)
-    const cids2 = Y.createContentIdsFromDoc(ydoc2)
+    const cids1 = Y.createContentIdsFromDoc(ydoc1, true)
+    const cids2 = Y.createContentIdsFromDoc(ydoc2, true)
     const diff = Y.excludeContentIds(cids1, cids2)
     const isSynced = diff.deletes.isEmpty() && diff.inserts.isEmpty()
     isSynced && console.info('docs sycned!')
@@ -200,8 +200,8 @@ export const waitDocsSynced = (ydoc1, ydoc2) => {
 /**
  * @param {import('../src/index.js').YHub} yhub
  */
-export const waitTasksProcessed = async yhub =>
-  t.groupAsync('waiting for all tasks to be processed', () => promise.untilAsync(async () => {
+export const waitTasksProcessed = async yhub => {
+  await t.groupAsync('waiting for all tasks to be processed', () => promise.untilAsync(async () => {
     const [pendingTasksSize, activeStreams] = await promise.all([yhub.stream.getPendingTasksSize(), yhub.stream.getActiveStreams().then(as => as.length)])
     console.log({ pendingTasksSize, activeStreams })
     if (pendingTasksSize > 0) {
@@ -209,3 +209,11 @@ export const waitTasksProcessed = async yhub =>
     }
     return pendingTasksSize === 0 && activeStreams === 0
   }, (yhub.conf.redis.minMessageLifetime ?? 10000) * 50))
+  // Drop the params-keyed activity/changeset response cache (see `cachedGet` in src/stream.js). That
+  // cache is not doc-version-aware, so a same-query read before and after a mutation shares a key and
+  // could otherwise be served the stale pre-mutation result within `cacheTtl` (e.g. testPruneHistory).
+  // Tests treat "all tasks processed" as "fully consistent view", so evict here rather than disable the
+  // cache (which would only be an EX:0 error) in production config.
+  const cacheKeys = await yhub.stream.redis.keys(`${yhub.stream.prefix}:cache:*`)
+  if (cacheKeys.length > 0) await yhub.stream.redis.del(cacheKeys)
+}

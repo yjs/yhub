@@ -55,6 +55,8 @@ const $computeTask = s.$union(
     withCustomAttributions: s.$array(s.$object({ k: s.$string, v: s.$string })).nullable,
     includeCustomAttributions: s.$boolean,
     includeDelta: s.$boolean,
+    includeYdoc: s.$boolean,
+    includeAttributions: s.$boolean,
     limit: s.$number,
     reverse: s.$boolean,
     group: s.$boolean,
@@ -354,6 +356,8 @@ class ComputePool {
    * @param {Array<{k: string, v: string}>|null} opts.withCustomAttributions
    * @param {boolean} opts.includeCustomAttributions
    * @param {boolean} opts.includeDelta
+   * @param {boolean} opts.includeYdoc
+   * @param {boolean} opts.includeAttributions
    * @param {number} opts.limit
    * @param {boolean} opts.reverse
    * @param {boolean} opts.group

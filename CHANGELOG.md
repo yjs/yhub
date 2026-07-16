@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **Changeset & activity delta rendering moved to `Y.AttributionsRenderer`; the diffing renderer (`Y.createDiffRenderer`) is gone.** Deltas now render the document **as it was at `to`** — a point-in-time baseline (`renderedContent` = insertions − deletions ≤ `to`) with the `from`/`to`/`by`/`withCustomAttributions`-filtered attributions overlaid — instead of diffing a `prevDoc`/`nextDoc` pair. Response changes: `GET /changeset?ydoc=true` now returns a single `ydoc` (a partially garbage-collected document at `to`; deleted content outside the attribution window is gc'd, in-range deletes kept restorable) instead of `prevDoc`/`nextDoc`. `GET /activity` now always returns `{ activity: [...] }` (previously a bare array) — the top-level shape is stable — and gains `ydoc=true` (adds a shared `ydoc`, with each entry carrying a `renderedContent` IdSet) and `attributions=true` (per-entry attribution `ContentMap`). Render client-side with `Y.createAttributionsRenderer` on a `gc: false` doc — see [Rendering with AttributionsRenderer](API.md#rendering-with-attributionsrenderer). ([`src/compute-worker.js`](src/compute-worker.js), [`src/compute.js`](src/compute.js), [`src/server.js`](src/server.js))
+- **`events.docUpdate` config callback signature changed.** Following the `@y/y` upgrade (its `Attributions` class was removed), the second argument passed to a configured top-level `events.docUpdate` is now a `ContentMap` (`{ inserts, deletes }` IdMaps) instead of a `Y.Attributions` instance. ([`src/types.js`](src/types.js))
+
+### Dependencies
+
+- **Bumped `@y/y` to `^14.0.0-rc.24` and `lib0` to `^1.0.0-rc.22`.** Adapts to the renamed Renderer API (`Y.TwosetRenderer` → `Y.AttributionsRenderer`) and `Y.createContentIdsFromDoc`'s new required `insertsContainDeletes` argument. Import-API consumers that share `@y/y` types with yhub should upgrade in lockstep. ([`package.json`](package.json))
+
 ## [0.2.26] - 2026-06-24
 
 ### Bug Fixes

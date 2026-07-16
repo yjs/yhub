@@ -132,13 +132,15 @@ export const testActivityGrouping = async _tc => {
     withCustomAttributions: null,
     includeCustomAttributions: false,
     includeDelta: false,
+    includeYdoc: false,
+    includeAttributions: false,
     limit: Number.MAX_SAFE_INTEGER,
     reverse: false,
     group: true,
     groupMaxGap: 1000,
     groupMaxDuration: Number.MAX_SAFE_INTEGER,
     ...opts
-  })))
+  }))).activity
   // default: 500ms gaps are below groupMaxGap=1000, everything merges
   const grouped = await activity({})
   t.compare(grouped.map(a => [a.from, a.to]), [[1000, 2000]])

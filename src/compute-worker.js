@@ -97,30 +97,27 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       const { nongcDoc: nongcDocBin, contentmapBin, from, to, by, withCustomAttributions, includeYdoc, includeDelta, includeAttributions } = msg
       const contentmap = Y.decodeContentMap(contentmapBin)
       const filteredAttributions = filterContentMap(contentmap, from ?? undefined, to ?? undefined, by || undefined, undefined, withCustomAttributions)
-      const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMap(contentmap, 0, from != null ? from - 1 : undefined, undefined, undefined, null))
       const afterContentIds = Y.createContentIdsFromContentMap(filterContentMap(contentmap, 0, to ?? undefined, undefined, undefined, null))
-      const prevDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, beforeContentIds)
-      const nextDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, afterContentIds)
       /** @type {any} */
       const response = {}
       if (includeAttributions) {
         response.attributions = Y.encodeContentMap(filteredAttributions)
       }
       if (includeYdoc || includeDelta) {
-        if (includeYdoc) {
-          response.prevDoc = prevDocUpdate
-          response.nextDoc = nextDocUpdate
-        }
+        // The document as it was at `to`: a gc:false prefix of the nongc doc (content up to `to`),
+        // with deleted content outside the changeset's attribution window garbage-collected away. Its
+        // alive content is exactly the state at `to`, so the AttributionsRenderer overlay (attributions
+        // alone, no renderedContent) renders the diff.
+        const doc = new Y.Doc({ gc: false })
+        Y.applyUpdate(doc, Y.intersectUpdateWithContentIds(nongcDocBin, afterContentIds))
+        Y.gcIdSet(doc, Y.diffIdSet(afterContentIds.deletes, filteredAttributions.deletes))
         if (includeDelta) {
-          const prevDoc = new Y.Doc()
-          const nextDoc = new Y.Doc()
-          Y.applyUpdate(prevDoc, prevDocUpdate)
-          Y.applyUpdate(nextDoc, nextDocUpdate)
-          const renderer = Y.createDiffRenderer(prevDoc, nextDoc, { attributions: filteredAttributions })
-          response.delta = nextDoc.get().toDelta({ renderer }).toJSON()
-          prevDoc.destroy()
-          nextDoc.destroy()
+          response.delta = doc.get().toDelta({ renderer: Y.createAttributionsRenderer(filteredAttributions) }).toJSON()
         }
+        if (includeYdoc) {
+          response.ydoc = Y.encodeStateAsUpdate(doc)
+        }
+        doc.destroy()
       }
       const encoder = encoding.createEncoder()
       encoding.writeAny(encoder, response)
@@ -129,7 +126,7 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       break
     }
     case 'activity': {
-      const { nongcDoc: nongcDocBin, contentmapBin, from, to, by, contentIds: contentIdsBin, withCustomAttributions, includeCustomAttributions, includeDelta, limit, reverse, group, groupMaxGap, groupMaxDuration } = msg
+      const { nongcDoc: nongcDocBin, contentmapBin, from, to, by, contentIds: contentIdsBin, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupMaxGap, groupMaxDuration } = msg
       const contentmap = Y.decodeContentMap(contentmapBin)
       const contentIds = contentIdsBin && Y.decodeContentIds(contentIdsBin)
       const filteredAttributions = filterContentMap(contentmap, from, to, by || undefined, contentIds, withCustomAttributions)
@@ -178,7 +175,7 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
         }
       })
       activity.sort((a, b) => a.from - b.from)
-      /** @type {Array<{ from: number, to: number, by: string?, delta?: any, customAttributions: Array<{k:string,v:string}>|null }>} */
+      /** @type {Array<{ from: number, to: number, by: string?, delta?: any, attributions?: Uint8Array<ArrayBuffer>, renderedContent?: Uint8Array<ArrayBuffer>, customAttributions: Array<{k:string,v:string}>|null }>} */
       const activityResult = []
       const groupDistance = group ? groupMaxGap : 1
       /** @type {{ from: number, to: number, by: string?, customAttributions: Array<{k:string,v:string}>|null }|null} */
@@ -213,26 +210,50 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       if (limit > 0) {
         activityResult.splice(limit)
       }
-      if (includeDelta) {
-        activityResult.forEach(act => {
+      /** @type {Uint8Array<ArrayBuffer>|null} */
+      let ydocOut = null
+      if (includeYdoc || includeDelta || includeAttributions) {
+        // A single gc:false doc shared across every entry: the nongc prefix up to the latest `to`.
+        // Each entry is re-projected back to its own `act.to` via its `renderedContent` IdSet.
+        const maxTo = activityResult.reduce((m, a) => Math.max(m, a.to), 0)
+        const docContentIds = Y.createContentIdsFromContentMap(filterContentMap(contentmap, 0, maxTo, undefined, undefined, null))
+        const doc = new Y.Doc({ gc: false })
+        Y.applyUpdate(doc, Y.intersectUpdateWithContentIds(nongcDocBin, docContentIds))
+        const root = doc.share.keys().next().value || ''
+        // Per-entry attribution overlay (`attrs`, uniformly stamped as the entry's author/time) and
+        // point-in-time baseline (`renderedContent` = content alive at the entry's `to`).
+        const perItem = activityResult.map(act => {
           const actAttributions = filterContentMap(filteredAttributions, act.from, act.to, undefined, undefined, null)
-          const beforeContentIds = Y.createContentIdsFromContentMap(filterContentMap(contentmap, 0, act.from != null ? act.from - 1 : undefined, undefined, undefined, null))
-          const afterContentIds = Y.createContentIdsFromContentMap(filterContentMap(contentmap, 0, act.to, undefined, undefined, null))
-          const prevDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, beforeContentIds)
-          const nextDocUpdate = Y.intersectUpdateWithContentIds(nongcDocBin, afterContentIds)
-          const prevDoc = new Y.Doc()
-          const nextDoc = new Y.Doc()
-          Y.applyUpdate(prevDoc, prevDocUpdate)
-          Y.applyUpdate(nextDoc, nextDocUpdate)
           const attrs = Y.createContentMapFromContentIds(Y.createContentIdsFromContentMap(actAttributions), [Y.createContentAttribute('insert', act.by), Y.createContentAttribute('insertAt', act.from)], [Y.createContentAttribute('delete', act.by), Y.createContentAttribute('deleteAt', act.from)])
-          const renderer = Y.createDiffRenderer(prevDoc, nextDoc, { attributions: attrs })
-          act.delta = nextDoc.get(nextDoc.share.keys().next().value || '').toDeltaDeep({ renderer }).toJSON()
-          prevDoc.destroy()
-          nextDoc.destroy()
+          const afterContentIds = Y.createContentIdsFromContentMap(filterContentMap(contentmap, 0, act.to, undefined, undefined, null))
+          return { attrs, renderedContent: Y.diffIdSet(afterContentIds.inserts, afterContentIds.deletes) }
         })
+        if (includeYdoc) {
+          // Drop deleted content that no entry renders and that isn't attributed, shrinking the doc we
+          // ship. Everything kept stays restorable (gc:false); gcIdSet only collects deleted structs.
+          const keep = Y.mergeIdSets([...perItem.map(p => p.renderedContent), Y.createIdSetFromIdMap(filteredAttributions.inserts), Y.createIdSetFromIdMap(filteredAttributions.deletes)])
+          Y.gcIdSet(doc, Y.diffIdSet(docContentIds.deletes, keep))
+        }
+        activityResult.forEach((act, i) => {
+          const { attrs, renderedContent } = perItem[i]
+          if (includeDelta) {
+            act.delta = doc.get(root).toDeltaDeep({ renderer: Y.createAttributionsRenderer(attrs, { renderedContent }) }).toJSON()
+          }
+          if (includeAttributions) {
+            act.attributions = Y.encodeContentMap(attrs)
+          }
+          if (includeYdoc) {
+            act.renderedContent = Y.encodeIdSet(renderedContent)
+          }
+        })
+        if (includeYdoc) {
+          ydocOut = Y.encodeStateAsUpdate(doc)
+        }
+        doc.destroy()
       }
       const encoder = encoding.createEncoder()
-      encoding.writeAny(encoder, activityResult)
+      // response is always `{ activity, ydoc? }` — the top-level shape is stable regardless of `ydoc`
+      encoding.writeAny(encoder, includeYdoc ? { ydoc: ydocOut, activity: activityResult } : { activity: activityResult })
       const result = encoding.toUint8Array(encoder)
       port.postMessage(result, [result.buffer])
       break

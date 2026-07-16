@@ -121,17 +121,19 @@ before and after state of a Yjs doc. Optionally, include relevant attributions.
   * `by=string`: comma-separated list of user-ids that matches the attributions
   * `withCustomAttributions=string`: filter by custom attributions using `key:value` pairs, comma-separated (e.g. `source:import,tag:v2`). Only changes matching all specified attributions are included.
   * `contentIds`: Changeset that describes the changes between two versions. @todo not implemented
-  * `ydoc=true`: include encoded Yjs docs
-  * `delta=true`: include delta representation
-  * `attributions=true`: include attributions
-  * Returns `{ prevDoc?: Y.Doc, nextDoc?: Y.Doc, attributions?: Y.ContentMap, delta?: Delta }` - currently returns only the ydoc.get()-delta.
+  * `ydoc=true`: include the encoded document **as it was at `to`** — a single partially garbage-collected Yjs update. Deleted content outside the attribution window is gc'd; in-range deletes are kept restorable.
+  * `delta=true`: include the delta representation — the document at `to` with the in-range attributions highlighted.
+  * `attributions=true`: include the attributions `ContentMap`.
+  * Returns `{ ydoc?: Uint8Array, attributions?: Y.ContentMap, delta?: Delta }`.
+
+The `ydoc` is the document at `to`; its alive content already *is* that point-in-time state, so you render its differences by applying it to a `gc: false` doc and overlaying the `attributions` with an `AttributionsRenderer` (see [Rendering with AttributionsRenderer](#rendering-with-attributionsrenderer)).
 
 #### Example: visualize editing trail of the past day
 
 * Retrieve activity `GET /activity/{org}/{docid}?from={now-1day}`
 * Optionally, bundle changes that belong to each other: `[1, 2, 70, 71] ⇒ [2, 71]` - because `1,2` and `70,71` belong to each other.
 * For each timestamp: `GET /changeset/{org}/{docid}?from=timestamps[I - 1]&to=timestamps[I]&delta=true&attributions=true`
-* Which will give you the state of the document at timestamp `from`: `deltaState` and the (attributed) diff that is needed to get to timestamp `to`: `diff`.
+* The `delta` renders the document as it was at `to`, with the changes attributed to the `[from, to]` interval highlighted.
 
 ### Activity
 
@@ -148,10 +150,49 @@ the activity API and the changeset API to reconstruct an editing trail.
   * `group=boolean`: bundle consecutive changes from the same user into a single entry (experimental)
   * `groupMaxGap=number`: maximum time gap (in milliseconds) between consecutive changes by the same user that still merges them into a single entry (default: `1000`). Only applies when grouping is enabled.
   * `groupMaxDuration=number`: maximum total span (in milliseconds) of a grouped entry (`entry.to - entry.from`). A change is not merged into a group if the resulting span would exceed this value (default: unlimited). Only applies when grouping is enabled.
-  * `delta=boolean`: include delta representation for each activity entry
+  * `delta=boolean`: include a delta representation for each activity entry — the document at that entry's `to`, with the entry's changes highlighted.
+  * `ydoc=boolean`: return a single shared partially-gc'd document for the whole list, plus per entry a `renderedContent` IdSet (= content alive at the entry's `to`). The response shape becomes `{ ydoc, activity }`. Render any entry client-side by applying `ydoc` to a `gc: false` doc and overlaying an `AttributionsRenderer` with that entry's `renderedContent` (and `attributions`) — see [Rendering with AttributionsRenderer](#rendering-with-attributionsrenderer).
+  * `attributions=boolean`: include each entry's attribution `ContentMap` (as `attributions: Uint8Array`).
   * `customAttributions=true`: include the list of custom attributions associated with each activity entry. When enabled, each entry includes a `customAttributions` field containing deduplicated `{ k, v }` pairs collected from the underlying attribution attributes (e.g. `insert:<key>`). When grouping is enabled, custom attributions from merged entries are combined and deduplicated.
-  * Returns `Array<{ from: number, to: number, by: string?, delta?: Delta, customAttributions?: Array<{ k: string, v: string }> }>`
-    * `customAttributions` is only present when `customAttributions=true`
+  * Returns `{ activity: Array<{ from: number, to: number, by: string?, delta?: Delta, renderedContent?: Uint8Array, attributions?: Uint8Array, customAttributions?: Array<{ k: string, v: string }> }>, ydoc?: Uint8Array }`. The top-level shape is stable regardless of `ydoc`.
+    * `ydoc` is present only when `ydoc=true`; `renderedContent` on each entry only when `ydoc=true`; `attributions` only when `attributions=true`; `customAttributions` only when `customAttributions=true`.
+
+### Rendering with `AttributionsRenderer`
+
+Both APIs return Yjs updates plus attribution metadata that you render with `@y/y`'s
+`AttributionsRenderer`. Always apply the returned document to a **`gc: false`** doc so deleted
+content can be restored for the diff.
+
+**Changeset** — the returned `ydoc` is already the document at `to`, so the `attributions` alone
+render the diff (its alive content is the point-in-time baseline):
+
+```js
+import * as Y from '@y/y'
+const doc = new Y.Doc({ gc: false })
+Y.applyUpdate(doc, changeset.ydoc)
+const delta = doc.get().toDelta({
+  renderer: Y.createAttributionsRenderer(Y.decodeContentMap(changeset.attributions))
+})
+```
+
+**Activity** — one shared `ydoc` is re-projected to each entry's moment via that entry's
+`renderedContent` (the content alive at the entry's `to`):
+
+```js
+const doc = new Y.Doc({ gc: false })
+Y.applyUpdate(doc, res.ydoc)
+const root = doc.share.keys().next().value || ''
+res.activity.forEach(entry => {
+  const renderer = Y.createAttributionsRenderer(
+    Y.decodeContentMap(entry.attributions),
+    { renderedContent: Y.decodeIdSet(entry.renderedContent) }
+  )
+  const delta = doc.get(root).toDeltaDeep({ renderer })
+})
+```
+
+When `delta=true`, the server performs exactly this rendering and returns the result as
+`changeset.delta` / `entry.delta`.
 
 ### Prune
 

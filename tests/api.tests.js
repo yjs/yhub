@@ -76,17 +76,23 @@ export const testChangesetRestApi = async tc => {
   await promise.wait(3000)
   // fetch timestamps
   console.log('finished creating documents - fetching activity')
-  const activity = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)
+  const activity = (await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)).activity
   console.log('received activity', activity)
   t.assert(activity.length === 3)
   {
     const changeset = await fetchYhubResponse(`/changeset/${org}/${ydoc.guid}?from=${activity[1].from}&to=${activity[1].to}&ydoc=true&delta=true&attributions=true`)
     console.log(changeset)
-    console.log('prevDoc: ', JSON.stringify(Y.createDocFromUpdate(changeset.prevDoc).toJSON()))
-    console.log('nextDoc: ', JSON.stringify(Y.createDocFromUpdate(changeset.nextDoc).toJSON()))
+    // `ydoc` is a single gc:false doc baked at `to`; apply to a gc:false doc to keep deleted content
+    const ydocAtTo = new Y.Doc({ gc: false })
+    Y.applyUpdate(ydocAtTo, changeset.ydoc)
+    console.log('ydoc @ to: ', JSON.stringify(ydocAtTo.get().toDelta().toJSON()))
     console.log('delta: ', JSON.stringify(changeset.delta))
     // @ts-ignore
     t.assert(changeset.delta.children.map(c => c.insert).join('') === 'hello world!')
+    // round-trip: rendering the returned ydoc with the returned attributions reproduces the server delta
+    const clientDelta = ydocAtTo.get().toDelta({ renderer: Y.createAttributionsRenderer(Y.decodeContentMap(changeset.attributions)) }).toJSON()
+    console.log('client delta: ', JSON.stringify(clientDelta))
+    t.compare(clientDelta, changeset.delta)
   }
   { // rollback
     const rollbackResult = await postYhubRequest(`/rollback/${org}/${ydoc.guid}`, { from: activity[1].from, to: activity[1].to }) // undo (delete "hello" & insert "!")
@@ -97,6 +103,41 @@ export const testChangesetRestApi = async tc => {
     console.log(rollbackContent.toJSON())
     t.compare(rollbackContent, delta.create().insert('hello hi world').done())
   }
+}
+
+/**
+ * `/activity?ydoc=true` returns a single shared gc:false doc plus, per entry, a `renderedContent`
+ * IdSet (and `attributions` when requested). Rendering each entry client-side with
+ * `AttributionsRenderer` on the shared doc must reproduce the server-computed `delta`. Querying with
+ * `from` set to the last change leaves the earlier delete unattributed, so it is garbage-collected
+ * out of the shared doc — exercising the partial-gc path and its re-apply on the client.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testActivityYdocRoundTrip = async tc => {
+  const { org, createWsClient } = await utils.createTestCase(tc)
+  const { ydoc } = createWsClient()
+  ydoc.get().applyDelta(delta.create().insert('hello world').done())
+  await promise.wait(100)
+  ydoc.get().applyDelta(delta.create().delete(6).retain(5).insert('!').done()) // -> 'world!'
+  await promise.wait(100)
+  ydoc.get().applyDelta(delta.create().insert('hi ').done()) // -> 'hi world!'
+  await promise.wait(3000)
+  const all = (await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)).activity
+  t.assert(all.length === 3)
+  const res = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false&from=${all[2].from}&ydoc=true&delta=true&attributions=true`)
+  t.assert(res.ydoc != null && Array.isArray(res.activity) && res.activity.length === 1, 'ydoc=true wraps { ydoc, activity }')
+  const shared = new Y.Doc({ gc: false })
+  Y.applyUpdate(shared, res.ydoc)
+  const root = shared.share.keys().next().value || ''
+  // alive content survives the gc + re-apply (would break if gc'ing the unattributed delete detached 'world')
+  const aliveDelta = /** @type {any} */ (shared.get(root).toDelta().toJSON())
+  t.assert(aliveDelta.children.map(/** @param {any} c */ c => c.insert).join('') === 'hi world!', 'alive content survives gc + re-apply')
+  res.activity.forEach((/** @type {any} */ act) => {
+    t.assert(act.renderedContent != null && act.attributions != null, 'entry carries renderedContent + attributions')
+    const clientDelta = shared.get(root).toDeltaDeep({ renderer: Y.createAttributionsRenderer(Y.decodeContentMap(act.attributions), { renderedContent: Y.decodeIdSet(act.renderedContent) }) }).toJSON()
+    t.compare(clientDelta, act.delta, 'client render matches server delta')
+  })
 }
 
 /**
@@ -116,7 +157,7 @@ export const testPruneHistory = async tc => {
   ydoc.get().applyDelta(delta.create().insert('hi ').done()) // fresh insertion -> 'hi world'
   await utils.waitTasksProcessed(yhub)
   // before pruning: insert('hello world'), delete('hello '), insert('hi ') => 3 activity events
-  const before = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)
+  const before = (await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)).activity
   console.log('activity before prune', before)
   t.assert(before.length === 3)
   const from = Math.min(...before.map((/** @type {{ from: number }} */ a) => a.from))
@@ -126,7 +167,7 @@ export const testPruneHistory = async tc => {
   t.assert(pruneResult.success === true)
   await utils.waitTasksProcessed(yhub)
   // after pruning: the delete event for 'hello ' is gone (its insert+delete churn pruned) => 2 events
-  const after = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)
+  const after = (await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)).activity
   console.log('activity after prune', after)
   t.assert(after.length === 2, 'pruning removes the churned insert+delete from history')
   // the visible document is unchanged by pruning
@@ -319,7 +360,7 @@ export const testCustomAttributionsRollback = async tc => {
   /**
    * @type {Array<any>}
    */
-  const activityUserA = await fetchYhubResponse(`/activity/${org}/${initialDoc.guid}?group=false&withCustomAttributions=source:userA&delta=true&customAttributions=true&delta=true`)
+  const activityUserA = (await fetchYhubResponse(`/activity/${org}/${initialDoc.guid}?group=false&withCustomAttributions=source:userA&delta=true&customAttributions=true&delta=true`)).activity
   console.log('activity', JSON.stringify(activityUserA))
   t.assert(activityUserA.length === 1)
   activityUserA.forEach(act => {
@@ -445,7 +486,7 @@ export const testLargeDoc = async tc => {
     utils.cleanPreviousClients()
     await promise.wait(1000)
     await t.measureTimeAsync('fetching /activity from test api', async () => {
-      const activity = await fetchYhubResponse(`/activity/${org}/${docidFull}?group=true`)
+      const activity = (await fetchYhubResponse(`/activity/${org}/${docidFull}?group=true`)).activity
       logMemoryUsed('fetched activity')
       console.log({ activity })
       t.assert(activity.length > 0)
@@ -494,10 +535,10 @@ export const testActivityContentIdsFilter = async tc => {
       item = item.left
     }
     const contentIdsParam = encodeURIComponent(buffer.toBase64(Y.encodeContentIds(Y.createContentIds(idset, idset))))
-    return await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false&contentIds=${contentIdsParam}&delta=true`)
+    return (await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false&contentIds=${contentIdsParam}&delta=true`)).activity
   }
   // Without filter: both attribute changes should appear
-  const allActivity = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)
+  const allActivity = (await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)).activity
   t.assert(allActivity.length === 2, 'expected 2 activity entries without contentIds filter')
   console.log({ allActivity })
   // Encode ContentIds derived from the captured 'someattr' update

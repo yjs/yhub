@@ -283,10 +283,25 @@ export const $config = s.$object({
   worker: s.$object({
     taskConcurrency: s.$number,
     events: s.$object({
-      docUpdate: /** @type {s.$Optional<s.Schema<(doctable:DocTable<{ gc: true, nongc: true, contentmap: true, contentids: true }>) => void>>} */ (s.$function.optional),
-      taskStart: /** @type {s.$Optional<s.Schema<(event: { room: Room, timestamp: number }) => void>>} */ (s.$function.optional),
-      taskComplete: /** @type {s.$Optional<s.Schema<(event: { room: Room, duration: number, error: Error|null }) => void>>} */ (s.$function.optional)
+      docUpdate: /** @type {s.$Optional<s.Schema<(doctable:DocTable<{ gc: true, nongc: true, contentmap: true, contentids: true }>) => void>>} */ (s.$function.optional)
     }).optional
+  }).nullable.optional,
+  telemetry: s.$object({
+    /**
+     * TracerProvider override. Defaults to the OTel global provider — register your SDK
+     * (e.g. `new NodeSDK({..}).start()`) before `createYHub`.
+     */
+    tracerProvider: /** @type {s.$Optional<s.Schema<import('@opentelemetry/api').TracerProvider>>} */ (s.$any.optional),
+    meterProvider: /** @type {s.$Optional<s.Schema<import('@opentelemetry/api').MeterProvider>>} */ (s.$any.optional),
+    /**
+     * Receives every batch of span-updates (debounced) — e.g. to stream them to redis.
+     */
+    onUpdate: /** @type {s.$Optional<s.Schema<(updates: Array<import('./telemetry.js').SpanUpdate>) => void>>} */ (s.$function.optional),
+    /**
+     * pino level for the built-in per-span log line, or false to disable it. Spans that
+     * ended with an error always log at 'error'. (default: 'info')
+     */
+    log: s.$union(s.$literal('debug'), s.$literal('info'), s.$literal(false)).optional
   }).nullable.optional,
   server: s.$object({
     port: s.$number,

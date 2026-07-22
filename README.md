@@ -305,6 +305,81 @@ npm run start:server
 npm run start:worker
 ```
 
+## Telemetry
+
+y/hub measures every significant unit of work as a **span** — each compute-pool task
+(`yhub.compute.task`, incl. queue-wait, worker-thread phase timings, and errors), the
+worker's compaction cycle (`yhub.worker.compact`), and document reads (`yhub.getDoc`) —
+and streams them as an append-only **record of span-updates** (the `telemetry` module,
+OTel-inspired):
+
+```js
+[
+  { type: 'start_span', id: 'k3f9x1', parent: null, name: 'yhub.worker.compact', time: 120 },
+  { type: 'update_span', id: 'k3f9x1', attrs: [['room', {...}], ['storeMs', 12.4]] },
+  { type: 'end_span', id: 'k3f9x1', time: 8231042, success: true, err: false }
+]
+```
+
+Times are nanoseconds: each record carries an epoch-ns `origin` and every update `time`
+is an exact integer offset relative to it (absolute time = `origin + time`). Spans link
+across worker threads (and processes) by id. Telemetry is off by default — spans are still
+measured, but their updates are discarded, so there is no accumulation and no measurable
+overhead. Enable it by setting `telemetry` in the config:
+
+```javascript
+const yhub = await createYHub({
+  // ...
+  telemetry: {
+    // pino level for the built-in per-span log line ('debug' | 'info' | false,
+    // default: 'info'); spans that ended with an error always log at 'error'
+    log: 'info',
+    // receives every batch of span-updates (debounced) — e.g. stream them to redis,
+    // or fold them into trees with the exported buildTree helper
+    onUpdate: updates => {
+      redis.xAdd('telemetry', '*', { updates: JSON.stringify(updates) }).catch(() => {})
+      for (const u of updates) {
+        if (u.type === 'update_span') {
+          for (const [name, value] of u.attrs) {
+            // abnormal stat: the `input` attribute of a compute task is a thunk returning
+            // the exact replayable task (incl. input buffers) — same-process only, and it
+            // pins the buffers: extract what you need, don't retain the update.
+            if (name === 'input' && shouldCapture(u.id)) storeReproducibleIssue(u.id, value())
+          }
+        }
+      }
+    }
+  }
+})
+```
+
+The update entries are plain JSON (`import('@y/hub').SpanUpdate`) — ignore unknown span
+names, new ones appear in minor releases. `import('@y/hub').telemetry` exports the
+underlying utilities (`createRecord`, `buildTree`, span handles with
+`span.span(name, fn)`, `span.attr(name, value)`, `span.end(err)`) — the module is
+self-contained and yhub-independent.
+
+### OpenTelemetry
+
+y/hub folds the span stream into real [OpenTelemetry](https://opentelemetry.io/) spans
+through `@opentelemetry/api` (a no-op unless an SDK is registered). Register any standard
+SDK before `createYHub` and set `telemetry` to get live traces
+(`worker.compact → getDoc → compute.task → phases`) plus a `yhub.op.duration` histogram
+(low-cardinality attributes only — document ids stay on spans and logs):
+
+```javascript
+import { NodeSDK } from '@opentelemetry/sdk-node'
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto'
+
+new NodeSDK({ serviceName: 'yhub-prod', traceExporter: new OTLPTraceExporter() }).start()
+const yhub = await createYHub({ /* ... */ telemetry: {} })
+```
+
+Alternatively pass `telemetry.tracerProvider` / `telemetry.meterProvider` explicitly
+(useful for tests and multi-tenant setups). Span timestamps come from the record — the
+epoch-ns origin plus exact monotonic offsets — so exported span durations equal the
+measured ones, immune to wall-clock adjustments mid-task.
+
 ## Scaling
 
 y/hub is designed for horizontal scaling:

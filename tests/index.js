@@ -6,10 +6,12 @@ import * as ws from './ws.tests.js'
 import * as storage from './storage.tests.js'
 import * as computeWorker from './computeWorker.tests.js'
 import * as agents from './agents.tests.js'
+import * as telemetry from './telemetry.tests.js'
 import { runTests } from 'lib0/testing'
 
 runTests({
   computeWorker,
+  telemetry,
   storage,
   api,
   auth,

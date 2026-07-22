@@ -10,10 +10,17 @@ import * as math from 'lib0/math'
 import { createComputePool } from './compute.js'
 import { agentTask } from './agents.js'
 import { logger } from './logger.js'
-import * as time from 'lib0/time'
+import * as tel from './telemetry.js'
+import { createTelemetry } from './telemetry-hub.js'
 
 export { createAuthPlugin } from './types.js'
 export { logger } from './logger.js'
+export { createTelemetry } from './telemetry-hub.js'
+export * as telemetry from './telemetry.js'
+
+/**
+ * @typedef {import('./telemetry.js').SpanUpdate} SpanUpdate
+ */
 
 const log = logger.child({ module: 'worker' })
 
@@ -37,7 +44,13 @@ export class YHub {
      * @type {Conf['server'] extends null ? null : server.YHubServer}
      */
     this.server = /** @type {any} */ (null)
-    this.computePool = createComputePool()
+    this.telemetry = createTelemetry(conf.telemetry)
+    /**
+     * The record all of this hub's spans append to — the hub's streaming record when
+     * telemetry is configured, a discarding one otherwise (measuring stays unconditional).
+     */
+    this.record = this.telemetry?.record ?? tel.createRecord({ discard: true })
+    this.computePool = createComputePool({ record: this.record })
     this._workerCtx = {
       shouldRun: false
     }
@@ -46,7 +59,7 @@ export class YHub {
   async startWorker () {
     if (this._workerCtx.shouldRun || this.conf.worker == null) return
     // create new worker context
-    const ctx = (this._ctx = {
+    const ctx = (this._workerCtx = {
       shouldRun: true
     })
     while (ctx.shouldRun) {
@@ -56,13 +69,13 @@ export class YHub {
         await promise.all(tasks.map(async task => {
           const taskLog = log.child({ taskType: task.type, room: task.room })
           if (task.type === 'compact') {
+            const span = this.record.span('yhub.worker.compact')
+            span.attr('room', task.room)
             /**
              * @type {Error | null}
              */
             let taskErr = null
-            const taskTs = time.getUnixTime()
             try {
-              this.conf.worker?.events?.taskStart?.({ room: task.room, timestamp: taskTs })
               taskLog.info('task started')
               // cheap pre-check: pull the stream and the persisted clock (no ydoc blobs, no S3) so
               // we can skip the expensive fetch+merge when there is nothing new to persist. awareness
@@ -76,25 +89,33 @@ export class YHub {
                 persisted.lastClock
               )
               if (!strm.isSmallerRedisClock(persisted.lastClock, lastUpdateClock)) {
+                span.attr('trimOnly', true)
                 taskLog.debug('nothing to compact, trimming only')
                 await this.stream.trimMessages(task.room, strm.maxRedisClock(persisted.lastClock, cachedMessages.lastClock), this.stream.minMessageLifetime, task.redisClock)
                 taskLog.info('task completed (trim only)')
                 return null
               }
               // there is new content: fetch + merge the ydoc, reusing the stream we already pulled
-              const d = await this.getDoc(task.room, { gc: true, nongc: true, contentmap: true, contentids: true, references: true }, { cachedMessages })
+              const d = await this.getDoc(task.room, { gc: true, nongc: true, contentmap: true, contentids: true, references: true }, { cachedMessages, span })
               this.conf.worker?.events?.docUpdate?.(object.assign({}, d, { references: null }))
+              const storeStart = span.elapsed()
               await this.persistence.store(task.room, d)
+              const trimStart = span.elapsed()
               await promise.all([
                 this.persistence.deleteReferences(d.references),
                 this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
               ])
+              span.attr('storeMs', (trimStart - storeStart) / 1e6)
+                .attr('trimMs', (span.elapsed() - trimStart) / 1e6)
+                .attr('gcDocSize', d.gcDoc?.byteLength ?? 0)
+                .attr('nongcDocSize', d.nongcDoc?.byteLength ?? 0)
+                .attr('refsDeleted', d.references?.length ?? 0)
               taskLog.info({ gcDocSize: d.gcDoc?.byteLength, nongcDocSize: d.nongcDoc?.byteLength, refsDeleted: d.references?.length ?? 0 }, 'task completed')
             } catch (e) {
               taskErr = /** @type {Error} */ (e)
               throw e
             } finally {
-              this.conf.worker?.events?.taskComplete?.({ room: task.room, duration: time.getUnixTime() - taskTs, error: taskErr })
+              span.end(taskErr)
             }
           }
         }))
@@ -120,59 +141,70 @@ export class YHub {
    * @param {object} opts
    * @param {boolean} [opts.gcOnMerge] whether to gc when merging updates. (default: true)
    * @param {{ messages: Array<t.Message & { redisClock: string }>, lastClock: string }} [opts.cachedMessages] pre-fetched stream messages, to avoid pulling the redis stream again
+   * @param {import('./telemetry.js').Span?} [opts.span] parent telemetry span
    * @return {Promise<t.DocTable<Include>>}
    */
-  async getDoc (room, includeContent, { gcOnMerge = true, cachedMessages: prefetched } = {}) {
-    const [persistedDoc, cachedMessages] = await promise.all([
-      this.persistence.retrieveDoc(room, object.assign({}, includeContent, { contentids: /** @type {const} */ (true) })),
-      prefetched ?? this.stream.getMessages([{ room, clock: '0' }]).then(ms => ms[0] || { messages: [], lastClock: '0' })
-    ])
-    const gcDoc = persistedDoc.gcDoc
-    const nongcDoc = persistedDoc.nongcDoc
-    const contentmap = persistedDoc.contentmap?.map(Y.decodeContentMap)
-    const contentids = /** @type {Array<Uint8Array>} */ (persistedDoc.contentids).map(Y.decodeContentIds)
-    const references = persistedDoc.references
-    const awareness = /** @type {Include['awareness'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.awareness ? protocol.mergeAwarenessUpdates(cachedMessages.messages.filter(m => m.type === 'awareness:v1').map(m => m.update)) : null)
-    const lastClock = strm.maxRedisClock(persistedDoc.lastClock, cachedMessages.lastClock)
-    const mergedContentIds = Y.mergeContentIds(contentids)
-    cachedMessages.messages.forEach(m => {
-      // only add update messages that are newer that what we currently know
-      if (t.$updateMessage.check(m) && strm.isSmallerRedisClock(persistedDoc.lastClock, m.redisClock)) {
-        // attributions can only be assigned once. Filter out "known" attributions
-        const mcontentmap = Y.excludeContentMap(Y.decodeContentMap(m.contentmap), mergedContentIds)
-        const mcontentids = Y.createContentIdsFromContentMap(mcontentmap)
-        Y.insertIntoIdSet(mergedContentIds.inserts, mcontentids.inserts)
-        Y.insertIntoIdSet(mergedContentIds.deletes, mcontentids.deletes)
-        gcDoc?.push(m.update)
-        nongcDoc?.push(m.update)
-        contentmap?.push(mcontentmap)
-        contentids.push(mcontentids)
+  async getDoc (room, includeContent, { gcOnMerge = true, cachedMessages: prefetched, span: parent = null } = {}) {
+    const span = parent !== null ? parent.span('yhub.getDoc') : this.record.span('yhub.getDoc')
+    span.attr('room', room)
+    try {
+      const [persistedDoc, cachedMessages] = await promise.all([
+        this.persistence.retrieveDoc(room, object.assign({}, includeContent, { contentids: /** @type {const} */ (true) })),
+        prefetched ?? this.stream.getMessages([{ room, clock: '0' }]).then(ms => ms[0] || { messages: [], lastClock: '0' })
+      ])
+      span.attr('cachedMessages', cachedMessages.messages.length)
+      const gcDoc = persistedDoc.gcDoc
+      const nongcDoc = persistedDoc.nongcDoc
+      const contentmap = persistedDoc.contentmap?.map(Y.decodeContentMap)
+      const contentids = /** @type {Array<Uint8Array>} */ (persistedDoc.contentids).map(Y.decodeContentIds)
+      const references = persistedDoc.references
+      const awareness = /** @type {Include['awareness'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.awareness ? protocol.mergeAwarenessUpdates(cachedMessages.messages.filter(m => m.type === 'awareness:v1').map(m => m.update)) : null)
+      const lastClock = strm.maxRedisClock(persistedDoc.lastClock, cachedMessages.lastClock)
+      const mergedContentIds = Y.mergeContentIds(contentids)
+      cachedMessages.messages.forEach(m => {
+        // only add update messages that are newer that what we currently know
+        if (t.$updateMessage.check(m) && strm.isSmallerRedisClock(persistedDoc.lastClock, m.redisClock)) {
+          // attributions can only be assigned once. Filter out "known" attributions
+          const mcontentmap = Y.excludeContentMap(Y.decodeContentMap(m.contentmap), mergedContentIds)
+          const mcontentids = Y.createContentIdsFromContentMap(mcontentmap)
+          Y.insertIntoIdSet(mergedContentIds.inserts, mcontentids.inserts)
+          Y.insertIntoIdSet(mergedContentIds.deletes, mcontentids.deletes)
+          gcDoc?.push(m.update)
+          nongcDoc?.push(m.update)
+          contentmap?.push(mcontentmap)
+          contentids.push(mcontentids)
+        }
+      })
+      // prune directives garbage-collect churned history: drop the referenced IdSet from the
+      // nongc doc, the contentmap, and the contentids. Applied unconditionally (idempotent).
+      const pruneMsgs = cachedMessages.messages.filter(m => t.$pruneMessage.check(m))
+      const pruneSet = pruneMsgs.length > 0 ? Y.mergeIdSets(pruneMsgs.map(m => Y.decodeIdSet(m.prune))) : null
+      const mergedContentmap = contentmap != null ? Y.mergeContentMaps(contentmap) : null
+      const mergedCids = Y.mergeContentIds(contentids)
+      if (pruneSet != null) {
+        if (mergedContentmap != null) {
+          mergedContentmap.inserts = Y.diffIdMap(mergedContentmap.inserts, pruneSet)
+          mergedContentmap.deletes = Y.diffIdMap(mergedContentmap.deletes, pruneSet)
+        }
+        mergedCids.inserts = Y.diffIdSet(mergedCids.inserts, pruneSet)
+        mergedCids.deletes = Y.diffIdSet(mergedCids.deletes, pruneSet)
       }
-    })
-    // prune directives garbage-collect churned history: drop the referenced IdSet from the
-    // nongc doc, the contentmap, and the contentids. Applied unconditionally (idempotent).
-    const pruneMsgs = cachedMessages.messages.filter(m => t.$pruneMessage.check(m))
-    const pruneSet = pruneMsgs.length > 0 ? Y.mergeIdSets(pruneMsgs.map(m => Y.decodeIdSet(m.prune))) : null
-    const mergedContentmap = contentmap != null ? Y.mergeContentMaps(contentmap) : null
-    const mergedCids = Y.mergeContentIds(contentids)
-    if (pruneSet != null) {
-      if (mergedContentmap != null) {
-        mergedContentmap.inserts = Y.diffIdMap(mergedContentmap.inserts, pruneSet)
-        mergedContentmap.deletes = Y.diffIdMap(mergedContentmap.deletes, pruneSet)
+      const pruneBin = pruneSet != null ? Y.encodeIdSet(pruneSet) : undefined
+      const res = {
+        gcDoc: /** @type {Include['gc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (gcDoc ? await this.computePool.mergeUpdates(gcOnMerge, gcDoc, { room, span }) : null),
+        nongcDoc: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (nongcDoc ? await this.computePool.mergeUpdates(false, nongcDoc, { room, span }, pruneBin) : null),
+        contentmap: /** @type {Include['contentmap'] extends true ? Uint8Array<ArrayBuffer> : null} */ (mergedContentmap != null ? Y.encodeContentMap(mergedContentmap) : null),
+        contentids: /** @type {Include['contentids'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.contentids === true ? Y.encodeContentIds(mergedCids) : null),
+        lastClock,
+        lastPersistedClock: persistedDoc.lastClock,
+        references,
+        awareness
       }
-      mergedCids.inserts = Y.diffIdSet(mergedCids.inserts, pruneSet)
-      mergedCids.deletes = Y.diffIdSet(mergedCids.deletes, pruneSet)
-    }
-    const pruneBin = pruneSet != null ? Y.encodeIdSet(pruneSet) : undefined
-    return {
-      gcDoc: /** @type {Include['gc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (gcDoc ? await this.computePool.mergeUpdates(gcOnMerge, gcDoc, { room }) : null),
-      nongcDoc: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (nongcDoc ? await this.computePool.mergeUpdates(false, nongcDoc, { room }, pruneBin) : null),
-      contentmap: /** @type {Include['contentmap'] extends true ? Uint8Array<ArrayBuffer> : null} */ (mergedContentmap != null ? Y.encodeContentMap(mergedContentmap) : null),
-      contentids: /** @type {Include['contentids'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.contentids === true ? Y.encodeContentIds(mergedCids) : null),
-      lastClock,
-      lastPersistedClock: persistedDoc.lastClock,
-      references,
-      awareness
+      span.end()
+      return res
+    } catch (err) {
+      span.end(err)
+      throw err
     }
   }
 
@@ -260,7 +292,8 @@ export const createYHub = async conf => {
     pluginCount: conf.persistence.length,
     workerConcurrency: conf.worker?.taskConcurrency ?? null,
     computePoolSize: yhub.computePool.maxPoolSize,
-    serverPort: conf.server?.port ?? null
+    serverPort: conf.server?.port ?? null,
+    telemetryEnabled: conf.telemetry != null
   }, 'yhub initialized')
   yhub.startWorker().catch(err => log.error({ err }, 'worker failed'))
   // @todo start workers _after_ persistence plugin is done. Otherwise, workers might use

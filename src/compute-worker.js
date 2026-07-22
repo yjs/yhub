@@ -4,6 +4,7 @@ import * as time from 'lib0/time'
 import * as encoding from 'lib0/encoding'
 import { mergeUpdates } from './y-utils.js'
 import { logger } from './logger.js'
+import * as tel from './telemetry.js'
 
 const log = logger.child({ module: 'compute-worker' })
 
@@ -65,39 +66,68 @@ const createContentMap = (contentids, userid, customAttributions) => {
 }
 
 const port = parentPort
-port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg => {
+
+/**
+ * The worker's span record — drained into every reply; the main thread rebases the
+ * offsets onto its own record.
+ */
+const record = tel.createRecord()
+
+/**
+ * Id of the main-thread span of the current task — the worker's phase spans link to it
+ * across the thread boundary by id.
+ */
+let parentId = ''
+
+/**
+ * Measure a phase of the current task as a child span.
+ *
+ * @template T
+ * @param {string} name
+ * @param {() => T} f
+ * @returns {T}
+ */
+const measure = (name, f) => record.span(name, f, parentId)
+
+/**
+ * @returns {{ origin: number, updates: Array<import('./telemetry.js').SpanUpdate> }}
+ */
+const drainTelemetry = () => ({ origin: record.origin, updates: record.drain() })
+
+port.on('message', /** @param {{ task: import('./compute.js').ComputeTask, spanId: string }} _envelope */ ({ task: msg, spanId }) => {
   log.debug({ type: msg.type }, 'new compute task')
+  parentId = spanId
   switch (msg.type) {
     case 'mergeUpdates': {
       const result = mergeUpdates(msg.gc, msg.updates, msg.prune)
-      port.postMessage(result, [result.buffer])
+      port.postMessage({ result, telemetry: drainTelemetry() }, [result.buffer])
       break
     }
     case 'computePruneSet': {
       const { contentmapBin, from, to, by, contentIds: contentIdsBin, withCustomAttributions = null } = msg
-      const contentmap = Y.decodeContentMap(contentmapBin)
+      const contentmap = measure('decodeContentmap', () => Y.decodeContentMap(contentmapBin))
       const contentIds = contentIdsBin && Y.decodeContentIds(contentIdsBin)
-      const filtered = filterContentMap(contentmap, from, to, by, contentIds, withCustomAttributions)
+      const filtered = measure('filterAttributions', () => filterContentMap(contentmap, from, to, by, contentIds, withCustomAttributions))
       const { inserts, deletes } = Y.createContentIdsFromContentMap(filtered)
       const pruneSet = Y.intersectSets(inserts, deletes)
       if (pruneSet.clients.size === 0) {
-        port.postMessage(null)
+        port.postMessage({ result: null, telemetry: drainTelemetry() })
       } else {
         const result = Y.encodeIdSet(pruneSet)
-        port.postMessage(result, [result.buffer])
+        port.postMessage({ result, telemetry: drainTelemetry() }, [result.buffer])
       }
       break
     }
     case 'computeStateVector': {
       const result = Y.encodeStateVectorFromUpdate(msg.update)
-      port.postMessage(result, [result.buffer])
+      port.postMessage({ result, telemetry: drainTelemetry() }, [result.buffer])
       break
     }
     case 'changeset': {
       const { nongcDoc: nongcDocBin, contentmapBin, from, to, by, withCustomAttributions, includeYdoc, includeDelta, includeAttributions } = msg
-      const contentmap = Y.decodeContentMap(contentmapBin)
-      const filteredAttributions = filterContentMap(contentmap, from ?? undefined, to ?? undefined, by || undefined, undefined, withCustomAttributions)
-      const afterContentIds = Y.createContentIdsFromContentMap(filterContentMap(contentmap, 0, to ?? undefined, undefined, undefined, null))
+      const contentmap = measure('decodeContentmap', () => Y.decodeContentMap(contentmapBin))
+      const filteredAttributions = measure('filterAttributions', () => filterContentMap(contentmap, from ?? undefined, to ?? undefined, by || undefined, undefined, withCustomAttributions))
+      const afterContentIds = measure('computeAfterIds', () => Y.createContentIdsFromContentMap(filterContentMap(contentmap, 0, to ?? undefined, undefined, undefined, null)))
       /** @type {any} */
       const response = {}
       if (includeAttributions) {
@@ -109,27 +139,29 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
         // alive content is exactly the state at `to`, so the AttributionsRenderer overlay (attributions
         // alone, no renderedContent) renders the diff.
         const doc = new Y.Doc({ gc: false })
-        Y.applyUpdate(doc, Y.intersectUpdateWithContentIds(nongcDocBin, afterContentIds))
-        Y.gcIdSet(doc, Y.diffIdSet(afterContentIds.deletes, filteredAttributions.deletes))
+        measure('applyUpdate', () => {
+          Y.applyUpdate(doc, Y.intersectUpdateWithContentIds(nongcDocBin, afterContentIds))
+          Y.gcIdSet(doc, Y.diffIdSet(afterContentIds.deletes, filteredAttributions.deletes))
+        })
         if (includeDelta) {
-          response.delta = doc.get().toDelta({ renderer: Y.createAttributionsRenderer(filteredAttributions) }).toJSON()
+          response.delta = measure('renderDelta', () => doc.get().toDelta({ renderer: Y.createAttributionsRenderer(filteredAttributions) }).toJSON())
         }
         if (includeYdoc) {
-          response.ydoc = Y.encodeStateAsUpdate(doc)
+          response.ydoc = measure('encodeYdoc', () => Y.encodeStateAsUpdate(doc))
         }
         doc.destroy()
       }
       const encoder = encoding.createEncoder()
       encoding.writeAny(encoder, response)
       const result = encoding.toUint8Array(encoder)
-      port.postMessage(result, [result.buffer])
+      port.postMessage({ result, telemetry: drainTelemetry() }, [result.buffer])
       break
     }
     case 'activity': {
       const { nongcDoc: nongcDocBin, contentmapBin, from, to, by, contentIds: contentIdsBin, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupMaxGap, groupMaxDuration } = msg
-      const contentmap = Y.decodeContentMap(contentmapBin)
+      const contentmap = measure('decodeContentmap', () => Y.decodeContentMap(contentmapBin))
       const contentIds = contentIdsBin && Y.decodeContentIds(contentIdsBin)
-      const filteredAttributions = filterContentMap(contentmap, from, to, by || undefined, contentIds, withCustomAttributions)
+      const filteredAttributions = measure('filterAttributions', () => filterContentMap(contentmap, from, to, by || undefined, contentIds, withCustomAttributions))
       /**
        * @type {Array<{ from: number, to: number, by: string|null, customAttributions: { k: string, v: string}[]|null }>}
        */
@@ -218,23 +250,25 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
         const maxTo = activityResult.reduce((m, a) => Math.max(m, a.to), 0)
         const docContentIds = Y.createContentIdsFromContentMap(filterContentMap(contentmap, 0, maxTo, undefined, undefined, null))
         const doc = new Y.Doc({ gc: false })
-        Y.applyUpdate(doc, Y.intersectUpdateWithContentIds(nongcDocBin, docContentIds))
+        measure('applyUpdate', () => Y.applyUpdate(doc, Y.intersectUpdateWithContentIds(nongcDocBin, docContentIds)))
         const root = doc.share.keys().next().value || ''
         // Per-entry attribution overlay (`attrs`, uniformly stamped as the entry's author/time) and
         // point-in-time baseline (`renderedContent` = content alive at the entry's `to`).
-        const perItem = activityResult.map(act => {
+        const perItem = measure('computeItemAttrs', () => activityResult.map(act => {
           const actAttributions = filterContentMap(filteredAttributions, act.from, act.to, undefined, undefined, null)
           const attrs = Y.createContentMapFromContentIds(Y.createContentIdsFromContentMap(actAttributions), [Y.createContentAttribute('insert', act.by), Y.createContentAttribute('insertAt', act.from)], [Y.createContentAttribute('delete', act.by), Y.createContentAttribute('deleteAt', act.from)])
           const afterContentIds = Y.createContentIdsFromContentMap(filterContentMap(contentmap, 0, act.to, undefined, undefined, null))
           return { attrs, renderedContent: Y.diffIdSet(afterContentIds.inserts, afterContentIds.deletes) }
-        })
+        }))
         if (includeYdoc) {
           // Drop deleted content that no entry renders and that isn't attributed, shrinking the doc we
           // ship. Everything kept stays restorable (gc:false); gcIdSet only collects deleted structs.
-          const keep = Y.mergeIdSets([...perItem.map(p => p.renderedContent), Y.createIdSetFromIdMap(filteredAttributions.inserts), Y.createIdSetFromIdMap(filteredAttributions.deletes)])
-          Y.gcIdSet(doc, Y.diffIdSet(docContentIds.deletes, keep))
+          measure('gcDoc', () => {
+            const keep = Y.mergeIdSets([...perItem.map(p => p.renderedContent), Y.createIdSetFromIdMap(filteredAttributions.inserts), Y.createIdSetFromIdMap(filteredAttributions.deletes)])
+            Y.gcIdSet(doc, Y.diffIdSet(docContentIds.deletes, keep))
+          })
         }
-        activityResult.forEach((act, i) => {
+        measure('renderItems', () => activityResult.forEach((act, i) => {
           const { attrs, renderedContent } = perItem[i]
           if (includeDelta) {
             act.delta = doc.get(root).toDeltaDeep({ renderer: Y.createAttributionsRenderer(attrs, { renderedContent }) }).toJSON()
@@ -245,9 +279,9 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
           if (includeYdoc) {
             act.renderedContent = Y.encodeIdSet(renderedContent)
           }
-        })
+        }))
         if (includeYdoc) {
-          ydocOut = Y.encodeStateAsUpdate(doc)
+          ydocOut = measure('encodeYdoc', () => Y.encodeStateAsUpdate(doc))
         }
         doc.destroy()
       }
@@ -255,39 +289,42 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       // response is always `{ activity, ydoc? }` — the top-level shape is stable regardless of `ydoc`
       encoding.writeAny(encoder, includeYdoc ? { ydoc: ydocOut, activity: activityResult } : { activity: activityResult })
       const result = encoding.toUint8Array(encoder)
-      port.postMessage(result, [result.buffer])
+      port.postMessage({ result, telemetry: drainTelemetry() }, [result.buffer])
       break
     }
     case 'patchYdoc': {
       const { update, currentDoc, userid, customAttributions = [] } = msg
-      const currentContentIds = Y.createContentIdsFromUpdate(currentDoc)
-      const newContentIds = Y.excludeContentIds(Y.createContentIdsFromUpdate(update), currentContentIds)
-      const diffedUpdate = /** @type {Uint8Array<ArrayBuffer>} */ (Y.intersectUpdateWithContentIds(update, newContentIds))
+      const diffedUpdate = measure('diffUpdate', () => {
+        const currentContentIds = Y.createContentIdsFromUpdate(currentDoc)
+        const newContentIds = Y.excludeContentIds(Y.createContentIdsFromUpdate(update), currentContentIds)
+        return /** @type {Uint8Array<ArrayBuffer>} */ (Y.intersectUpdateWithContentIds(update, newContentIds))
+      })
       if (diffedUpdate.byteLength > 3) {
-        const contentmap = createContentMap(Y.createContentIdsFromUpdate(diffedUpdate), userid, customAttributions)
-        port.postMessage({ update: diffedUpdate, contentmap }, [diffedUpdate.buffer, contentmap.buffer])
+        const contentmap = measure('createContentmap', () => createContentMap(Y.createContentIdsFromUpdate(diffedUpdate), userid, customAttributions))
+        port.postMessage({ result: { update: diffedUpdate, contentmap }, telemetry: drainTelemetry() }, [diffedUpdate.buffer, contentmap.buffer])
       } else {
-        port.postMessage(null)
+        port.postMessage({ result: null, telemetry: drainTelemetry() })
       }
       break
     }
     case 'rollback': {
       const { nongcDoc, contentmapBin, from, to, by, contentIds: contentIdsBin, withCustomAttributions = null, userid, customAttributions = [] } = msg
-      const contentmap = Y.decodeContentMap(contentmapBin)
+      const contentmap = measure('decodeContentmap', () => Y.decodeContentMap(contentmapBin))
       const contentIds = contentIdsBin && Y.decodeContentIds(contentIdsBin)
-      const reducedAttributions = filterContentMap(contentmap, from, to, by, contentIds, withCustomAttributions)
+      const reducedAttributions = measure('filterAttributions', () => filterContentMap(contentmap, from, to, by, contentIds, withCustomAttributions))
       const revertIds = Y.createContentIdsFromContentMap(reducedAttributions)
       const ydoc = new Y.Doc({ gc: false })
-      Y.applyUpdate(ydoc, nongcDoc)
+      measure('applyUpdate', () => Y.applyUpdate(ydoc, nongcDoc))
       let update = /** @type {Uint8Array<ArrayBuffer> | null} */ (null)
       ydoc.once('update', (/** @type {Uint8Array<ArrayBuffer>} */ u) => { update = u })
-      Y.undoContentIds(ydoc, revertIds, { ignoreRemoteAttributeChanges: true })
+      measure('undoContentIds', () => Y.undoContentIds(ydoc, revertIds, { ignoreRemoteAttributeChanges: true }))
       ydoc.destroy()
       if (update != null) {
-        const resultContentmap = createContentMap(Y.createContentIdsFromUpdate(update), userid, customAttributions)
-        port.postMessage({ update, contentmap: resultContentmap }, [update.buffer, resultContentmap.buffer])
+        const u = update
+        const resultContentmap = measure('createContentmap', () => createContentMap(Y.createContentIdsFromUpdate(u), userid, customAttributions))
+        port.postMessage({ result: { update: u, contentmap: resultContentmap }, telemetry: drainTelemetry() }, [u.buffer, resultContentmap.buffer])
       } else {
-        port.postMessage({ update: null, contentmap: null })
+        port.postMessage({ result: { update: null, contentmap: null }, telemetry: drainTelemetry() })
       }
       break
     }

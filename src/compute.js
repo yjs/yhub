@@ -7,6 +7,7 @@ import * as Y from '@y/y'
 import * as math from 'lib0/math'
 import { mergeUpdates } from './y-utils.js'
 import { logger } from './logger.js'
+import * as tel from './telemetry.js'
 
 const log = logger.child({ module: 'compute' })
 
@@ -89,6 +90,66 @@ const $computeTask = s.$union(
  */
 
 /**
+ * Context threaded through compute tasks — `room` for logging, `span` as the telemetry parent.
+ *
+ * @typedef {{ room?: import('./types.js').Room, span?: import('./telemetry.js').Span? }} ComputeCtx
+ */
+
+/**
+ * Start a compute-task span under the ctx parent (or as a record root).
+ *
+ * @param {ComputePool} pool
+ * @param {ComputeCtx} ctx
+ * @param {ComputeTask['type']} taskType
+ */
+const startTaskSpan = (pool, ctx, taskType) => {
+  const span = ctx.span != null ? ctx.span.span('yhub.compute.task') : pool.record.span('yhub.compute.task')
+  span.attr('task', taskType)
+  ctx.room !== undefined && span.attr('room', ctx.room)
+  return span
+}
+
+/**
+ * Cheap per-task-type size attributes.
+ *
+ * @param {import('./telemetry.js').Span} span
+ * @param {ComputeTask} task
+ */
+const setTaskAttrs = (span, task) => {
+  switch (task.type) {
+    case 'mergeUpdates': {
+      let updateSize = 0
+      for (let i = 0; i < task.updates.length; i++) {
+        updateSize += task.updates[i].byteLength
+      }
+      span.attr('updates', task.updates.length).attr('updateSize', updateSize)
+      task.prune !== undefined && span.attr('pruneSize', task.prune.byteLength)
+      break
+    }
+    case 'computePruneSet':
+      span.attr('contentmapSize', task.contentmapBin.byteLength)
+      break
+    case 'computeStateVector':
+      span.attr('updateSize', task.update.byteLength)
+      break
+    case 'patchYdoc':
+      span.attr('updateSize', task.update.byteLength).attr('docSize', task.currentDoc.byteLength)
+      break
+    default: // changeset | activity | rollback
+      span.attr('docSize', task.nongcDoc.byteLength).attr('contentmapSize', task.contentmapBin.byteLength)
+  }
+}
+
+/**
+ * Result bytes of a completed task — object results (patchYdoc/rollback) count their
+ * update + contentmap.
+ *
+ * @param {any} result
+ * @returns {number | undefined}
+ */
+const resultSize = result => result == null ? undefined : (result.byteLength ?? (result.update?.byteLength ?? 0) + (result.contentmap?.byteLength ?? 0))
+
+/**
  * @param {ComputeWorker} cw
  */
 const finishWorker = (cw) => {
@@ -129,24 +190,46 @@ class ComputeWorker {
      */
     this._cbReject = null
     /**
-     * @type {Object<string, any>?}
+     * @type {ComputeCtx?}
      */
     this._logContext = null
-    this.worker.on('message', (result) => {
+    /**
+     * @type {import('./telemetry.js').Span?}
+     */
+    this._span = null
+    this.worker.on('message', (/** @type {{ result: any, telemetry: { origin: number, updates: Array<import('./telemetry.js').SpanUpdate> } }} */ { result, telemetry }) => {
       const resolve = this._cbResolve
+      const span = this._span
+      if (span !== null) {
+        const rs = resultSize(result)
+        rs !== undefined && span.attr('resultSize', rs)
+        // append the worker-side phase spans, rebasing their offsets onto this record's
+        // origin. Both origins are Date.now-derived, so cross-thread alignment is ~1ms;
+        // durations (offset diffs within one worker batch) stay exact.
+        const record = span.record
+        const delta = telemetry.origin - record.origin
+        telemetry.updates.forEach(u => {
+          u.type !== 'update_span' && (u.time = math.round(u.time + delta))
+          record.add(u)
+        })
+        span.end()
+        this._span = null
+      }
+      this._logContext = null
       finishWorker(this)
       resolve?.(result)
       drain(pool)
-      this._logContext = null
     })
     this.worker.on('error', (err) => {
-      log.error({ err, ...this._logContext }, 'worker failed')
+      log.error({ err, room: this._logContext?.room }, 'worker failed')
+      this._span?.end(err)
+      this._span = null
+      this._logContext = null
       const reject = this._cbReject
       this.isDead = true
       finishWorker(this)
       reject?.(err)
       drain(pool)
-      this._logContext = null
     })
     this.worker.on('exit', () => {
       this.isDead = true
@@ -157,25 +240,34 @@ class ComputeWorker {
   /**
    * @param {ComputeTask} task
    * @param {Array<ArrayBuffer>} transferList
-   * @param {Object<string, any>} logContext
+   * @param {ComputeCtx} logContext
+   * @param {import('./telemetry.js').Span} span
    * @param {(value: any) => void} resolve
    * @param {(reason: any) => void} reject
    */
-  run (task, transferList, logContext, resolve, reject) {
+  run (task, transferList, logContext, span, resolve, reject) {
     this.isComputing = true
     this.taskStart = time.getUnixTime()
     this.lastUsed = this.taskStart
     this._cbResolve = resolve
     this._cbReject = reject
     this._logContext = logContext
-    this.worker.postMessage(task, transferList)
+    this._span = span
+    span.attr('queueMs', span.elapsed() / 1e6)
+    this.worker.postMessage({ task, spanId: span.id }, transferList)
   }
 
   terminate () {
+    const err = new Error('Worker terminated')
+    const span = this._span
     const reject = this._cbReject
-    finishWorker(this)
-    reject?.(new Error('Worker terminated'))
+    // clear all worker state before running callbacks — code that re-enters the pool
+    // must see this worker as dead, not re-terminate it
+    this._span = null
     this.isDead = true
+    finishWorker(this)
+    span?.end(err)
+    reject?.(err)
     return this.worker.terminate()
   }
 }
@@ -189,10 +281,13 @@ const maxTaskDurationMs = 30 * 60 * 1000 // 30 minutes
 const getFreeWorker = (pool) => {
   const now = time.getUnixTime()
   for (let i = 0; i < pool.workers.length; i++) {
-    const w = pool.workers[i]
+    let w = pool.workers[i]
     if (w.isComputing && now - w.taskStart > maxTaskDurationMs) {
       log.warn({ workerIndex: i, taskDurationMs: now - w.taskStart }, 'terminating worker that exceeded max task duration')
       w.terminate()
+      // defensive re-read: terminate must never act on a stale slot if a future change
+      // lets callbacks re-enter drain synchronously (today reject/flush are async)
+      w = pool.workers[i]
     }
     if (w.isDead) {
       log.info({ workerIndex: i }, 'replacing dead worker')
@@ -215,31 +310,33 @@ const drain = (pool) => {
   while (pool.queue.length > 0) {
     const worker = getFreeWorker(pool)
     if (!worker) break
-    const task = /** @type {{ task: ComputeTask, transferList: ArrayBuffer[], logContext: Object<string, any>, resolve: (value: any) => void, reject: (reason: any) => void }} */ (pool.queue.shift())
-    worker.run(task.task, task.transferList, task.logContext, task.resolve, task.reject)
+    const task = /** @type {{ task: ComputeTask, transferList: ArrayBuffer[], logContext: ComputeCtx, span: import('./telemetry.js').Span, resolve: (value: any) => void, reject: (reason: any) => void }} */ (pool.queue.shift())
+    worker.run(task.task, task.transferList, task.logContext, task.span, task.resolve, task.reject)
   }
 }
 
 /**
- * @param {{ poolSize?: number }} [opts]
+ * @param {{ poolSize?: number, record?: import('./telemetry.js').Record }} [opts]
  */
 export const createComputePool = (opts = {}) => {
   const poolSize = opts.poolSize ?? math.max(1, cpus().length - 1)
-  return new ComputePool(poolSize)
+  return new ComputePool(poolSize, opts.record ?? tel.createRecord({ discard: true }))
 }
 
 class ComputePool {
   /**
    * @param {number} maxPoolSize
+   * @param {import('./telemetry.js').Record} record
    */
-  constructor (maxPoolSize) {
+  constructor (maxPoolSize, record) {
     this.maxPoolSize = maxPoolSize
+    this.record = record
     /**
      * @type {Array<ComputeWorker>}
      */
     this.workers = []
     /**
-     * @type {Array<{ task: ComputeTask, transferList: ArrayBuffer[], logContext: Object<string, any>, resolve: (value: any) => void, reject: (reason: any) => void }>}
+     * @type {Array<{ task: ComputeTask, transferList: ArrayBuffer[], logContext: ComputeCtx, span: import('./telemetry.js').Span, resolve: (value: any) => void, reject: (reason: any) => void }>}
      */
     this.queue = []
   }
@@ -247,13 +344,19 @@ class ComputePool {
   /**
    * @param {ComputeTask} task
    * @param {Array<ArrayBuffer>} transferList
-   * @param {Object<string, any>} logContext
+   * @param {ComputeCtx} logContext
    * @returns {Promise<any>}
    */
   run (task, transferList, logContext) {
     $computeTask.expect(task)
+    // the span starts at enqueue, so its duration includes queue-wait (stamped as queueMs
+    // at dispatch). `input` exposes the raw task for debug capture — only when the inputs
+    // are structured-clone copied (empty transferList), never as detached buffers.
+    const span = startTaskSpan(this, logContext, task.type)
+    setTaskAttrs(span, task)
+    transferList.length === 0 && span.attr('input', () => task)
     return promise.create((resolve, reject) => {
-      this.queue.push({ task, transferList, logContext, resolve, reject })
+      this.queue.push({ task, transferList, logContext, span, resolve, reject })
       if (this.queue.length > 1) {
         log.debug({ taskType: task.type, queueDepth: this.queue.length }, 'task queued, no free worker')
       }
@@ -271,7 +374,7 @@ class ComputePool {
    *
    * @param {boolean} gc
    * @param {Array<Uint8Array<ArrayBuffer>>} updates
-   * @param {Object<string, any>} logContext
+   * @param {ComputeCtx} logContext
    * @param {Uint8Array<ArrayBuffer>} [prune]
    * @returns {Promise<Uint8Array<ArrayBuffer>>}
    */
@@ -281,7 +384,18 @@ class ComputePool {
       totalSize += updates[i].byteLength
     }
     if (totalSize <= 5120 || updates.length <= 1) {
-      return promise.resolveWith(mergeUpdates(gc, updates, prune))
+      const span = startTaskSpan(this, logContext, 'mergeUpdates')
+      span.attr('inline', true).attr('updates', updates.length).attr('updateSize', totalSize)
+      prune !== undefined && span.attr('pruneSize', prune.byteLength)
+      span.attr('input', () => ({ type: 'mergeUpdates', gc, updates, prune }))
+      try {
+        const res = mergeUpdates(gc, updates, prune)
+        span.attr('resultSize', res.byteLength).end()
+        return promise.resolveWith(res)
+      } catch (err) {
+        span.end(err)
+        throw err
+      }
     }
     return this.run({ type: 'mergeUpdates', gc, updates, prune }, [], logContext)
   }
@@ -299,7 +413,7 @@ class ComputePool {
    * @param {string} [opts.by]
    * @param {Uint8Array<ArrayBuffer>} [opts.contentIds]
    * @param {Array<{k: string, v: string}>|null} [opts.withCustomAttributions]
-   * @param {Object<string, any>} [logContext]
+   * @param {ComputeCtx} [logContext]
    * @returns {Promise<Uint8Array<ArrayBuffer>|null>}
    */
   computePruneSet (opts, logContext = {}) {
@@ -317,12 +431,22 @@ class ComputePool {
    * ~32x cheaper than the scan (e.g. ~0.8ms vs ~25ms for a 1mb update).
    *
    * @param {Uint8Array<ArrayBuffer>} update
-   * @param {Object<string, any>} logContext
+   * @param {ComputeCtx} logContext
    * @returns {Promise<Uint8Array<ArrayBuffer>>}
    */
   computeStateVector (update, logContext = {}) {
     if (update.byteLength < 512 * 1024) {
-      return promise.resolveWith(Y.encodeStateVectorFromUpdate(update))
+      const span = startTaskSpan(this, logContext, 'computeStateVector')
+      span.attr('inline', true).attr('updateSize', update.byteLength)
+      span.attr('input', () => ({ type: 'computeStateVector', update }))
+      try {
+        const res = Y.encodeStateVectorFromUpdate(update)
+        span.attr('resultSize', res.byteLength).end()
+        return promise.resolveWith(res)
+      } catch (err) {
+        span.end(err)
+        throw err
+      }
     }
     return this.run({ type: 'computeStateVector', update }, [], logContext)
   }
@@ -338,7 +462,7 @@ class ComputePool {
    * @param {boolean} opts.includeYdoc
    * @param {boolean} opts.includeDelta
    * @param {boolean} opts.includeAttributions
-   * @param {Object<string, any>} [logContext]
+   * @param {ComputeCtx} [logContext]
    * @returns {Promise<Uint8Array<ArrayBuffer>>}
    */
   changeset (opts, logContext = {}) {
@@ -363,7 +487,7 @@ class ComputePool {
    * @param {boolean} opts.group
    * @param {number} opts.groupMaxGap
    * @param {number} opts.groupMaxDuration
-   * @param {Object<string, any>} [logContext]
+   * @param {ComputeCtx} [logContext]
    * @returns {Promise<Uint8Array<ArrayBuffer>>}
    */
   activity (opts, logContext = {}) {
@@ -376,7 +500,7 @@ class ComputePool {
    * @param {Uint8Array<ArrayBuffer>} opts.currentDoc
    * @param {string} opts.userid
    * @param {Array<{k: string, v: string}>} opts.customAttributions
-   * @param {Object<string, any>} [logContext]
+   * @param {ComputeCtx} [logContext]
    * @returns {Promise<{ update: Uint8Array<ArrayBuffer>, contentmap: Uint8Array<ArrayBuffer> } | null>}
    */
   patchYdoc (opts, logContext = {}) {
@@ -394,7 +518,7 @@ class ComputePool {
    * @param {Array<{k: string, v: string}>|null} [opts.withCustomAttributions]
    * @param {string} opts.userid
    * @param {Array<{k: string, v: string}>} opts.customAttributions
-   * @param {Object<string, any>} [logContext]
+   * @param {ComputeCtx} [logContext]
    * @returns {Promise<{ update: Uint8Array<ArrayBuffer>, contentmap: Uint8Array<ArrayBuffer> }>}
    */
   rollback (opts, logContext = {}) {
@@ -402,6 +526,14 @@ class ComputePool {
   }
 
   async destroy () {
+    // flush queued-but-undispatched tasks with the same semantics terminate() applies to
+    // the in-flight task — their spans started at enqueue and must end
+    const err = new Error('Worker terminated')
+    while (this.queue.length > 0) {
+      const e = /** @type {NonNullable<ReturnType<ComputePool['queue']['shift']>>} */ (this.queue.shift())
+      e.span.end(err)
+      e.reject(err)
+    }
     await promise.all(this.workers.map(w => w.terminate()))
   }
 }

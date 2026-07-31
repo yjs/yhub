@@ -277,6 +277,7 @@ const yhub = await createYHub(config)
 | `redis.socket` | `object` | no | Custom socket options merged into the Redis client socket config. See [node-redis socket options](https://github.com/redis/node-redis/blob/master/docs/client-configuration.md#socket-options) for available options. |
 | `postgres` | `string` | yes | PostgreSQL connection string |
 | `persistence` | `PersistencePlugin[]` | yes | One or more storage plugins (e.g. `S3PersistenceV1`). At least one is required. |
+| `computePoolSize` | `number` | no | Worker threads in the compute pool for CPU-intensive Yjs work (merging, state vectors, changesets). Default: number of cpus - 1. Set this explicitly when the process is restricted to a subset of cores — `os.cpus().length` does not reflect `taskset` or cgroup limits. |
 | `server` | `object \| null` | no | HTTP/WebSocket server config. Set to `null` to run without a server (worker/script mode). |
 | `server.port` | `number` | yes* | Port to listen on |
 | `server.auth` | `AuthPlugin` | yes* | Auth plugin created with `createAuthPlugin` |

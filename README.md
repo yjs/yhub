@@ -572,3 +572,10 @@ See [API.md](./API.md) for the REST API documentation including:
 - History and timestamps APIs
 - Rollback functionality
 - Webhook configuration
+
+## Benchmarks
+
+See [benchmarks/README.md](./benchmarks/README.md) for the cost model — what each
+operation a y/hub connection performs actually costs, and how it scales — and
+[benchmarks/RESULTS.md](./benchmarks/RESULTS.md) for measurements. Run them with
+`cd benchmarks && npm start`.

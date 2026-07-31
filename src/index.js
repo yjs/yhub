@@ -37,12 +37,15 @@ export class YHub {
      * @type {Conf['server'] extends null ? null : server.YHubServer}
      */
     this.server = /** @type {any} */ (null)
-    this.computePool = createComputePool()
+    this.computePool = createComputePool({ poolSize: conf.computePoolSize })
     this._workerCtx = {
       shouldRun: false
     }
   }
 
+  // @todo continiously claim tasks while compute is running without issues. skip and kill worker if
+  // there is an issue (e.g. oom). create a test case that ensures task is reclaimed even if compute
+  // task takes 5 minutes and no other worker is started.
   async startWorker () {
     if (this._workerCtx.shouldRun || this.conf.worker == null) return
     // create new worker context

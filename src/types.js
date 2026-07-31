@@ -277,6 +277,12 @@ export const $config = s.$object({
   }),
   postgres: s.$string,
   persistence: s.$array($persistencePlugin),
+  /**
+   * Number of worker threads in the compute pool, which performs CPU-intensive
+   * Yjs operations (merging, state vectors, changesets). (default: number of
+   * cpus - 1)
+   */
+  computePoolSize: s.$number.optional,
   events: s.$object({
     docUpdate: s.$lambda(s.$any, s.$instanceOf(Y.Doc), s.$object({ inserts: s.$instanceOf(Y.IdMap), deletes: s.$instanceOf(Y.IdMap) }), s.$undefined)
   }).optional,

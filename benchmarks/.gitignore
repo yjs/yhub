@@ -1,0 +1,5 @@
+fixtures
+
+# Customer-supplied editing trace. Real user data — must never be committed.
+# TRACE-FORMAT.md documents its format and is checked in; the trace itself is not.
+custom-trace.anyenc

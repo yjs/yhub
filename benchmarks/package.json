@@ -1,0 +1,12 @@
+{
+  "name": "@y/hub-benchmarks",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Benchmark suite for @y/hub. Not published.",
+  "type": "module",
+  "scripts": {
+    "start": "node --expose-gc --max-old-space-size=8192 --env-file-if-exists=../.env --env-file-if-exists=../.env.testing src/index.js",
+    "fixtures": "node --expose-gc --max-old-space-size=8192 src/fixtures.js"
+  },
+  "license": "AGPL-3.0 OR PROPRIETARY"
+}

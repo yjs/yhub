@@ -24,7 +24,8 @@
     // "./demos/history/**/*.js",
     "tests/**/*.js",
     "src/**/*.js",
-    "bin/**/*.js"
+    "bin/**/*.js",
+    "benchmarks/src/**/*.js"
   ],
   "exclude": [
     "**/dist"

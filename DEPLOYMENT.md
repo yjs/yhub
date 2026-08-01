@@ -26,6 +26,37 @@ REDIS=redis://localhost:6379
 REDIS_PREFIX=yhub
 ```
 
+### Eviction policy
+
+Configure Redis / Valkey with the `volatile-lru` eviction policy:
+
+```
+maxmemory-policy volatile-lru
+```
+
+y/hub sets an expiry only on cached HTTP API responses. Update streams are
+written without a TTL, so `volatile-lru` reclaims memory from the cache while
+leaving the streams untouched.
+
+Do **not** use `allkeys-lru`, `allkeys-lfu`, or `allkeys-random` — these evict
+update streams, which causes **data loss**.
+
+### Memory sizing
+
+Redis is not just a cache — it is the authoritative store for updates that have
+not yet been persisted. Client updates are appended to a stream, and the worker
+only trims a stream after it has merged and written the document to S3 and
+PostgreSQL. Anything evicted or lost before that point is gone.
+
+Size the instance so that all transient updates fit in memory at peak load,
+with headroom. If Redis cannot hold them, `volatile-lru` will start failing
+writes once the cache is exhausted (which surfaces as errors) rather than
+silently dropping streams — but the safe configuration is enough memory for the
+full working set.
+
+Persistence (AOF/RDB) is recommended as well, so that a Redis restart does not
+discard updates that the worker has not yet persisted.
+
 ---
 
 ## 2. Set Up PostgreSQL

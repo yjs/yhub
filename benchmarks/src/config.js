@@ -5,11 +5,13 @@ import * as number from 'lib0/number'
  * Every parameter of the benchmark suite. This is the only file you should need
  * to edit.
  *
- * Defaults measure **20 MB documents against a small number of clients**, which
- * is what a single machine can measure honestly: per-document cost is the hard
- * part, while per-client cost is close to linear and extrapolates from the
- * constants in RESULTS.md. Raising `scale` is the normal way to use this suite;
- * everything else is a knob you turn when chasing a specific question.
+ * Defaults measure **20 MB documents and up to 1500 clients**. Those two axes
+ * have different limits and are capped separately: connecting and observing
+ * scale to 1500 cheaply, while anything that ships a whole document per client
+ * is bounded by RAM (`joinStormMax`, `rampMax`) and anything that seeds a
+ * document per user is bounded by time (`scenario.docSize`). Raising `scale` is
+ * the normal way to use this suite; everything else is a knob you turn when
+ * chasing a specific question.
  */
 
 const mb = 1024 * 1024
@@ -48,15 +50,21 @@ export const config = {
     /**
      * ms before a worker claims a compaction task. Production default: 120000.
      *
-     * This is the `XAUTOCLAIM` min-idle-time (`src/stream.js:538`), so it must
-     * exceed how long a compaction actually takes. If it does not, a second
-     * worker reclaims a task the first is still working on, both persist it, and
-     * the loser dies on a duplicate-key violation. That cannot happen with a
-     * single worker — it needs `workers > 1`, which only Y6.5 uses. 20 MB
-     * compactions take seconds, hence 10s rather than the 1s that a small-
-     * document suite could get away with.
+     * This is the `XAUTOCLAIM` min-idle-time, and `claimTasks` reclaims with the
+     * worker's **own** consumer name and no in-flight guard (`src/stream.js`).
+     * So once a compaction runs longer than `taskDebounce`, the very next claim
+     * hands the same task back to the same worker, which processes it a second
+     * time concurrently — and the loser dies on a duplicate-key violation. One
+     * worker is enough to hit this; `src/index.js:46` has a `@todo` for it.
+     *
+     * Measured here: a 4 MB room under 500 connected clients produced 6 task
+     * starts and 2 duplicate-key errors at `taskDebounce: 10000`.
+     *
+     * So this must exceed worst-case compaction time *under load*, not the
+     * unloaded time. 30s clears the ~7s p95 seen at 20 MB with headroom, while
+     * staying short enough that benchmarks still observe compaction happening.
      */
-    taskDebounce: 10000,
+    taskDebounce: 30000,
     /** ms an update stays in the Redis stream before it may be trimmed. Production default: 60000 */
     minMessageLifetime: 3000,
     /** seconds of API response caching. Kept low so read benchmarks measure work, not a cache hit. */
@@ -97,6 +105,17 @@ export const config = {
      * not produce a bigger number, it produces a swap storm.
      */
     joinStormMax: 150,
+    /**
+     * Y2.5 only: the largest *ramped* join population.
+     *
+     * Ramping decouples the population from peak memory only while the target
+     * rate is near what the server can actually serve. A 20 MB document sustains
+     * a handful of joins/s, so asking 1500 clients to arrive at 100/s just queues
+     * ~1500 concurrent syncs — 30 GB in flight — and the benchmark stops
+     * finishing. The sweep's purpose is finding where `achieved` falls below
+     * `target`, which does not need a large population.
+     */
+    rampMax: 300,
     /** Y2.4-Y2.6, Y6: document sizes to sync */
     docSizes: [0, 4 * mb, 20 * mb],
     /** Y1: document sizes for the pure-CPU primitives */
@@ -108,9 +127,10 @@ export const config = {
      *
      * Fan-out of document updates is ~12 µs of marginal server CPU per delivery,
      * so 1500 observers at one edit per second is a couple of percent of a core.
-     * Presence is the expensive one: ~0.066% of a core per client at 1 Hz, which
-     * puts the single-core saturation point right around 1500. That is the point
-     * of running this sweep at 1500 rather than a comfortable number.
+     * Presence is the expensive one and does **not** scale linearly: every tick
+     * sends each of N subscribers a merge of N states, so cost trends toward N².
+     * Measured at 1 Hz with a realistic payload: 11% of a core at N=100, 135% at
+     * N=500, 220% at N=1500. Extrapolating from small N understates it ~3×.
      */
     observers: [1, 10, 100, 500, 1500],
     /** Y2.5: connection ramp rates, connections per second */
@@ -223,9 +243,10 @@ export const config = {
      * document is several GB of send buffers and stops being a measurement of
      * anything except how the process degrades.
      */
-    users: [1, 10, 100, 500],
+    users: [1, 10, 100, 200],
     joinRateAbove: 20,
-    joinRate: 10,
+    /** Y7.3 measured ~2.6 sustained joins/s on this document; asking for much more only queues. */
+    joinRate: 5,
     /** Y7.4: clients replaying the traced edits concurrently */
     writers: [1, 25, 100],
     /** Y7.2: times the edit sequence is replayed, to get a percentile worth reading */

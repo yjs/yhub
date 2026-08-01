@@ -8,16 +8,16 @@ What each benchmark measures and why is in [README.md](./README.md).
 
 |                 key |                                            value |
 |---------------------|--------------------------------------------------|
-|                date |                          2026-07-31 21:57:14 UTC |
-|              commit |                                          c698ad9 |
+|                date |                          2026-08-01 00:24:33 UTC |
+|              commit |                                          f932c5a |
 |              @y/hub |                                            0.3.0 |
 |                node |                                         v24.13.1 |
 |            platform |                  Linux 7.1.5-200.fc44.x86_64 x64 |
 |                 cpu | 13th Gen Intel(R) Core(TM) i7-1370P (20 threads) |
 |              memory |                                         62.4 GiB |
-|                disk |                                   185.0 GiB free |
+|                disk |                                   322.1 GiB free |
 |     computePoolSize |                                                4 |
-|   taskDebounce (ms) |                                            10000 |
+|   taskDebounce (ms) |                                            30000 |
 |     taskConcurrency |                                                5 |
 |   connections swept |                            1, 10, 100, 500, 1500 |
 | docSizes swept (MB) |                                         0, 4, 20 |
@@ -26,24 +26,465 @@ What each benchmark measures and why is in [README.md](./README.md).
 S3 is MinIO on localhost, so sync and compaction times are **lower bounds** —
 real S3 or R2 latency has to be layered onto the `s3Ops` counts analytically.
 
+## Y0: Fixtures and harness self-check
+
+### Y0.1 Fixture documents
+
+|  variant | target |   cells | gc (MB) | nongc (MB) | cells/MB |
+|----------|--------|---------|---------|------------|----------|
+|    fresh |    4mb |  99 200 |    4.00 |       4.00 |   24 772 |
+|    fresh |   20mb | 489 145 |    20.0 |       20.0 |   24 408 |
+|    fresh |    1mb |  25 250 |    1.00 |       1.00 |   25 237 |
+|    fresh |    5mb | 123 762 |    5.00 |       5.00 |   24 730 |
+|  churned |    4mb |  99 200 |    16.3 |       40.9 |    6 091 |
+| rowChurn |    4mb |  99 200 |    4.79 |       6.02 |   20 693 |
+
+Reported in cells per MB so a real spreadsheet can be mapped onto these size steps. `fresh` is written once; `churned` rewrites every cell 10×; `rowChurn` inserts and deletes half again as many rows. A gc document still encodes the delete set, which is why the churned variants are larger than their target even after garbage collection.
+
+### Y0.2 Harness self-check against real @y/websocket clients
+
+|                                     check | result |                                      detail |
+|-------------------------------------------|--------|---------------------------------------------|
+| real client writes -> raw client observes |   pass |                            2 frames relayed |
+|    raw client writes -> real client reads |   pass |         1000 cells in the writer's document |
+|      cold join converges with live client |   pass | 1000 cells after sync, syncStep2 was 0.0 KB |
+
+The load generator is a raw-protocol client that discards payloads — that is what makes many connections affordable, but it also means it cannot notice if what it counted was wrong. These three checks run real `@y/websocket` clients alongside it and confirm edits actually arrive and converge in both directions.
+
+## Y1: Primitive costs
+
+### Y1.1 Binary-merge a document of size S with k pending updates
+
+|    S |   k | time (ms) | throughput (MB/s) |
+|------|-----|-----------|-------------------|
+|  1mb |   0 |    0.0036 |           274 712 |
+|  1mb |   1 |      39.7 |              25.2 |
+|  1mb |  10 |      39.5 |              25.3 |
+|  1mb | 100 |      35.8 |              28.0 |
+|  5mb |   0 |    0.0030 |         1 692 991 |
+|  5mb |   1 |     204.2 |              24.5 |
+|  5mb |  10 |     241.8 |              20.7 |
+|  5mb | 100 |     194.2 |              25.8 |
+| 20mb |   0 |   0.00055 |        36 305 300 |
+| 20mb |   1 |     750.7 |              26.7 |
+| 20mb |  10 |     788.2 |              25.4 |
+| 20mb | 100 |     717.1 |              27.9 |
+
+`k` is the number of updates written since the last compaction. **The cliff is at the very first one.** With k=0 the merge is a single update and `Y.mergeUpdates` returns it unchanged; with k=1 the full document is decoded and re-encoded, and k=100 costs the same as k=1 because the pending updates are tiny next to the document. So a single cell edit since the last compaction makes every subsequent sync pay the full price — a benchmark that syncs only freshly compacted documents measures the first row of each block and misses the dominant term entirely.
+
+### Y1.2 Compute the state vector of a document of size S
+
+|    S | docSize (MB) | time (ms) | throughput (MB/s) | offloaded |
+|------|--------------|-----------|-------------------|-----------|
+|  1mb |         1.00 |      21.3 |              46.9 |       yes |
+|  5mb |         5.00 |      92.7 |              54.0 |       yes |
+| 20mb |         20.0 |     343.3 |              58.4 |       yes |
+
+Paid once per connection on every sync. `src/compute.js:313` asserts ~30–40 MB/s and uses it to justify the 512 KB inline/offload threshold — the `offloaded` column shows which side of that threshold each size falls on.
+
+### Y1.3 Create content IDs from an update of size U
+
+|  cells | U (KB) | time (ms) | throughput (MB/s) |
+|--------|--------|-----------|-------------------|
+|    100 |   3.98 |      0.12 |              31.2 |
+|  1 000 |   40.4 |      0.88 |              45.0 |
+| 10 000 |  413.4 |      7.44 |              54.3 |
+
+Runs on the main thread for every inbound message (`src/server.js:786`). Linear in the update, independent of document size — this is what makes writing tier B.
+
+### Y1.4 Document-merge: build a Y.Doc from size S and re-encode
+
+|    S | docSize (MB) | time (ms) | throughput (MB/s) | Y.Doc heap (MB) | Y.Doc external (MB) | expansion factor |
+|------|--------------|-----------|-------------------|-----------------|---------------------|------------------|
+|  1mb |         1.00 |      58.2 |              17.2 |            13.2 |            0.000038 |             13.2 |
+|  5mb |         5.00 |     336.2 |              14.9 |            62.7 |                   0 |             12.5 |
+| 20mb |         20.0 |     1 526 |              13.1 |           227.4 |                   0 |             11.3 |
+
+The `expansion factor` is heap bytes per serialized byte — the single most important constant for sizing workers, and the one that says what a document costs in a browser.
+
+### Y1.5 Merge a batch of N awareness updates
+
+| state |     N | input (KB) | time (ms) | µs per state | server total for N subscribers (ms) |
+|-------|-------|------------|-----------|--------------|-------------------------------------|
+| small |     1 |      0.032 |      0.71 |        709.9 |                                0.71 |
+| small |    10 |       0.32 |      0.87 |         86.6 |                                8.66 |
+| small |   100 |       3.22 |      2.12 |         21.2 |                               212.0 |
+| small |   500 |       16.5 |      9.17 |         18.3 |                               4 584 |
+| small | 1 500 |       49.7 |      5.25 |         3.50 |                               7 881 |
+| large |     1 |       0.29 |      0.15 |        154.3 |                                0.15 |
+| large |    10 |       2.86 |      0.24 |         24.2 |                                2.42 |
+| large |   100 |       28.6 |      1.11 |         11.1 |                               111.2 |
+| large |   500 |      143.4 |      4.52 |         9.03 |                               2 258 |
+| large | 1 500 |      430.5 |      11.8 |         7.85 |                              17 658 |
+
+This runs **once per subscriber per batch** (`src/server.js:636`), where a document update is a memcpy. Cost is dominated by a `JSON.parse` of every participant state and a `JSON.stringify` of every state of the merged result (`@y/protocols/src/awareness.js`), plus a throwaway `Awareness` + `Y.Doc` per call (`src/protocol.js:25`) — which is why `µs per state` is so high at N=1 and falls as the fixed cost is amortised. The last column is the number that matters: N participants present in a room means N states to merge **and** N subscribers to merge them for, so one presence tick costs the server `time × N` on a single thread.
+
+### Y1.6 Structured-clone a buffer of size S to a compute worker
+
+|    S | clone (ms) | local scan (ms) | pool round-trip (ms) | clone rate (MB/s) |
+|------|------------|-----------------|----------------------|-------------------|
+|  1mb |       0.25 |            19.5 |                 22.3 |             3 994 |
+|  5mb |       1.39 |            98.3 |                 93.9 |             3 609 |
+| 20mb |       15.9 |           336.3 |                351.2 |             1 258 |
+
+Payloads are sent without transfer (`src/compute.js:286`) because the caller reuses the buffer for syncStep2, so the main thread pays the clone on every offloaded merge and state-vector computation. What the clone costs the *main thread* is the `clone (ms)` column; `pool round-trip` is the wall-clock the caller waits, which is close to `local scan` because the work itself dominates — the offload buys event-loop availability, not latency.
+
+### Y1.7 Y1.1 and Y1.4 with USE_Y_NATIVE=1
+
+_no data_
+
+**Not run.** Everything else in this report measures the `@y/y` merge path, which is what yhub runs by default. Set `run.useYNative: true` in `src/config.js` to additionally re-run Y1.1 and Y1.4 in a process with `USE_Y_NATIVE=1`, which routes merging through the native yrs (Rust) binding (`@y-crdt/yn`, `src/y-utils.js:29`). That path exists specifically to be benchmarked against this hot loop and nothing else in the repo exercises it — if it is substantially faster it changes the scaling advice, since merging is the expensive primitive behind both sync and compaction.
+
+## Y2: What does a connected user cost?
+
+### Y2.1 Connect N clients to N distinct empty documents
+
+|     N | time (ms) | conn/s | syncTime p50 (ms) | syncTime p95 (ms) | syncTime p99 (ms) | syncTime max (ms) | dropped | serverMem rss (MB) | above baseline (MB) | MB per room | serverCpu (ms) |
+|-------|-----------|--------|-------------------|-------------------|-------------------|-------------------|---------|--------------------|---------------------|-------------|----------------|
+|     1 |      5.70 |  175.4 |              5.27 |              5.27 |              5.27 |              5.27 |       0 |              138.9 |                   0 |           0 |           0.36 |
+|    10 |      91.2 |  109.7 |              84.1 |              87.1 |              87.1 |              87.1 |       0 |              158.4 |                19.5 |        1.95 |          116.3 |
+|   100 |     115.1 |  868.6 |              52.3 |              72.6 |             110.6 |             110.6 |       0 |              177.5 |                38.6 |        0.39 |          152.2 |
+|   500 |     245.1 |  2 040 |             180.2 |             214.4 |             224.5 |             230.1 |       0 |              187.5 |                48.6 |       0.097 |          199.0 |
+| 1 500 |     558.0 |  2 688 |             459.2 |             509.0 |             512.7 |             513.6 |       0 |              234.6 |                95.7 |       0.064 |          519.1 |
+
+Each connection is also a new room, so this is the per-connection **and** per-room floor. Server baseline with nothing connected: 138.9 MB. Compare `MB per room` against Y2.2, where all N share one room: the difference is the cost of a room.
+
+### Y2.2 Connect N clients to one empty document
+
+|     N | time (ms) | conn/s | syncTime p50 (ms) | syncTime p95 (ms) | syncTime p99 (ms) | syncTime max (ms) | dropped | serverMem rss (MB) | above baseline (MB) | MB per connection | serverCpu (ms) |
+|-------|-----------|--------|-------------------|-------------------|-------------------|-------------------|---------|--------------------|---------------------|-------------------|----------------|
+|     1 |      3.84 |  260.5 |              3.66 |              3.66 |              3.66 |              3.66 |       0 |              235.1 |                   0 |                 0 |           0.40 |
+|    10 |      8.60 |  1 162 |              6.14 |              7.54 |              7.54 |              7.54 |       0 |              235.3 |                0.16 |             0.016 |           5.55 |
+|   100 |      35.4 |  2 827 |              27.9 |              29.5 |              29.9 |              29.9 |       0 |              238.8 |                3.75 |             0.037 |           25.4 |
+|   500 |     177.0 |  2 824 |             134.1 |             154.3 |             155.4 |             157.6 |       0 |              265.4 |                30.3 |             0.061 |          245.6 |
+| 1 500 |     500.1 |  2 999 |             399.1 |             466.8 |             470.1 |             471.0 |       0 |              272.9 |                37.8 |             0.025 |          462.6 |
+
+One `WSUser` and one socket per connection; no `Y.Doc` per connection or per room, and no document cache anywhere in the heap. Server baseline with nothing connected: 235.1 MB.
+
+### Y2.3 Idle: hold N connections with no traffic
+
+|     N | hold (s) | rss start (MB) | rss end (MB) | drift (MB) | serverCpu (ms) | cpu per conn per s (µs) | dropped |
+|-------|----------|----------------|--------------|------------|----------------|-------------------------|---------|
+| 1 500 |       15 |          273.1 |        273.1 |          0 |          189.1 |                    8.41 |       0 |
+
+Confirms idle connections are genuinely tier A and that nothing accumulates. Any sustained positive drift here is a leak, and would compound over a deployment's uptime rather than over its load.
+
+### Y2.4 Connect N clients to one document of size S, all at once
+
+|   N |     S | syncBytes (MB) | time (ms) | syncTime p50 (ms) | syncTime p95 (ms) | syncTime p99 (ms) | syncTime max (ms) | dropped | serverMem peak (MB) | peak MB per concurrent sync | arrayBuffers (MB) | serverCpu (ms) | loopDelay p99 (ms) | queueDepth | s3 gets |
+|-----|-------|----------------|-----------|-------------------|-------------------|-------------------|-------------------|---------|---------------------|-----------------------------|-------------------|----------------|--------------------|------------|---------|
+| 150 | empty |      0.0000019 |      56.9 |              39.0 |              49.1 |              51.0 |              51.6 |       0 |               275.5 |                           — |              0.20 |           53.0 |               20.3 |          0 |       0 |
+| 150 |   4mb |           4.00 |     4 141 |             2 645 |             3 996 |             4 128 |             4 135 |       0 |               945.9 |                        1.57 |             112.2 |         21 284 |              251.7 |         58 |     150 |
+| 150 |  20mb |           20.0 |    17 248 |            10 794 |            16 385 |            17 192 |            17 241 |       0 |               3 279 |                        1.09 |              20.1 |         62 200 |              301.5 |         56 |     132 |
+
+Capped at `scale.joinStormMax` = 150 joiners, separately from the rest of the `connections` sweep: `peak MB per concurrent sync` below is per joiner **per MB of document**, so this is the one measurement bounded by RAM rather than CPU. Y2.5 is where larger populations are covered, by ramping them.
+
+The join storm: a deploy, a load-balancer failover, or everyone opening the same document at 09:00. The fetch, the state-vector scan and the merge are identical across concurrent joiners of the same room and are nevertheless recomputed for each one (`src/server.js:740-764`). The bytes sent are inherent; this work is not. `queueDepth` is the compute pool's unbounded queue, which holds full payloads.
+
+### Y2.5 Connect N clients to one document of size S, ramped at r conn/s
+
+|   N |    S | target (conn/s) | achieved (conn/s) | syncTime p50 (ms) | syncTime p95 (ms) | syncTime p99 (ms) | syncTime max (ms) | dropped | serverMem peak (MB) | loopDelay p99 (ms) | queueDepth |
+|-----|------|-----------------|-------------------|-------------------|-------------------|-------------------|-------------------|---------|---------------------|--------------------|------------|
+| 300 | 20mb |               5 |              4.96 |             526.6 |             584.0 |             614.8 |             713.0 |       0 |               2 061 |               51.7 |          0 |
+| 300 | 20mb |              25 |              6.91 |            18 336 |            32 373 |            35 921 |            38 617 |       0 |               3 703 |              497.0 |         76 |
+| 300 | 20mb |             100 |              6.94 |            22 379 |            38 775 |            41 140 |            41 292 |       0 |               3 829 |              529.5 |         78 |
+
+The join rate one server sustains at this document size. Directly actionable: it is the number that says how fast you may roll a deploy. Where `achieved` falls below `target`, the server is the limit rather than the ramp.
+
+### Y2.6 Sync a document of size S with k pending stream updates
+
+|    S |   k | streamLen | pgRows | syncTime p50 (ms) | syncTime p95 (ms) | syncTime p99 (ms) | syncTime max (ms) | dropped | serverCpu (ms) | cpu per sync (ms) | s3 gets | s3 gets per sync |
+|------|-----|-----------|--------|-------------------|-------------------|-------------------|-------------------|---------|----------------|-------------------|---------|------------------|
+| 20mb |   0 |         0 |      1 |             1 028 |             1 461 |             1 461 |             1 461 |       0 |          2 588 |             258.8 |       6 |             0.60 |
+| 20mb |   1 |         1 |      1 |             3 830 |             4 156 |             4 156 |             4 156 |       0 |         22 342 |             2 234 |      14 |             1.40 |
+| 20mb |  10 |        10 |      1 |             3 572 |             4 001 |             4 001 |             4 001 |       0 |         21 988 |             2 199 |      16 |             1.60 |
+| 20mb | 100 |       100 |      1 |             3 056 |             3 748 |             3 748 |             3 748 |       0 |         17 359 |             1 736 |      10 |                1 |
+
+The sync cliff, over the network. Y1.1 showed the merge jumps to full price at the first pending update; this is the same effect end to end, plus the `pgRows` effect — every uncompacted row is an extra S3 GET on every sync.
+
+## Y3: What does writing cost?
+
+### Y3.1 One client writes N single-cell updates to a document of size S
+
+|     S |   N | update (bytes) | time (ms) | updates/s | serverCpu (ms) | µs cpu per update | propagation p50 (ms) | propagation p95 (ms) | propagation p99 (ms) | propagation max (ms) | not delivered | loopDelay p99 (ms) | streamLen |
+|-------|-----|----------------|-----------|-----------|----------------|-------------------|----------------------|----------------------|----------------------|----------------------|---------------|--------------------|-----------|
+| empty | 500 |           56.8 |     505.2 |     989.8 |           56.5 |             113.1 |                 3.68 |                 4.59 |                 4.59 |                 4.59 |             0 |               10.6 |       520 |
+|   4mb | 500 |           56.8 |     508.8 |     982.7 |          299.1 |             598.2 |                 3.70 |                 4.29 |                 4.29 |                 4.29 |             0 |               11.3 |       520 |
+|  20mb | 500 |           56.8 |     509.6 |     981.2 |          131.6 |             263.1 |                 3.69 |                 4.70 |                 4.70 |                 4.70 |             0 |               10.8 |       520 |
+
+The individual-edit case. `µs cpu per update` should be flat across S: a write is a buffer copy plus one `Y.createContentIdsFromUpdate` scan plus a Redis `XADD`, and no document is built (`src/server.js:778-788`). Any dependence on S here would refute tier B.
+
+### Y3.2 One client flushes a batch of N cell edits as a single update
+
+|  cells | update (KB) | bytes per cell | time (ms) | serverCpu (ms) | µs cpu per cell | loopDelay p99 (ms) |
+|--------|-------------|----------------|-----------|----------------|-----------------|--------------------|
+|    100 |        3.98 |           40.8 |     501.3 |           6.47 |            64.7 |               11.3 |
+|  1 000 |        40.4 |           41.4 |     501.3 |           7.56 |            7.56 |               11.3 |
+| 10 000 |       413.4 |           42.3 |     501.8 |           5.13 |            0.51 |               10.4 |
+
+The agent flush. Compare `µs cpu per cell` here against Y3.1: if batching is cheaper per cell, agents should batch aggressively, and the whole cost model shifts from update *count* to update *bytes*.
+
+### Y3.3 M clients writing to M distinct documents
+
+|   M | updates sent | time (ms) | serverCpu (ms) | µs cpu per update | loopDelay p99 (ms) | workerCpu (ms) | compactions | workerTime p95 (ms) |
+|-----|--------------|-----------|----------------|-------------------|--------------------|----------------|-------------|---------------------|
+|   1 |           10 |     2 004 |           86.8 |             8 682 |               11.1 |           99.5 |           0 |                   0 |
+|  50 |          500 |     2 026 |          154.3 |             308.6 |               11.2 |          100.5 |           0 |                   0 |
+| 200 |        2 000 |     2 050 |          305.0 |             152.5 |               11.4 |          124.9 |           0 |                   0 |
+
+Write throughput when load is spread over many rooms. Every write is its own room, so there is no fan-out: the expectation is that the worker binds before the server does, because each room is compacted independently.
+
+### Y3.4 M clients writing to the same document
+
+|   M | updates sent | frames delivered | time (ms) | serverCpu (ms) | µs cpu per update | propagation p50 (ms) | propagation p95 (ms) | propagation p99 (ms) | propagation max (ms) | not delivered | loopDelay p99 (ms) | dropped |
+|-----|--------------|------------------|-----------|----------------|-------------------|----------------------|----------------------|----------------------|----------------------|---------------|--------------------|---------|
+|   1 |           10 |               30 |     2 005 |           21.4 |             2 140 |                    — |                    — |                    — |                    — |             0 |               10.4 |       0 |
+|  50 |          500 |            2 248 |     2 021 |          288.7 |             577.5 |                 4.09 |                 4.89 |                 5.16 |                 5.31 |             0 |               11.9 |       0 |
+| 200 |        2 000 |            9 998 |     2 047 |          1 129 |             564.3 |                 5.13 |                 8.95 |                 9.98 |                 10.2 |             0 |               51.6 |       0 |
+
+The same write load concentrated on one room, so every writer is also a subscriber. The gap against Y3.3 at equal M *is* the per-subscriber delivery cost — that is the number `messages × subscribers` is multiplied by.
+
+### Y3.5 M agents flushing a batch simultaneously to one document
+
+> ⚠ **2 compaction task(s) failed during this benchmark, so these numbers are not a valid measurement. The usual cause is a full S3 backend: compaction then fails rather than slows, the room is never persisted, and everything downstream of it is wrong. Check free disk and re-run.**
+
+|   M | cells per flush | flush (KB) | total in (MB) | total out (MB) | time (ms) | serverCpu (ms) | propagation p50 (ms) | propagation p95 (ms) | propagation p99 (ms) | propagation max (ms) | not delivered | loopDelay p99 (ms) | loopDelay max (ms) | dropped |
+|-----|-----------------|------------|---------------|----------------|-----------|----------------|----------------------|----------------------|----------------------|----------------------|---------------|--------------------|--------------------|---------|
+|   1 |          10 000 |      413.4 |          0.40 |           0.40 |     3 124 |          177.0 |                 3.85 |                 43.7 |                 43.7 |                 43.7 |             0 |               11.4 |               28.5 |       0 |
+|  50 |          10 000 |      413.4 |          20.2 |          1 009 |    26 526 |         34 012 |                 4.83 |                8 306 |                8 306 |                8 306 |             1 |              1 189 |             17 834 |       0 |
+| 200 |          10 000 |      413.4 |          80.8 |          8 484 |   287 432 |        658 301 |               12 233 |               12 233 |               12 233 |               12 233 |            18 |            308 164 |            308 164 |       0 |
+
+Bursty concentrated writes — the realistic worst case for an agent workload. `total out` against `total in` is the broadcast amplification. The propagation figures are a *separate* client making single small edits while the agents flush, i.e. what a human editing the same document feels; `loopDelay max` is the stall on the single relay thread that causes it.
+
 ## Y4: What does an observer cost?
+
+### Y4.1 One writer, N observers on one document
+
+|     N | edits | time (ms) | frames delivered | bytes out (KB) | serverCpu (ms) | µs cpu per update per observer | propagation p50 (ms) | propagation p95 (ms) | propagation p99 (ms) | propagation max (ms) | not delivered | loopDelay p99 (ms) |
+|-------|-------|-----------|------------------|----------------|----------------|--------------------------------|----------------------|----------------------|----------------------|----------------------|---------------|--------------------|
+|     1 |    50 |     2 139 |               70 |           3.69 |          2 089 |                         41 789 |                 3.63 |                 68.4 |                 68.4 |                 68.4 |             0 |              274.5 |
+|    10 |    50 |     2 021 |              700 |           36.9 |           61.7 |                          123.3 |                 3.61 |                 4.85 |                 5.20 |                 5.24 |             0 |               10.8 |
+|   100 |    50 |     2 017 |            7 000 |          368.9 |          115.9 |                           23.2 |                 4.27 |                 5.95 |                 6.65 |                 7.02 |             0 |               11.0 |
+|   500 |    50 |     2 020 |           35 000 |          1 844 |          285.4 |                           11.4 |                 6.79 |                 12.4 |                 17.8 |                 19.7 |             0 |               14.4 |
+| 1 500 |    50 |     2 230 |          105 000 |          5 462 |          571.1 |                           7.61 |                 12.9 |                 27.2 |                 30.7 |                 33.4 |             0 |               21.6 |
+
+Expected linear in N; the constant is what matters. y/hub merges and encodes the batch **once per subscriber** rather than once per batch (`src/server.js:633`), so it spends CPU where it only needed to spend bandwidth. That is a constant factor, not a worse curve — but a removable one. Divide a core-second by `µs cpu per update per observer` to get the observers one server sustains per update/s.
+
+### Y4.2 One writer, N observers, with awareness enabled
+
+|     N | edits | time (ms) | awareness frames in | awareness frames out | serverCpu (ms) | µs cpu per update per observer | propagation p50 (ms) | propagation p95 (ms) | propagation p99 (ms) | propagation max (ms) | not delivered | loopDelay p99 (ms) | dropped |
+|-------|-------|-----------|---------------------|----------------------|----------------|--------------------------------|----------------------|----------------------|----------------------|----------------------|---------------|--------------------|---------|
+|     1 |    50 |     2 034 |                  50 |                   51 |          143.8 |                          2 876 |                 3.12 |                 3.74 |                 3.74 |                 3.74 |             0 |               11.1 |       0 |
+|    10 |    50 |     2 048 |                 500 |                  781 |          308.7 |                          617.3 |                 3.58 |                 4.29 |                 4.48 |                 4.55 |             0 |               13.1 |       0 |
+|   100 |    50 |     2 147 |               5 000 |                1 601 |          2 500 |                          500.1 |                 4.38 |                 6.15 |                 7.14 |                 7.64 |             0 |              363.9 |       0 |
+|   500 |    50 |     2 699 |              25 000 |                6 747 |          3 077 |                          123.1 |                 8.97 |               10 040 |               13 100 |               14 500 |           500 |              1 199 |       0 |
+| 1 500 |    50 |     3 782 |              75 000 |               50 542 |          9 590 |                          127.9 |                 19.3 |                2 444 |                2 627 |                2 681 |        21 000 |            0.00051 |       0 |
+
+The same load as Y4.1 with every observer also emitting presence. The difference against Y4.1 is the price of presence. Merging awareness `JSON.parse`s every participant state and `JSON.stringify`s every state of the merged result, once per subscriber — where a document update is a memcpy.
 
 ### Y4.3 N clients emitting presence at 1 Hz, no document edits
 
 | state |     N | ticks | frames in | frames out | time (ms) | serverCpu (ms) | cpu utilisation (%) | µs cpu per presence tick | loopDelay p99 (ms) | dropped |
 |-------|-------|-------|-----------|------------|-----------|----------------|---------------------|--------------------------|--------------------|---------|
-| small |     1 |     5 |         5 |          5 |     6 005 |           48.3 |                0.80 |                    9 654 |               10.4 |       0 |
-| small |    10 |     5 |        50 |         97 |     6 007 |          128.3 |                2.14 |                    2 566 |               10.8 |       0 |
-| small |   100 |     5 |       500 |      1 502 |     6 032 |          752.1 |                12.5 |                    1 504 |               23.6 |       0 |
-| small |   500 |     5 |     2 500 |      7 502 |     6 093 |          4 730 |                77.6 |                    1 892 |              676.3 |       0 |
-| small | 1 500 |     5 |     7 500 |      6 425 |     6 263 |          8 532 |               136.2 |                    1 138 |              5 646 |       0 |
-| large |     1 |     5 |         5 |          5 |     6 005 |           73.4 |                1.22 |                   14 679 |               10.6 |       0 |
-| large |    10 |     5 |        50 |         92 |     6 007 |          105.9 |                1.76 |                    2 118 |               10.6 |       0 |
-| large |   100 |     5 |       500 |      1 502 |     6 022 |          688.0 |                11.4 |                    1 376 |               39.9 |       0 |
-| large |   500 |     5 |     2 500 |      3 502 |     6 106 |          8 264 |               135.3 |                    3 306 |              2 171 |       0 |
-| large | 1 500 |     5 |     7 500 |      5 490 |     6 316 |         13 881 |               219.8 |                    1 851 |              8 892 |       0 |
+| small |     1 |     5 |         5 |          5 |     6 001 |           73.5 |                1.22 |                   14 694 |               10.6 |       0 |
+| small |    10 |     5 |        50 |         92 |     6 005 |           91.2 |                1.52 |                    1 825 |               10.7 |       0 |
+| small |   100 |     5 |       500 |      1 449 |     6 017 |          436.0 |                7.25 |                    872.1 |               21.9 |       0 |
+| small |   500 |     5 |     2 500 |      7 502 |     6 058 |          3 343 |                55.2 |                    1 337 |              446.4 |       0 |
+| small | 1 500 |     5 |     7 500 |      6 378 |     6 150 |          7 090 |               115.3 |                    945.3 |              2 999 |       0 |
+| large |     1 |     5 |         5 |          5 |     6 004 |           81.5 |                1.36 |                   16 307 |               10.6 |       0 |
+| large |    10 |     5 |        50 |         92 |     6 006 |           83.6 |                1.39 |                    1 672 |               10.5 |       0 |
+| large |   100 |     5 |       500 |      1 410 |     6 023 |          768.0 |                12.8 |                    1 536 |               35.3 |       0 |
+| large |   500 |     5 |     2 500 |      4 865 |     6 071 |          6 932 |               114.2 |                    2 773 |              910.2 |       0 |
+| large | 1 500 |     5 |     7 500 |      5 664 |     6 179 |         10 477 |               169.5 |                    1 397 |              7 457 |       0 |
 
 Awareness alone: the batch is largest relative to the payload, and the per-subscriber JSON constant is least diluted by anything else. `cpu utilisation` is the fraction of one core the relay thread is spending purely on presence — at 100% the event loop is saturated and every other operation on that pod queues behind it.
+
+### Y4.4 Y4.1 across 2 and 3 server processes
+
+| servers |     N | observers per server | time (ms) | frames delivered | serverCpu total (ms) | serverCpu per server (ms) | propagation p50 (ms) | propagation p95 (ms) | propagation p99 (ms) | propagation max (ms) | not delivered | loopDelay p99 worst pod (ms) |
+|---------|-------|----------------------|-----------|------------------|----------------------|---------------------------|----------------------|----------------------|----------------------|----------------------|---------------|------------------------------|
+|       1 | 1 500 |                1 500 |     2 260 |          104 412 |                520.1 |                     520.1 |                 13.8 |                 28.9 |                 32.8 |                 36.6 |             0 |                         24.0 |
+|       2 | 1 500 |                  750 |     2 277 |          102 000 |                1 244 |                     622.2 |                 14.1 |                 29.0 |                 34.4 |                 38.0 |             0 |                         36.6 |
+|       3 | 1 500 |                  500 |     2 332 |          105 000 |                1 369 |                     456.2 |                 15.6 |                 30.4 |                 35.1 |                 37.4 |             0 |                         24.5 |
+
+Confirms fan-out cost partitions across pods: total CPU should stay roughly flat while per-pod CPU and the worst pod's event-loop delay fall with the number of servers. This is what justifies "add a server" as the remedy for the awareness cost in Y4.2 and Y4.3. Note that all pods share one Redis, and the Redis read is shared across all rooms in a process (`src/stream.js:292`).
+
+## Y5: What does a document's lifetime cost?
+
+### Y5.1 Grow a document from empty to size S by streaming updates
+
+| target (MB) | written by clients (MB) | chunks | time (s) | compactions | workerTime total (ms) | workerTime p95 (ms) | workerMem peak (MB) | s3 puts | s3 written (MB) | s3 gets | write amplification | streamLen max | pgRows max |
+|-------------|-------------------------|--------|----------|-------------|-----------------------|---------------------|---------------------|---------|-----------------|---------|---------------------|---------------|------------|
+|          20 |                    20.1 |     80 |     5.97 |           0 |                     0 |                   0 |               144.9 |       0 |               0 |       0 |                   0 |            80 |          0 |
+
+The headline result is `write amplification`: bytes pushed to S3 per byte of document the clients actually wrote. Every compaction rewrites the whole document *and* its nongc twin, so building a document incrementally costs far more than its final size — this is the number that decides whether an agent workload is affordable.
+
+### Y5.2 Y5.1 sweeping taskDebounce
+
+| taskDebounce (ms) | written (MB) | time (s) | compactions | workerTime total (ms) | s3 written (MB) | write amplification | streamLen max | pgRows max | syncTime after growth (ms) |
+|-------------------|--------------|----------|-------------|-----------------------|-----------------|---------------------|---------------|------------|----------------------------|
+|               500 |         20.1 |     6.10 |           4 |                10 799 |            72.1 |                3.59 |            64 |          1 |                      392.4 |
+|             2 000 |         20.1 |     5.88 |           2 |                 7 372 |            41.9 |                2.09 |            70 |          1 |                      342.2 |
+|            10 000 |         20.1 |     6.04 |           0 |                     0 |               0 |                   0 |            80 |          0 |                      344.7 |
+
+The central trade-off. Compacting less often means less rewriting, but longer Redis streams, more uncompacted Postgres rows, more S3 GETs per sync, and a slower sync. Read `write amplification` against `syncTime after growth` to pick a setting for your growth rate.
+
+**There is a floor on this parameter that is not about the trade-off at all.** `taskDebounce` is the `XAUTOCLAIM` min-idle-time and a worker re-claims with its own consumer name, so any value below the actual compaction time makes the worker run the same task twice and one copy dies on a duplicate key (see Y6.2). Values here that sit under the compaction times in Y5.1 are therefore measuring a broken configuration, not a faster one — watch for the compaction-failure warning.
+
+### Y5.3 Compact a document of size S: fresh vs. churned vs. row-churn
+
+|  variant |   S |  cells | input (MB) | gcDoc (MB) | nongcDoc (MB) | workerTime (ms) | workerMem peak (MB) | s3 puts | s3 written (MB) |
+|----------|-----|--------|------------|------------|---------------|-----------------|---------------------|---------|-----------------|
+|    fresh | 4mb | 99 200 |       4.00 |          0 |             0 |               0 |               145.9 |       0 |               0 |
+|  churned | 4mb | 99 200 |       40.9 |          0 |             0 |               0 |               145.9 |       0 |               0 |
+| rowChurn | 4mb | 99 200 |       6.02 |          0 |             0 |               0 |               145.9 |       0 |               0 |
+
+The worker persists **both** the gc and the nongc document (`src/index.js:85`). Overwriting a cell tombstones the old value, so a spreadsheet worked on for a week can be modest in gc and enormous in nongc — `nongcDoc` against `gcDoc` is how much the history actually costs, and it is paid on every single compaction, not once.
+
+### Y5.4 taskConcurrency sweep
+
+| taskConcurrency | documents | S each | time (s) | tasks/s | compactions | workerTime p95 (ms) | workerMem peak (MB) | peak MB per concurrent task | errors | drained |
+|-----------------|-----------|--------|----------|---------|-------------|---------------------|---------------------|-----------------------------|--------|---------|
+|               1 |         2 |    4mb |     11.6 |       0 |           0 |                   0 |               142.1 |                       142.1 |      0 |     yes |
+|               3 |         6 |    4mb |     13.4 |       0 |           0 |                   0 |               141.7 |                        47.2 |      0 |     yes |
+|               8 |        16 |    4mb |     17.1 |       0 |           0 |                   0 |               141.8 |                        17.7 |      0 |     yes |
+
+`bin/yhub.js` ships `taskConcurrency: 5`; `tests/utils.js` uses 500. At 40 MB one of those is wrong, and this is where the OOM boundary is. Peak worker memory is roughly `expansion factor × (gc + nongc) × taskConcurrency` — cross-check against the `Y.Doc` expansion factor from Y1.4.
+
+### Y5.5 Steady state: a document under continuous edits
+
+| t (s) | streamLen | pgRows | edits sent | compactions | workerTime p95 (ms) | workerCpu (ms) | s3 written (MB) |
+|-------|-----------|--------|------------|-------------|---------------------|----------------|-----------------|
+|  1.01 |        10 |      1 |            |             |                     |                |                 |
+|  2.03 |        20 |      1 |            |             |                     |                |                 |
+|  3.05 |        30 |      1 |            |             |                     |                |                 |
+|  4.08 |        40 |      1 |            |             |                     |                |                 |
+|  5.10 |        50 |      1 |            |             |                     |                |                 |
+|  6.11 |        60 |      1 |            |             |                     |                |                 |
+|  7.13 |        70 |      1 |            |             |                     |                |                 |
+|  8.15 |        80 |      1 |            |             |                     |                |                 |
+|  9.16 |        90 |      1 |            |             |                     |                |                 |
+|  10.2 |       100 |      1 |            |             |                     |                |                 |
+|  11.2 |       110 |      1 |            |             |                     |                |                 |
+|  12.2 |       120 |      1 |            |             |                     |                |                 |
+|  13.2 |       130 |      1 |            |             |                     |                |                 |
+|  14.2 |       140 |      1 |            |             |                     |                |                 |
+| TOTAL |           |        |        148 |           0 |                   0 |          132.0 |               0 |
+
+Is compaction keeping up? A flat `streamLen` and `pgRows` mean yes. Rising ones mean no — and because every uncompacted row is an extra S3 GET on every sync, every sync is getting more expensive while it happens. This is the metric to alert on in production.
+
+## Y6: The target scenario
+
+### Y6.1 Users across as many documents, agent-flush write pattern
+
+| users | docs |   S | awareness | servers | workers | connect+sync (ms) | syncTime p50 (ms) | syncTime p99 (ms) | syncTime max (ms) | bytes out (MB) | propagation p50 (ms) | propagation p95 (ms) | propagation p99 (ms) | propagation max (ms) | not delivered | serverMem peak (MB) | serverCpu (ms) | loopDelay p99 (ms) | queueDepth | workerMem peak (MB) | workerTime p95 (ms) | compactions | s3 written (MB) | dropped | total (s) |
+|-------|------|-----|-----------|---------|---------|-------------------|-------------------|-------------------|-------------------|----------------|----------------------|----------------------|----------------------|----------------------|---------------|---------------------|----------------|--------------------|------------|---------------------|---------------------|-------------|-----------------|---------|-----------|
+|   500 |  500 | 4mb |        no |       1 |       1 |            17 240 |            10 345 |            17 080 |            17 227 |          2 008 |                    — |                    — |                    — |                    — |             0 |               2 056 |         83 171 |               20.2 |        197 |               1 935 |               2 368 |         210 |           1 686 |       0 |      21.8 |
+
+The spread case: everyone in their own document. No fan-out at all, so this isolates the per-connection and per-room costs plus the worker load of many independent compactions. If your load looks like this, y/hub's design is well matched to it and the expected bottleneck is Redis and Postgres rather than the server process.
+
+### Y6.2 All users on one document, with and without awareness
+
+| users | docs |   S | awareness | servers | workers | connect+sync (ms) | syncTime p50 (ms) | syncTime p99 (ms) | syncTime max (ms) | bytes out (MB) | propagation p50 (ms) | propagation p95 (ms) | propagation p99 (ms) | propagation max (ms) | not delivered | serverMem peak (MB) | serverCpu (ms) | loopDelay p99 (ms) | queueDepth | workerMem peak (MB) | workerTime p95 (ms) | compactions | s3 written (MB) | dropped | total (s) |
+|-------|------|-----|-----------|---------|---------|-------------------|-------------------|-------------------|-------------------|----------------|----------------------|----------------------|----------------------|----------------------|---------------|---------------------|----------------|--------------------|------------|---------------------|---------------------|-------------|-----------------|---------|-----------|
+|   500 |    1 | 4mb |        no |       1 |       1 |            12 922 |             8 010 |            12 794 |            12 905 |          4 753 |                 8.78 |               12 178 |               14 240 |               14 854 |           100 |               1 773 |        117 418 |              125.6 |        210 |               1 835 |                   0 |           0 |               0 |       0 |      71.1 |
+|   500 |    1 | 4mb |       yes |       1 |       1 |            12 135 |             7 655 |            12 029 |            12 109 |          4 947 |                 78.7 |                6 508 |                7 301 |                8 084 |           129 |               1 890 |        104 311 |               58.6 |        178 |               426.2 |                   0 |           0 |               0 |       0 |      78.7 |
+
+**A yhub bug this benchmark surfaced.** With a *single* worker and plenty of disk, compactions here failed with `duplicate key value violates unique constraint`. `taskDebounce` is the `XAUTOCLAIM` min-idle-time, and `claimTasks` reclaims using the worker's own consumer name with no guard against tasks it is already running (`src/stream.js`) — so a compaction that outlives `taskDebounce` is handed straight back to the same worker and runs twice concurrently. Under 500 connected clients a 4 MB compaction easily exceeds 10s. `src/index.js:46` already carries a `@todo` for exactly this. The operational rule is **`taskDebounce` must exceed worst-case compaction time under load**, and the fix is an in-flight guard in the worker loop.
+
+The concentrated case, and the hard one. Everything is `messages × subscribers`, every joiner independently fetches, merges and scans the same document, and the awareness row adds a JSON round-trip per participant state per subscriber on top. The gap between the two rows is the price of presence on a large shared document.
+
+### Y6.3 Users across a moderate number of documents
+
+| users | docs |   S | awareness | servers | workers | connect+sync (ms) | syncTime p50 (ms) | syncTime p99 (ms) | syncTime max (ms) | bytes out (MB) | propagation p50 (ms) | propagation p95 (ms) | propagation p99 (ms) | propagation max (ms) | not delivered | serverMem peak (MB) | serverCpu (ms) | loopDelay p99 (ms) | queueDepth | workerMem peak (MB) | workerTime p95 (ms) | compactions | s3 written (MB) | dropped | total (s) |
+|-------|------|-----|-----------|---------|---------|-------------------|-------------------|-------------------|-------------------|----------------|----------------------|----------------------|----------------------|----------------------|---------------|---------------------|----------------|--------------------|------------|---------------------|---------------------|-------------|-----------------|---------|-----------|
+|   500 |   50 | 4mb |        no |       1 |       1 |            12 913 |             7 821 |            12 791 |            12 883 |          2 061 |                 3.59 |                 4.20 |                 4.32 |                 4.32 |             0 |               1 989 |         57 700 |               30.9 |        221 |               415.4 |                   0 |           0 |               0 |       0 |      17.5 |
+
+A plausible real distribution — teams of ten or so per document.
+
+### Y6.4 Users across a few documents
+
+| users | docs |   S | awareness | servers | workers | connect+sync (ms) | syncTime p50 (ms) | syncTime p99 (ms) | syncTime max (ms) | bytes out (MB) | propagation p50 (ms) | propagation p95 (ms) | propagation p99 (ms) | propagation max (ms) | not delivered | serverMem peak (MB) | serverCpu (ms) | loopDelay p99 (ms) | queueDepth | workerMem peak (MB) | workerTime p95 (ms) | compactions | s3 written (MB) | dropped | total (s) |
+|-------|------|-----|-----------|---------|---------|-------------------|-------------------|-------------------|-------------------|----------------|----------------------|----------------------|----------------------|----------------------|---------------|---------------------|----------------|--------------------|------------|---------------------|---------------------|-------------|-----------------|---------|-----------|
+|   500 |    5 | 4mb |        no |       1 |       1 |            12 045 |             7 649 |            11 940 |            12 041 |          2 585 |                 4.20 |                7 160 |                7 188 |                7 219 |             0 |               2 011 |         61 600 |              172.5 |        198 |               415.8 |                   0 |           0 |               0 |       0 |      24.2 |
+
+Locates the crossover between Y6.1 and Y6.2 — the point where fan-out starts to dominate the per-connection floor.
+
+### Y6.5 Y6.2 across 3 server processes and 3 workers
+
+| users | docs |   S | awareness | servers | workers | connect+sync (ms) | syncTime p50 (ms) | syncTime p99 (ms) | syncTime max (ms) | bytes out (MB) | propagation p50 (ms) | propagation p95 (ms) | propagation p99 (ms) | propagation max (ms) | not delivered | serverMem peak (MB) | serverCpu (ms) | loopDelay p99 (ms) | queueDepth | workerMem peak (MB) | workerTime p95 (ms) | compactions | s3 written (MB) | dropped | total (s) |
+|-------|------|-----|-----------|---------|---------|-------------------|-------------------|-------------------|-------------------|----------------|----------------------|----------------------|----------------------|----------------------|---------------|---------------------|----------------|--------------------|------------|---------------------|---------------------|-------------|-----------------|---------|-----------|
+|   500 |    1 | 4mb |       yes |       3 |       3 |            12 038 |             7 473 |            11 957 |            12 013 |          5 116 |                 5.21 |                7 253 |               11 184 |               14 769 |            19 |               1 295 |        273 090 |               82.2 |        105 |               141.4 |                   0 |           0 |               0 |       0 |      61.8 |
+
+What it takes to make the hard case work, and therefore the scaling recommendation. Compare against the awareness row of Y6.2: per-pod CPU and event-loop delay should fall roughly with the number of pods, because fan-out partitions. The joins do not partition — every pod still fetches and merges the document for every one of its own joiners.
+
+**This is the only benchmark that runs more than one worker**, but the compaction hazard it first exposed is not a multi-worker problem — see the note on Y6.2. `taskDebounce` is the `XAUTOCLAIM` min-idle-time, and `claimTasks` reclaims using the worker's *own* consumer name with no in-flight guard, so a single worker re-claims and re-runs a task it has not finished. Extra workers widen the window; they do not create it.
+
+### Y6.6 Agents each building a document concurrently
+
+| agents | target each (MB) | written by clients (MB) | write time (s) | drain time (s) | compactions | workerTime p95 (ms) | workerMem peak (MB) | s3 puts | s3 written (MB) | write amplification | streamLen max | drained |
+|--------|------------------|-------------------------|----------------|----------------|-------------|---------------------|---------------------|---------|-----------------|---------------------|---------------|---------|
+|      4 |               20 |                    80.2 |           5.77 |           15.7 |           0 |                   0 |               145.7 |       0 |               0 |                   0 |             0 |     yes |
+
+The agent workload at scale — Y5.1 multiplied. This is likely the binding constraint for an agent-heavy deployment, and it is a **worker** constraint rather than a server one: the writes themselves are cheap, but every one of them triggers another whole-document rewrite. `drained: no` means compaction never caught up within the timeout.
+
+## Y7: A real editing trace
+
+### Y7.1 Primitive costs on the traced document
+
+|                       measurement |               value |                                                                                                                                         detail |
+|-----------------------------------|---------------------|------------------------------------------------------------------------------------------------------------------------------------------------|
+|                       trace shape | 35 updates, 3 users |                                                                                               baseline 50.9 MB + 34 edits totalling 3121 bytes |
+|               state vector (Y1.2) |                2 ms |                                                                                                                      20938.8 MB/s over 50.9 MB |
+|    binary merge, 1 pending (Y1.1) |               39 ms |                                                                                         1321.0 MB/s — paid on every sync of an edited document |
+|             document merge (Y1.4) |               43 ms |                                                                                                           1190.6 MB/s — the core of compaction |
+|      Y.Doc retained memory (Y1.4) |               51 MB | 1.0× serialized (50.9 MB) — binary content is retained as views over the update rather than re-materialised, unlike the string content in Y1.4 |
+| content ids, one real edit (Y1.3) |            0.020 ms |                                                                            on the main thread for every inbound message; the edit is 103 bytes |
+
+The same primitives as Y1, on the customer document instead of a synthetic one — and the headline is how *unlike* the synthetic case it is. This document is ~51 MB but holds only a few hundred structs, because the bulk is opaque application blobs under `rncColumnBlocks` rather than fine-grained CRDT content. Every per-byte figure here is therefore an order of magnitude better than Y1 at a comparable size: **CRDT cost tracks struct count, not document size.** The practical consequence is that for this shape, syncing is dominated by moving the bytes rather than by merging them — so the remedy is caching and transfer, not a faster merge.
+
+### Y7.2 Replay the real edit sequence
+
+| edits | bytes sent | time (ms) | serverCpu (ms) | µs cpu per edit | propagation p50 (ms) | propagation p95 (ms) | propagation p99 (ms) | propagation max (ms) | not delivered | loopDelay p99 (ms) | streamLen |
+|-------|------------|-----------|----------------|-----------------|----------------------|----------------------|----------------------|----------------------|---------------|--------------------|-----------|
+|   102 |      9 363 |     251.6 |          130.7 |           1 281 |                 2.58 |                 3.10 |                 4.55 |                 6.58 |             0 |               11.2 |       102 |
+
+The real edits, in order, against the real document — one at a time so each propagation figure is a clean edit-to-observer measurement rather than a queue. These edits are tiny (10–354 bytes) while the document is ~51 MB, which is the case the cost model cares about most: writing is cheap and independent of document size, but every one of these edits makes the *next* sync pay a full merge (see Y1.1 and Y7.3).
+
+### Y7.3 N users syncing the traced document
+
+|   N | pending edits |     arrival | syncBytes (MB) | time (ms) | achieved (joins/s) | syncTime p50 (ms) | syncTime p95 (ms) | syncTime p99 (ms) | syncTime max (ms) | serverCpu (ms) | cpu per sync (ms) | serverMem peak (MB) | loopDelay p99 (ms) | queueDepth | s3 gets | dropped |
+|-----|---------------|-------------|----------------|-----------|--------------------|-------------------|-------------------|-------------------|-------------------|----------------|-------------------|---------------------|--------------------|------------|---------|---------|
+|   1 |             0 | all at once |           50.9 |     255.0 |               3.92 |             254.7 |             254.7 |             254.7 |             254.7 |           2.76 |              2.76 |               387.0 |               10.5 |          0 |       0 |       0 |
+|   1 |             1 | all at once |           50.9 |     391.0 |               2.56 |             390.8 |             390.8 |             390.8 |             390.8 |           3.75 |              3.75 |               398.5 |               10.4 |          0 |       0 |       0 |
+|  10 |             0 | all at once |           50.9 |     3 337 |               3.00 |             2 769 |             3 335 |             3 335 |             3 335 |          6 501 |             650.1 |               1 177 |              572.5 |          0 |      16 |       0 |
+|  10 |             1 | all at once |           50.9 |     2 219 |               4.51 |             1 983 |             2 218 |             2 218 |             2 218 |          4 137 |             413.7 |               1 134 |              338.2 |          0 |       6 |       0 |
+| 100 |             0 |  ramped 5/s |           50.9 |    22 671 |               4.41 |             435.2 |             3 115 |             3 906 |             3 906 |         34 723 |             347.2 |               1 388 |              483.1 |          0 |     102 |       0 |
+| 100 |             1 |  ramped 5/s |           50.9 |    25 787 |               3.88 |             1 920 |             8 541 |             9 069 |             9 069 |         46 250 |             462.5 |               1 984 |              1 153 |          1 |     104 |       0 |
+| 200 |             0 |  ramped 5/s |           50.9 |    40 421 |               4.95 |             227.1 |             292.0 |             343.0 |             343.1 |         37 945 |             189.7 |               1 396 |               53.4 |          0 |     212 |       0 |
+| 200 |             1 |  ramped 5/s |           50.9 |    40 462 |               4.94 |             249.6 |             946.3 |             1 311 |             1 428 |         44 198 |             221.0 |               1 559 |               61.9 |          0 |     182 |       0 |
+
+The join cost of the real document, at a few users and at 100. `pending edits = 0` is a freshly compacted document; `= 1` is the same document after a single real edit, which is the state it is in almost all the time. The gap between the two rows at equal N is the sync cliff on real data, and `cpu per sync` is the per-joiner work that no amount of client-side caching avoids.
+
+Arrivals above 20 are **ramped**, not simultaneous. Every join ships the whole ~51 MB document, so 100 at once means several GB of send buffers on one process — that stops measuring join cost and starts measuring how the process degrades under memory pressure. `achieved (joins/s)` is the number to plan a deploy against.
+
+### Y7.4 M users concurrently replaying the trace on one document
+
+|   M | edits sent | frames delivered | bytes out (MB) | time (ms) | serverCpu (ms) | µs cpu per edit per writer | loopDelay p99 (ms) | workerTime p95 (ms) | compactions | s3 written (MB) | dropped |
+|-----|------------|------------------|----------------|-----------|----------------|----------------------------|--------------------|---------------------|-------------|-----------------|---------|
+|   1 |         34 |               34 |           50.9 |     2 696 |           91.5 |                      2 692 |               10.4 |                   0 |           0 |               0 |       0 |
+|  25 |        850 |            1 942 |          1 272 |     2 727 |          500.4 |                      588.7 |               11.3 |                   0 |           0 |               0 |       0 |
+| 100 |      3 400 |            1 679 |          5 089 |     2 736 |          1 966 |                      578.4 |               18.9 |                   0 |           0 |               0 |       0 |
+
+Everyone editing the same real document at once — writes and fan-out concentrated on one room, with a worker compacting ~51 MB behind them. `s3 written` against the bytes the clients actually sent is the amplification this document costs: each of these edits is a few hundred bytes and each compaction rewrites the whole thing.
+
+### Y7.5 Compaction of the traced document
+
+| input (MB) | gcDoc (MB) | nongcDoc (MB) | contentmap (KB) | compactions | workerTime p95 (ms) | workerTime max (ms) | workerMem peak (MB) | s3 puts | s3 written (MB) | taskErrors |
+|------------|------------|---------------|-----------------|-------------|---------------------|---------------------|---------------------|---------|-----------------|------------|
+|       50.9 |          0 |             0 |               0 |           0 |                   0 |                   0 |               104.2 |       0 |               0 |          0 |
+
+What one compaction of this document costs. The trace is `gc: false` — it preserves deleted content — yet its gc and nongc encodings come out nearly identical, because the 34 human edits tombstone almost nothing next to the bulk import. Contrast Y5.3, where a synthetically churned document carries several times its live size in history: how much compaction costs you depends far more on the edit pattern than on the document size.
 
 ## Derived constants
 
@@ -51,20 +492,20 @@ The point of the exercise: plug your own workload numbers into the cost model
 from [README.md](./README.md#cost-model) using the constants below, instead of
 running another benchmark.
 
-|                        symbol |                                                    meaning |          value | from |
-|-------------------------------|------------------------------------------------------------|----------------|------|
-|                          t_sv |                 state-vector scan rate, paid once per sync | _not measured_ | Y1.2 |
-|                       t_merge |                          binary merge rate (sync, fan-out) | _not measured_ | Y1.1 |
-|                    t_docmerge |                       document merge rate (compaction, gc) | _not measured_ | Y1.4 |
-|                         k_doc | Y.Doc expansion factor, retained bytes per serialized byte | _not measured_ | Y1.4 |
-|            t_aw (bare cursor) |     awareness merge, per participant state, per subscriber | _not measured_ | Y1.5 |
-|          t_aw (full presence) |                 the same with a realistic presence payload | _not measured_ | Y1.5 |
-|                        c_conn |                          server memory per idle connection | _not measured_ | Y2.2 |
-|                        c_room |                          server memory per subscribed room | _not measured_ | Y2.1 |
-|                        k_sync | peak server memory per concurrent sync, per MB of document | _not measured_ | Y2.4 |
-|            per-observer relay |         server cpu per update per observer, documents only | _not measured_ | Y4.1 |
-| per-observer relay + presence |                            the same with awareness enabled | _not measured_ | Y4.2 |
-|           write amplification |             bytes written to S3 per byte of final document | _not measured_ | Y5.1 |
+|                        symbol |                                                    meaning |     value | from |
+|-------------------------------|------------------------------------------------------------|-----------|------|
+|                          t_sv |                 state-vector scan rate, paid once per sync | 58.4 MB/s | Y1.2 |
+|                       t_merge |                          binary merge rate (sync, fan-out) | 27.9 MB/s | Y1.1 |
+|                    t_docmerge |                       document merge rate (compaction, gc) | 13.1 MB/s | Y1.4 |
+|                         k_doc | Y.Doc expansion factor, retained bytes per serialized byte |    11.3 × | Y1.4 |
+|            t_aw (bare cursor) |     awareness merge, per participant state, per subscriber |   3.50 µs | Y1.5 |
+|          t_aw (full presence) |                 the same with a realistic presence payload |   7.85 µs | Y1.5 |
+|                        c_conn |                          server memory per idle connection | 0.0252 MB | Y2.2 |
+|                        c_room |                          server memory per subscribed room | 0.0638 MB | Y2.1 |
+|                        k_sync | peak server memory per concurrent sync, per MB of document |   1.09 MB | Y2.4 |
+|            per-observer relay |         server cpu per update per observer, documents only |   7.61 µs | Y4.1 |
+| per-observer relay + presence |                            the same with awareness enabled | 127.87 µs | Y4.2 |
+|           write amplification |             bytes written to S3 per byte of final document |     0.0 × | Y5.1 |
 
 ```
 server_mem   ≈ B_srv + n_conn·c_conn + n_room·c_room + concurrent_syncs·k_sync·S
@@ -83,16 +524,16 @@ not that the operation is cheap. Rows 6, 7 and 10 have no pass/fail: their
 grades are about avoidable repetition rather than a curve, and the `finding`
 column reports the size of that repetition directly.
 
-|  # |                                    operation |         predicted |        finding | verdict |         evidence |
-|----|----------------------------------------------|-------------------|----------------|---------|------------------|
-|  1 |                     Websocket upgrade + auth |                 A | _not measured_ |       — |             Y2.2 |
-|  2 |                            Room subscription |                 A | _not measured_ |       — |     Y2.1 vs Y2.2 |
-|  3 |                              Idle connection |                 A | _not measured_ |       — |             Y2.3 |
-|  4 |                              Write an update |                 B | _not measured_ |       — |             Y3.1 |
-|  5 |            Deliver a batch to one subscriber |                 B | _not measured_ |       — |             Y4.1 |
-|  6 | Deliver an awareness batch to one subscriber | B, large constant | _not measured_ |       — | Y1.5, Y4.2, Y4.3 |
-|  7 |                 Fetch the persisted document |                 C | _not measured_ |       — |             Y2.6 |
-|  8 |                     Compute the state vector |                 C | _not measured_ |       — |             Y1.2 |
-|  9 |      Merge pending updates into the document |                 C | _not measured_ |       — |       Y1.1, Y2.6 |
-| 10 |    Many clients syncing one document at once |                 D | _not measured_ |       — | Y2.4, Y2.5, Y2.6 |
-| 11 |                   Compaction of one document |                 E | _not measured_ |       — |       Y5.1, Y5.3 |
+|  # |                                    operation |         predicted |                                                                                 finding |   verdict |         evidence |
+|----|----------------------------------------------|-------------------|-----------------------------------------------------------------------------------------|-----------|------------------|
+|  1 |                     Websocket upgrade + auth |                 A |                                                 0.03 MB per connection at the largest N | confirmed |             Y2.2 |
+|  2 |                            Room subscription |                 A |                                                       0.06 MB per room at the largest N | confirmed |     Y2.1 vs Y2.2 |
+|  3 |                              Idle connection |                 A |                                                                0.00 MB drift while idle | confirmed |             Y2.3 |
+|  4 |                              Write an update |                 B |                                       cpu per update varies 5.29× across document sizes |   refuted |             Y3.1 |
+|  5 |            Deliver a batch to one subscriber |                 B |                                         per-edit latency varies 3.56× as observers grow | confirmed |             Y4.1 |
+|  6 | Deliver an awareness batch to one subscriber | B, large constant |                                       presence costs 17× a document update per observer | confirmed | Y1.5, Y4.2, Y4.3 |
+|  7 |                 Fetch the persisted document |                 C |                                                                   1.00 S3 GETs per sync | confirmed |             Y2.6 |
+|  8 |                     Compute the state vector |                 C |                          scan rate varies 1.24× across sizes, so time is linear in size | confirmed |             Y1.2 |
+|  9 |      Merge pending updates into the document |                 C |                                                    merge rate varies 1.35× across sizes | confirmed |       Y1.1, Y2.6 |
+| 10 |    Many clients syncing one document at once |                 D | every concurrent joiner independently costs 1736 ms of server cpu for the same document | confirmed | Y2.4, Y2.5, Y2.6 |
+| 11 |                   Compaction of one document |                 E |                                     0.00 bytes written to S3 per byte the clients wrote |   refuted |       Y5.1, Y5.3 |

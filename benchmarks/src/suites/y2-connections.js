@@ -198,7 +198,12 @@ export default {
       /** @param {{ report: import('../report.js').Reporter }} ctx */
       run: async ({ report }) => {
         const cluster = await getCluster()
-        const n = config.scale.connections[config.scale.connections.length - 1]
+        // see `scale.rampMax`: ramping only bounds memory while the target rate
+        // is near what the server can serve, so this population is capped too
+        const n = Math.min(
+          config.scale.connections[config.scale.connections.length - 1],
+          config.scale.rampMax
+        )
         const targetBytes = config.scale.docSizes[config.scale.docSizes.length - 1]
         const docid = `y25-${sizeLabel(targetBytes)}`
         await seedRoom(cluster, docid, targetBytes)

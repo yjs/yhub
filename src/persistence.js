@@ -141,6 +141,7 @@ export class Persistence {
     await this.sql`
       INSERT INTO yhub_ydoc_v1 (org,docid,branch,t,created,gcDoc,nongcDoc,contentmap,contentids)
       VALUES (${room.org},${room.docid},${room.branch},${lastClock},${created},${encodedGcDocAsset},${encodedNongcDocAsset},${encodedContentmapAsset},${encodedContentidsAsset})
+      ON CONFLICT (org,docid,branch,t) DO NOTHING
     `
   }
 

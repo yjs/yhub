@@ -4,7 +4,7 @@ import { WebSocket } from 'ws'
 import { WebsocketProvider } from '@y/websocket'
 import * as t from 'lib0/testing' // eslint-disable-line
 import * as promise from 'lib0/promise'
-import { createYHub } from '@y/hub'
+import { createYHub, apiError, createApiEndpoint } from '@y/hub'
 import * as number from 'lib0/number'
 import { S3PersistenceV1 } from '@y/hub/plugins/s3'
 import postgres from 'postgres'
@@ -25,6 +25,66 @@ if (tableExists?.[0]?.exists) {
 }
 
 const yhubPort = number.parseInt(env.getConf('port') || '9999')
+
+/**
+ * Side channel for the custom api test endpoints defined below.
+ *
+ * @type {{ slowAborted: boolean|null }}
+ */
+export const apiTestState = { slowAborted: null }
+
+/**
+ * Custom api endpoints served by the shared test hub (see customApi.tests.js).
+ *
+ * @type {Array<types.ApiEndpoint>}
+ */
+const testApiSpecs = [
+  {
+    name: 'echo',
+    get: async req => ({ org: req.org, docid: req.docid, branch: req.branch, room: req.room, q: req.query.get('q'), userid: req.authInfo.userid, header: req.headers['x-echo'] ?? null }),
+    post: async req => ({ received: await req.any(), rawLen: (await req.bytes()).byteLength }),
+    put: async () => 'hello',
+    patch: async () => new Uint8Array([1, 2, 3]),
+    delete: async () => undefined
+  },
+  { name: 'echo', version: 'v2', get: async () => ({ v: 2 }) },
+  // item route sharing the collection's name - routes differ in url depth
+  { name: 'echo', path: '/:commentId', get: async req => ({ commentId: req.params.commentId, docid: req.docid }) },
+  {
+    name: 'docs',
+    scope: 'org',
+    get: async req => {
+      // @ts-expect-error room is null in org scope - regression guard for the scope-typed request
+      req.room?.docid // eslint-disable-line no-unused-expressions
+      return { org: req.org, room: req.room, docid: req.docid }
+    }
+  },
+  { name: 'stats', scope: 'global', get: async req => ({ ok: true, org: req.org }) },
+  { name: 'resp', get: async () => new Response('{"a":1}', { status: 201, headers: { 'content-type': 'application/json', 'x-test': 'yes' } }) },
+  {
+    name: 'fail',
+    get: async () => { throw apiError(404, 'nope', { code: 'not-found' }) },
+    post: async () => { throw new Error('boom') },
+    // a foreign error carrying a numeric `status` must not leak its message (only apiError does)
+    put: async () => { throw Object.assign(new Error('secret-internal'), { status: 502 }) }
+  },
+  // defined via the typing helper: doc scope by default, req.room is non-null - no casts needed
+  createApiEndpoint('getdoc', {
+    get: async req => {
+      const { gcDoc } = await req.yhub.getDoc(req.room, { gc: true }, { gcOnMerge: false })
+      return { doc: gcDoc }
+    }
+  }),
+  {
+    name: 'slow',
+    get: async req => {
+      await promise.wait(300)
+      apiTestState.slowAborted = req.aborted
+      return { ok: true }
+    }
+  }
+]
+
 export const yhub = await createYHub({
   redis: {
     url: env.ensureConf('redis'),
@@ -51,8 +111,11 @@ export const yhub = await createYHub({
         return { userid: 'user1' }
       },
       // always grant rw access
-      async getAccessType () { return 'rw' }
-    })
+      async getAccessType () { return 'rw' },
+      async getOrgAccessType () { return 'rw' },
+      async getGlobalAccessType () { return 'rw' }
+    }),
+    api: testApiSpecs
   },
   worker: {
     taskConcurrency: 500

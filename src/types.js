@@ -226,7 +226,9 @@ export const $persistencePlugin = s.$object({
 
 export const $authPlugin = /** @type {s.Schema<AuthPlugin<any>>} */ (s.$object({
   readAuthInfo: /** @type {any} */ (s.$function),
-  getAccessType: /** @type {any} */ (s.$function)
+  getAccessType: /** @type {any} */ (s.$function),
+  getOrgAccessType: /** @type {any} */ (s.$function).optional,
+  getGlobalAccessType: /** @type {any} */ (s.$function).optional
 }))
 
 /**
@@ -234,10 +236,19 @@ export const $authPlugin = /** @type {s.Schema<AuthPlugin<any>>} */ (s.$object({
  */
 
 /**
+ * `purpose` is the `accessPurpose` of a custom api endpoint (`null` when unset). Built-in
+ * endpoints and websocket connections don't supply it, so treat `purpose == null` (loose
+ * comparison) as "no purpose".
+ *
+ * `getOrgAccessType` / `getGlobalAccessType` authorize org-/global-scoped custom api endpoints.
+ * When missing, requests to endpoints of that scope are denied.
+ *
  * @template {UserAuthInfo} AuthInfo
  * @typedef {object} AuthPlugin
- * @property {(req:import('uws').HttpRequest) => Promise<AuthInfo>} AuthPlugin.readAuthInfo
- * @property {(authInfo: AuthInfo, room: Room) => Promise<AccessType>} AuthPlugin.getAccessType:
+ * @property {(req:import('uws').HttpRequest) => Promise<AuthInfo|null>} AuthPlugin.readAuthInfo - return null (or throw) to reject the request with 401
+ * @property {(authInfo: AuthInfo, room: Room, purpose?: string|null) => Promise<AccessType>} AuthPlugin.getAccessType:
+ * @property {(authInfo: AuthInfo, org: string, purpose?: string|null) => Promise<AccessType>} [AuthPlugin.getOrgAccessType]
+ * @property {(authInfo: AuthInfo, purpose?: string|null) => Promise<AccessType>} [AuthPlugin.getGlobalAccessType]
  */
 
 /**
@@ -245,6 +256,88 @@ export const $authPlugin = /** @type {s.Schema<AuthPlugin<any>>} */ (s.$object({
  * @param {AuthPlugin<AuthInfo>} authDef
  */
 export const createAuthPlugin = authDef => authDef
+
+/**
+ * The request object passed to custom api endpoint handlers (`server.api`). All properties are
+ * plain snapshots taken before the handler runs - safe to access at any time. The only exception
+ * is `aborted`, which flips to true once the client disconnects.
+ *
+ * @typedef {object} ApiRequestBase
+ * @property {import('./index.js').YHub} ApiRequestBase.yhub
+ * @property {'get'|'post'|'put'|'patch'|'delete'} ApiRequestBase.method
+ * @property {string} ApiRequestBase.path - the request path, e.g. '/api/v1/comments/acme/readme'
+ * @property {{ [name: string]: string }} ApiRequestBase.params - the named path segments declared via `path`
+ * @property {{ [name: string]: string }} ApiRequestBase.headers - lowercased request headers
+ * @property {UserAuthInfo} ApiRequestBase.authInfo
+ * @property {'r'|'rw'} ApiRequestBase.accessType
+ * @property {boolean} ApiRequestBase.aborted - true once the client disconnected. Check between expensive steps and return early.
+ * @property {URLSearchParams} ApiRequestBase.query
+ * @property {() => Promise<Uint8Array<ArrayBuffer>>} ApiRequestBase.bytes - the raw request body
+ * @property {() => Promise<any>} ApiRequestBase.any - the request body, lib0-any-decoded
+ */
+
+/**
+ * @typedef {ApiRequestBase & { org: string, docid: string, branch: string, room: Room }} ApiDocRequest
+ */
+/**
+ * @typedef {ApiRequestBase & { org: string, docid: null, branch: null, room: null }} ApiOrgRequest
+ */
+/**
+ * @typedef {ApiRequestBase & { org: null, docid: null, branch: null, room: null }} ApiGlobalRequest
+ */
+/**
+ * @typedef {ApiDocRequest | ApiOrgRequest | ApiGlobalRequest} ApiRequest
+ */
+
+/**
+ * The method handlers of a custom api endpoint. `get` requires 'r' access, all other methods
+ * require 'rw'. Handler return values: a `Response` is written as-is, `null`/`undefined`
+ * responds "204 No Content", a string responds as text/plain, a Uint8Array is sent raw
+ * (application/octet-stream), and anything else is lib0-any-encoded (application/x-lib0any).
+ *
+ * @template Req
+ * @typedef {object} ApiEndpointMethods
+ * @property {(req: Req) => any} [ApiEndpointMethods.get]
+ * @property {(req: Req) => any} [ApiEndpointMethods.post]
+ * @property {(req: Req) => any} [ApiEndpointMethods.put]
+ * @property {(req: Req) => any} [ApiEndpointMethods.patch]
+ * @property {(req: Req) => any} [ApiEndpointMethods.delete]
+ */
+
+/**
+ * A custom rest endpoint served at `/api/{version}/{name}/...` - see API.md. One name may serve
+ * several routes with distinct url depths (e.g. a collection plus an item route via
+ * `path: '/:commentId'`). Handlers are typed by `scope`: doc-scoped handlers receive a non-null
+ * `room`, org-scoped handlers receive `org` only, global handlers neither.
+ *
+ * Fields: `version` (default: 'v1'), `scope` (default: 'doc'), `path` (additional named path
+ * segments, e.g. '/:commentId'), `accessPurpose` (forwarded as `purpose` to the auth access
+ * callback).
+ *
+ * @typedef {{ name: string, version?: string, scope?: 'doc', path?: string, accessPurpose?: string } & ApiEndpointMethods<ApiDocRequest>} ApiDocEndpoint
+ */
+/**
+ * @typedef {{ name: string, version?: string, scope: 'org', path?: string, accessPurpose?: string } & ApiEndpointMethods<ApiOrgRequest>} ApiOrgEndpoint
+ */
+/**
+ * @typedef {{ name: string, version?: string, scope: 'global', path?: string, accessPurpose?: string } & ApiEndpointMethods<ApiGlobalRequest>} ApiGlobalEndpoint
+ */
+/**
+ * @typedef {ApiDocEndpoint | ApiOrgEndpoint | ApiGlobalEndpoint} ApiEndpoint
+ */
+
+/**
+ * Define a custom api endpoint (`server.api`) with scope-aware handler typings and a preserved
+ * literal name. Purely a typing helper - plain object literals work identically inside the
+ * config; use this for endpoints defined in separate modules.
+ *
+ * @template {string} Name
+ * @template {'doc'|'org'|'global'} [Scope='doc']
+ * @param {Name} name
+ * @param {{ version?: string, scope?: Scope, path?: string, accessPurpose?: string } & ApiEndpointMethods<Scope extends 'doc' ? ApiDocRequest : Scope extends 'org' ? ApiOrgRequest : ApiGlobalRequest>} opts
+ * @return {ApiEndpoint & { name: Name }}
+ */
+export const createApiEndpoint = (name, opts) => /** @type {any} */ ({ name, ...opts })
 
 export const $config = s.$object({
   redis: s.$object({
@@ -297,6 +390,11 @@ export const $config = s.$object({
   server: s.$object({
     port: s.$number,
     auth: $authPlugin,
+    /**
+     * Custom rest endpoints served under `/api/{version}/{name}/...`. See API.md.
+     * @type {s.$Optional<s.Schema<Array<ApiEndpoint>>>}
+     */
+    api: /** @type {s.$Optional<s.Schema<Array<ApiEndpoint>>>} */ (s.$array(s.$objectAny).optional),
     /**
      * Maximum expected Ydoc size in bytes. Used as baseline to calculate WebSocket
      * maxPayloadLength and maxBackpressure. (default: 500MB)

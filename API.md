@@ -255,6 +255,151 @@ const activity = buffer.decodeAny(new Uint8Array(await res.arrayBuffer()))
 await prune({ from: activity[i].from, to: activity[j].to })
 ```
 
+### Custom API endpoints
+
+Define your own rest endpoints — served from the same process and guarded by the same auth plugin
+as the built-in endpoints — via the `server.api` config section. Every custom endpoint lives under
+`/api/{version}/{name}/...`, a namespace that is **contractually reserved for your endpoints**:
+y/hub will never register a built-in route under `/api/*`.
+
+```js
+import { createYHub, createAuthPlugin, apiError } from '@y/hub'
+
+const yhub = await createYHub({
+  // ...
+  server: {
+    port: 8080,
+    auth: createAuthPlugin({ /* see below */ }),
+    api: [
+      // doc scope (default) → GET/POST /api/v1/comments/{org}/{docid}
+      {
+        name: 'comments',
+        accessPurpose: 'comments', // forwarded to getAccessType as `purpose`
+        get: async req => ({ comments: await readComments(req.room), viewer: req.authInfo.userid }),
+        post: async req => {
+          const { text } = await req.any()
+          if (!text) throw apiError(400, 'text is required')
+          await saveComment(req.room, req.authInfo.userid, text)
+        }
+      },
+      // item route sharing the collection's name → GET /api/v1/comments/{org}/{docid}/{commentId}
+      { name: 'comments', path: '/:commentId', get: async req => await getComment(req.room, req.params.commentId) },
+      // a breaking revision of the same endpoint → GET /api/v2/comments/{org}/{docid}
+      { name: 'comments', version: 'v2', get: async req => ({ comments: await readCommentsV2(req.room) }) },
+      // org scope → GET /api/v1/docs/{org}
+      { name: 'docs', scope: 'org', get: async req => ({ docs: await listDocs(req.org) }) },
+      // global scope → GET /api/v1/stats
+      { name: 'stats', scope: 'global', get: async req => ({ uptime: process.uptime() }) }
+    ]
+  }
+})
+```
+
+#### Endpoint definition
+
+`server.api` is an array of endpoint definitions, so multiple sources (your app, plugins) can
+contribute endpoints by concatenation. One `name` may serve several routes with distinct url
+depths — that's how a collection route and an item route (`path: '/:commentId'`) share one
+resource name. Two endpoints with the same `(name, version)` and the same url depth throw at
+startup.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `name` | `string` | — | required; a single path segment (`^[A-Za-z0-9_-]+$`). Prefer camelCase — the name doubles as a property name in future typed clients. |
+| `version` | `string` | `'v1'` | a single path segment; bump for breaking revisions of an endpoint |
+| `scope` | `'doc' \| 'org' \| 'global'` | `'doc'` | route shape: `/api/{version}/{name}/{org}/{docid}`, `/api/{version}/{name}/{org}`, or `/api/{version}/{name}` |
+| `path` | `string` | `''` | extra named path segments appended to the route, e.g. `'/:commentId'` (named params only, available via `req.params`) |
+| `accessPurpose` | `string` | `null` | forwarded as `purpose` to the auth access callback (see below) |
+| `get`, `post`, `put`, `patch`, `delete` | `(req) => any` | — | async handlers; at least one is required. `get` requires `'r'` access, all other methods require `'rw'`. |
+
+Because names and versions are single segments, every request under `/api/` has the fixed shape
+`/api/{version}/{apiname}/...` — easy for proxies to inspect positionally.
+
+Handlers are typed by `scope`: doc-scoped handlers receive a non-null `req.room`, org-scoped
+handlers receive `req.org` only, global handlers neither. Plain object literals inside `api: [...]`
+get these typings automatically. For endpoints defined in separate modules (where contextual typing
+can't reach), use the `createApiEndpoint` helper — it also preserves the literal endpoint name for
+tooling:
+
+```js
+import { createApiEndpoint } from '@y/hub'
+
+export const comments = createApiEndpoint('comments', {
+  get: async req => ({ comments: await readComments(req.room) }) // req.room: Room (non-null)
+})
+```
+
+#### Authorization and `purpose`
+
+Access requirements are automatic: `get` requires `'r'`, all other methods require `'rw'`. The
+customization point is the endpoint's `accessPurpose`, which the auth callbacks receive as the
+trailing `purpose` argument:
+
+```js
+createAuthPlugin({
+  async readAuthInfo (req) { /* unchanged */ },
+  // purpose is the accessPurpose of a custom api endpoint (null when unset). Built-in endpoints
+  // and websocket connections don't supply it - treat `purpose == null` (loose) as "no purpose".
+  async getAccessType (authInfo, room, purpose) {
+    if (purpose === 'comments') return 'rw' // e.g. allow commenting on read-only docs
+    if (purpose === 'moderation') return isAdmin(authInfo) ? 'rw' : null // admin-only endpoint
+    return lookupDocAccess(authInfo, room)
+  },
+  // authorize org-scoped custom endpoints. When missing, org-scoped endpoints deny all access.
+  async getOrgAccessType (authInfo, org, purpose) { return lookupOrgAccess(authInfo, org) },
+  // authorize global-scoped custom endpoints. When missing, global-scoped endpoints deny all access.
+  async getGlobalAccessType (authInfo, purpose) { return 'r' }
+})
+```
+
+Note that `purpose` is advisory: a `getAccessType` implementation that ignores it simply applies
+the user's plain doc access to every doc-scoped endpoint. An endpoint's `accessPurpose` broadens or
+narrows access only when the auth plugin acts on it.
+
+#### The request object
+
+Handlers receive a single request object. All properties are plain snapshots — safe to access at
+any time, also after `await`s:
+
+| Property | Type | Description |
+|---|---|---|
+| `yhub` | `YHub` | the yhub instance — query documents via `yhub.getDoc(req.room, ...)`, access `stream`, `persistence`, `computePool`, `agentTask` |
+| `method` | `string` | `'get' \| 'post' \| 'put' \| 'patch' \| 'delete'` |
+| `path` | `string` | the request path, e.g. `/api/v1/comments/acme/readme` |
+| `org` | `string \| null` | `null` for global scope |
+| `docid`, `branch`, `room` | | only set for doc scope; `branch` from `?branch=` (default `'main'`) |
+| `params` | `{ [name]: string }` | the named path segments declared via `path` |
+| `query` | `URLSearchParams` | parsed url query |
+| `headers` | `{ [name]: string }` | lowercased request headers |
+| `authInfo` | | whatever `readAuthInfo` returned |
+| `accessType` | `'r' \| 'rw'` | the granted access |
+| `aborted` | `boolean` | becomes `true` when the client disconnects — check between expensive steps and return early |
+| `bytes()` | `() => Promise<Uint8Array>` | the raw request body |
+| `any()` | `() => Promise<any>` | the request body, lib0-any-decoded |
+
+#### Return values
+
+| Handler returns | Response |
+|---|---|
+| `Response` | status, headers, and body are taken from the `Response` — the full-control escape hatch. The default CORS headers are added unless the `Response` sets its own `Access-Control-Allow-Origin`; `content-length`/`transfer-encoding` are managed by the server. |
+| `undefined` / `null` | `204 No Content` |
+| `string` | `200`, `text/plain; charset=utf-8` |
+| `Uint8Array` / `Buffer` | `200`, `application/octet-stream`, as-is |
+| anything else | `200`, `application/x-lib0any`, lib0-any-encoded — the same encoding all built-in endpoints use. The dedicated content type keeps the wire self-describing: clients decode by content type (`x-lib0any` → `decodeAny`, `text/*` → text, else raw bytes). |
+
+Throw `apiError(status, message, extra?)` (exported by `@y/hub`) to respond with a specific status
+code and an any-encoded `{ error: message, ...extra }` body — use `extra` for machine-readable
+fields, conventionally `{ code: 'comment-not-found' }`. Any other exception is logged and produces
+a generic `500` without leaking internals.
+
+```js
+import * as buffer from 'lib0/buffer'
+
+// call a custom endpoint
+const res = await fetch(`http://${yhubHost}/api/v1/comments/${org}/${docid}`)
+const { comments } = buffer.decodeAny(new Uint8Array(await res.arrayBuffer()))
+```
+
 ### YHub Import API
 
 The `YHub` class is available when importing `@y/hub` directly. It exposes methods for reading and writing documents programmatically, bypassing the WebSocket and REST layers. This is useful for server-side scripts, migrations, and data pipelines.
@@ -280,7 +425,8 @@ const yhub = await createYHub(config)
 | `computePoolSize` | `number` | no | Worker threads in the compute pool for CPU-intensive Yjs work (merging, state vectors, changesets). Default: number of cpus - 1. Set this explicitly when the process is restricted to a subset of cores — `os.cpus().length` does not reflect `taskset` or cgroup limits. |
 | `server` | `object \| null` | no | HTTP/WebSocket server config. Set to `null` to run without a server (worker/script mode). |
 | `server.port` | `number` | yes* | Port to listen on |
-| `server.auth` | `AuthPlugin` | yes* | Auth plugin created with `createAuthPlugin` |
+| `server.auth` | `AuthPlugin` | yes* | Auth plugin created with `createAuthPlugin`. `getAccessType(authInfo, room, purpose)` receives the `accessPurpose` of custom api endpoints as `purpose` (null-ish otherwise). The optional `getOrgAccessType(authInfo, org, purpose)` / `getGlobalAccessType(authInfo, purpose)` callbacks authorize org-/global-scoped custom endpoints — when missing, endpoints of that scope deny all access. |
+| `server.api` | `ApiSpec[]` | no | Custom rest endpoints served under `/api/{version}/{name}/...`. See [Custom API endpoints](#custom-api-endpoints). |
 | `server.maxDocSize` | `number` | no | Maximum Ydoc size in bytes, used for WebSocket payload limits. Default: 500 MB |
 | `worker` | `object \| null` | no | Background compaction worker config. Set to `null` to disable. |
 | `worker.taskConcurrency` | `number` | yes* | Maximum number of compaction tasks to process in parallel |

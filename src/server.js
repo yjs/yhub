@@ -12,6 +12,7 @@ import * as protocol from './protocol.js'
 import * as math from 'lib0/math'
 import * as buffer from 'lib0/buffer'
 import { mergeUpdates } from './y-utils.js'
+import { setCorsHeaders, sendErrorResponse, authenticateRequest, registerApi } from './api.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'ws' })
@@ -75,66 +76,16 @@ export const createYHubServer = async (yhub, conf) => {
   registerWebsocketServer(yhub, app)
   // The REST API defined in `API.md`
 
-  /**
-   * @param {uws.HttpResponse} res
-   */
-  const setCorsHeaders = (res) => {
-    res.writeHeader('Access-Control-Allow-Origin', '*')
-    res.writeHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS')
-    res.writeHeader('Access-Control-Allow-Headers', 'Content-Type')
-  }
-
-  /**
-   * @param {uws.HttpResponse} res
-   * @param {string} status
-   * @param {{ error: string }} body
-   */
-  const sendErrorResponse = (res, status, body) => {
-    const encoder = encoding.createEncoder()
-    encoding.writeAny(encoder, body)
-    const response = encoding.toUint8Array(encoder)
-    res.cork(() => {
-      setCorsHeaders(res)
-      res.writeStatus(status)
-      res.writeHeader('Content-Type', 'application/octet-stream')
-      res.end(response)
-    })
-  }
-
-  /**
-   * @param {uws.HttpRequest} req
-   * @param {t.Room} room
-   * @param {'r' | 'rw'} requiredAccess
-   * @returns {Promise<{ authInfo: { userid: string }, accessType: t.AccessType } | { error: string, status: string }>}
-   */
-  const authenticateRequest = async (req, room, requiredAccess) => {
-    // If no auth module is defined, no auth is required
-    if (yhub.conf.server?.auth == null) {
-      return { authInfo: { userid: 'anonymous' }, accessType: 'rw' }
-    }
-    try {
-      const authInfo = await yhub.conf.server.auth.readAuthInfo(req)
-      if (authInfo == null) {
-        return { error: 'Unauthorized', status: '401 Unauthorized' }
-      }
-      const accessType = await yhub.conf.server.auth.getAccessType(authInfo, room)
-      if (requiredAccess === 'rw' && !t.hasWriteAccess(accessType)) {
-        return { error: 'Forbidden', status: '403 Forbidden' }
-      }
-      if (requiredAccess === 'r' && !t.hasReadAccess(accessType)) {
-        return { error: 'Forbidden', status: '403 Forbidden' }
-      }
-      return { authInfo, accessType }
-    } catch (_err) {
-      return { error: 'Unauthorized', status: '401 Unauthorized' }
-    }
-  }
-
   // Handle CORS preflight requests
-  app.options('/*', (res, _req) => {
+  app.options('/*', (res, req) => {
+    // reflect the requested headers so custom request headers pass the preflight
+    const requestedHeaders = req.getHeader('access-control-request-headers')
     res.cork(() => {
-      setCorsHeaders(res)
+      // the status must be written before any header - otherwise uws locks the status to "200 OK"
       res.writeStatus('204 No Content')
+      res.writeHeader('Access-Control-Allow-Origin', '*')
+      res.writeHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
+      res.writeHeader('Access-Control-Allow-Headers', requestedHeaders !== '' ? requestedHeaders : 'Content-Type, Authorization')
       res.end()
     })
   })
@@ -149,7 +100,7 @@ export const createYHubServer = async (yhub, conf) => {
     res.onAborted(() => {
       aborted = true
     })
-    const authResult = await authenticateRequest(req, room, 'r')
+    const authResult = await authenticateRequest(yhub, req, room, 'r')
     if ('error' in authResult) {
       if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
       return
@@ -188,7 +139,7 @@ export const createYHubServer = async (yhub, conf) => {
   app.patch('/ydoc/:org/:docid', (res, req) => {
     const room = reqToRoom(req)
     log.debug({ endpoint: 'PATCH /ydoc', room }, 'api request')
-    const authPromise = authenticateRequest(req, room, 'rw')
+    const authPromise = authenticateRequest(yhub, req, room, 'rw')
     let buffer = Buffer.allocUnsafe(0)
     let aborted = false
     res.onAborted(() => {
@@ -262,7 +213,7 @@ export const createYHubServer = async (yhub, conf) => {
   app.post('/rollback/:org/:docid', (res, req) => {
     const room = reqToRoom(req)
     log.debug({ endpoint: 'POST /rollback', room }, 'api request')
-    const authPromise = authenticateRequest(req, room, 'rw')
+    const authPromise = authenticateRequest(yhub, req, room, 'rw')
     let buffer = Buffer.allocUnsafe(0)
     let aborted = false
     res.onAborted(() => {
@@ -344,7 +295,7 @@ export const createYHubServer = async (yhub, conf) => {
   app.post('/prune/:org/:docid', (res, req) => {
     const room = reqToRoom(req)
     log.debug({ endpoint: 'POST /prune', room }, 'api request')
-    const authPromise = authenticateRequest(req, room, 'rw')
+    const authPromise = authenticateRequest(yhub, req, room, 'rw')
     let buffer = Buffer.allocUnsafe(0)
     let aborted = false
     res.onAborted(() => {
@@ -424,7 +375,7 @@ export const createYHubServer = async (yhub, conf) => {
       aborted = true
       log.debug('request aborted')
     })
-    const authResult = await authenticateRequest(req, room, 'r')
+    const authResult = await authenticateRequest(yhub, req, room, 'r')
     if ('error' in authResult) {
       if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
       return
@@ -485,7 +436,7 @@ export const createYHubServer = async (yhub, conf) => {
       aborted = true
       log.debug('request aborted')
     })
-    const authResult = await authenticateRequest(req, room, 'r')
+    const authResult = await authenticateRequest(yhub, req, room, 'r')
     if ('error' in authResult) {
       if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
       return
@@ -526,6 +477,9 @@ export const createYHubServer = async (yhub, conf) => {
       if (!aborted) sendErrorResponse(res, '500 Internal Server Error', { error: 'Failed to compute activity' })
     }
   })
+
+  // custom rest endpoints defined in `conf.server.api` - served under `/api/{version}/{name}/...`
+  registerApi(yhub, app)
 
   await promise.create((resolve, reject) => {
     const port = conf.server?.port || 4000

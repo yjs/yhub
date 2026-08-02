@@ -1,6 +1,7 @@
 /* eslint-env node */
 
 import * as api from './api.tests.js'
+import * as customApi from './customApi.tests.js'
 import * as auth from './auth.tests.js'
 import * as ws from './ws.tests.js'
 import * as storage from './storage.tests.js'
@@ -12,6 +13,7 @@ runTests({
   computeWorker,
   storage,
   api,
+  customApi,
   auth,
   ws,
   agents

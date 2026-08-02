@@ -12,7 +12,8 @@ import { agentTask } from './agents.js'
 import { logger } from './logger.js'
 import * as time from 'lib0/time'
 
-export { createAuthPlugin } from './types.js'
+export { createAuthPlugin, createApiEndpoint } from './types.js'
+export { apiError } from './api.js'
 export { logger } from './logger.js'
 
 const log = logger.child({ module: 'worker' })

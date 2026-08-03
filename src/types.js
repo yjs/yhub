@@ -225,6 +225,10 @@ export const $task = $compactTask
  * @property {null|((assetId: AssetId, asset: Asset)=>Promise<RetrievableAsset?>)} [PersistPlugin.store]
  * @property {null|((assetId: AssetId, assetInfo: Asset)=>Promise<Asset?>)} [PersistPlugin.retrieve]
  * @property {null|((assetId: AssetId, assetInfo: Asset)=>Promise<boolean>)} [PersistPlugin.delete]
+ * @property {null|((assetId: AssetId, assetInfo: Asset)=>Promise<boolean>)} [PersistPlugin.deleteNow]
+ *   Optional. Delete immediately, awaiting completion and rejecting on failure. `delete` stays
+ *   the deferred, fire-and-forget variant used by compaction; this one is used by
+ *   `Persistence.deleteReferencesNow` where the deletion has to be verifiable.
  */
 
 /**

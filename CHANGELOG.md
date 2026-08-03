@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### New Features
+
+- **Verifiable asset deletion.** Three additive pieces that make it possible to delete a document's persisted data and *prove* it is gone, without changing any existing behaviour. ([API docs](API.md#persistencelistroomassetsroom))
+  - `persistence.listRoomAssets(room)` — every asset persisted for a room, decoded from the row columns without calling the plugins. Unlike `retrieveDoc(room, { references: true })` it cannot omit a row whose object is temporarily unreadable, which is exactly the row a deletion must not miss.
+  - `persistence.deleteReferencesNow(references)` — deletes objects first, awaited, and removes rows only once every object is confirmed gone; rejects otherwise. `deleteReferences` keeps its current compaction-tuned semantics (deferred, fire-and-forget plugin deletes, rows always removed).
+  - `PersistencePlugin.deleteNow(assetId, assetInfo)` — optional immediate, awaited delete. Implemented for the S3 plugin; `delete` is unchanged.
+
+
 ## [0.3.1]
 
 ### New Features

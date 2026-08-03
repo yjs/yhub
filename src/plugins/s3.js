@@ -139,4 +139,18 @@ export class S3PersistenceV1 {
     }, 10_000)
     return true
   }
+
+  /**
+   * Delete now, awaited, so the caller can rely on the object being gone.
+   *
+   * @param {t.AssetId} assetId
+   * @param {t.Asset} assetInfo
+   */
+  async deleteNow (assetId, assetInfo) {
+    if (assetInfo.type !== 'asset:retrievable:v1' || assetInfo.plugin !== this.pluginid) {
+      return false
+    }
+    await this.s3client.removeObject(this.bucket, t.assetIdToString(assetId))
+    return true
+  }
 }

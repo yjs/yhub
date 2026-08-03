@@ -648,6 +648,62 @@ createApiEndpoint('recheck-auth', {
 > a room stream that contains an `auth:check:v1` entry (for up to `minMessageLifetime`). Deploy the
 > new version to all processes before the first `recheckAuth` call.
 
+#### `persistence.listRoomAssets(room)`
+
+Every asset persisted for a room, decoded from the row columns. Does **not** call the persistence
+plugins, so it never fetches from object storage.
+
+```ts
+persistence.listRoomAssets(
+  room: { org: string, docid: string, branch: string }
+): Promise<Array<{ assetId: AssetId, asset: Asset }>>
+```
+
+Use this rather than `retrieveDoc(room, { references: true })` when the list has to be complete:
+`retrieveDoc` only reports a reference once the plugin *retrieve* for it succeeded, so an object
+that is temporarily unreadable hides its row — and with it the `assetId` needed to ever delete
+that object. For reads that is a sensible degradation; for deletion or inventory it silently
+under-reports.
+
+#### `persistence.deleteReferencesNow(references)`
+
+Like [`deleteReferences`](#), but deletes each asset from the persistence plugins **first**,
+awaiting every one, and removes the database rows only once all of them are confirmed gone.
+Rejects instead of leaving rows that point at surviving objects.
+
+```ts
+persistence.deleteReferencesNow(
+  references: Array<{ assetId: AssetId, asset: Asset }>
+): Promise<void>
+```
+
+`deleteReferences` is tuned for compaction: it schedules the plugin deletes without awaiting them
+(a slow object store can't stall compaction, and readers still holding the previous `t` keep
+working) and always removes the rows. That trade-off is right there, but it means a failed object
+delete leaves data behind with nothing pointing at it. Use `deleteReferencesNow` when the deletion
+has to be verifiable — deleting a document for good, or satisfying a data-retention requirement.
+
+Requires the configured plugins to implement `deleteNow`; rejects if no plugin claims an asset,
+rather than skipping it.
+
+```js
+// permanently delete one room, verifiably
+const assets = await yhub.persistence.listRoomAssets(room)
+await yhub.persistence.deleteReferencesNow(assets)
+// throws unless every object *and* row is gone
+```
+
+> Deleting persisted rows does not stop the document coming back: `store()` is an insert, so a
+> later compaction of stream residue re-creates it. Disconnect writers first — e.g.
+> [`recheckAuth(room, { forceDisconnect: true })`](#yhubrecheckauthroom-opts) — and disable
+> compaction for the room.
+
+#### `PersistencePlugin.deleteNow(assetId, assetInfo)`
+
+Optional counterpart to `delete`. Deletes immediately, awaits completion, and rejects on failure,
+so callers can rely on the object being gone. `delete` remains the deferred, fire-and-forget
+variant used by compaction. A plugin returns `false` when the asset isn't its own.
+
 #### `yhub.agentTask(room, opts, handler)`
 
 Run an LLM agent task against a room. The handler receives a freshly hydrated `Y.Doc` (snapshot of the room's current state) and a new `Awareness` instance bound to it. Edits made inside the handler are streamed to all connected clients in real time with attribution derived from the options. The returned promise resolves with the handler's return value **only after** the agent's awareness has been cleared.

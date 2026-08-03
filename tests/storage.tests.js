@@ -83,3 +83,77 @@ export const testStorage = async tc => {
     t.info('delete references')
   }
 }
+
+/**
+ * `listRoomAssets` must report every persisted asset, including ones whose object can't
+ * currently be read — those are exactly the ones a deletion must not miss.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testListRoomAssets = async tc => {
+  const org = tc.testName
+  const room = { org, docid: 'index', branch: 'main' }
+
+  const ydoc1 = new Y.Doc()
+  ydoc1.get().setAttr('a', 1)
+  await storeDoc(org, 'index', ydoc1)
+  const ydoc2 = new Y.Doc()
+  ydoc2.get().setAttr('b', 2)
+  await storeDoc(org, 'index', ydoc2)
+
+  t.info('listing assets without touching the persistence plugins')
+  const assets = await yhub.persistence.listRoomAssets(room)
+  // two stores × four columns (gc ydoc, nongc ydoc, contentmap, contentids)
+  t.assert(assets.length === 2 * 4)
+  t.assert(assets.every(a => a.assetId.org === org && a.assetId.docid === 'index'))
+  t.assert(assets.some(a => a.assetId.type === 'id:ydoc:v1' && a.assetId.gc === true))
+  t.assert(assets.some(a => a.assetId.type === 'id:ydoc:v1' && a.assetId.gc === false))
+  t.assert(assets.some(a => a.assetId.type === 'id:contentmap:v1'))
+  t.assert(assets.some(a => a.assetId.type === 'id:contentids:v1'))
+
+  t.info('an unrelated room is unaffected')
+  t.assert((await yhub.persistence.listRoomAssets({ org, docid: 'other', branch: 'main' })).length === 0)
+}
+
+/**
+ * `deleteReferencesNow` must remove the rows only after every object is confirmed deleted, so a
+ * failing object store can never leave data behind with nothing pointing at it.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testDeleteReferencesNow = async tc => {
+  const org = tc.testName
+  const room = { org, docid: 'index', branch: 'main' }
+  const ydoc = new Y.Doc()
+  ydoc.get().setAttr('a', 1)
+  await storeDoc(org, 'index', ydoc)
+
+  const assets = await yhub.persistence.listRoomAssets(room)
+  t.assert(assets.length > 0)
+  const retrievable = assets.filter(a => a.asset.type === 'asset:retrievable:v1')
+
+  if (retrievable.length === 0) {
+    t.info('no plugin offloaded these assets — rows are deleted directly')
+    await yhub.persistence.deleteReferencesNow(assets)
+    t.assert((await yhub.persistence.listRoomAssets(room)).length === 0)
+    return
+  }
+
+  t.info('a failing deleteNow must leave every row in place')
+  const plugins = yhub.persistence.plugins
+  const originals = plugins.map(p => p.deleteNow)
+  plugins.forEach(p => { p.deleteNow = async () => { throw new Error('object store unavailable') } })
+  let failed = false
+  try {
+    await yhub.persistence.deleteReferencesNow(assets)
+  } catch (e) {
+    failed = true
+  }
+  plugins.forEach((p, i) => { p.deleteNow = originals[i] })
+  t.assert(failed)
+  t.assert((await yhub.persistence.listRoomAssets(room)).length === assets.length)
+
+  t.info('and a successful one removes both objects and rows')
+  await yhub.persistence.deleteReferencesNow(assets)
+  t.assert((await yhub.persistence.listRoomAssets(room)).length === 0)
+}

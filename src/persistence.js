@@ -234,6 +234,42 @@ export class Persistence {
   async deleteReferences (references) {
     log.debug({ referenceCount: references.length }, 'deleting references')
     references.forEach(ref => tryPersistencePluginDelete(this.plugins, ref.assetId, ref.asset))
+    await this._deleteReferenceRows(references)
+  }
+
+  /**
+   * Like `deleteReferences`, but deletes the assets from the persistence plugins *first*,
+   * awaiting each one, and only removes the database rows once every asset is confirmed gone.
+   * Rejects instead of leaving rows that point at surviving objects.
+   *
+   * `deleteReferences` is tuned for compaction: it schedules the plugin deletes without awaiting
+   * them (so a slow object store can't stall compaction, and readers still holding the previous
+   * `t` keep working) and always removes the rows. That is the right trade-off there, but it
+   * means a failed object delete silently leaves data behind with nothing left pointing at it.
+   * Use this variant when the deletion has to be verifiable — e.g. deleting a document for good.
+   *
+   * Requires the plugins to implement `deleteNow`; rejects if no plugin claims an asset.
+   *
+   * @param {Array<{ assetId: t.AssetId, asset: t.Asset }>} references
+   * @return {Promise<void>}
+   */
+  async deleteReferencesNow (references) {
+    log.debug({ referenceCount: references.length }, 'deleting references (immediate)')
+    await promise.all(references.map(async ref => {
+      if (ref.asset.type !== 'asset:retrievable:v1') return
+      for (const plugin of this.plugins) {
+        if (plugin.deleteNow != null && await plugin.deleteNow(ref.assetId, ref.asset)) return
+      }
+      throw new Error(`no plugin deleted asset ${t.assetIdToString(ref.assetId)}`)
+    }))
+    await this._deleteReferenceRows(references)
+  }
+
+  /**
+   * @param {Array<{ assetId: t.AssetId, asset: t.Asset }>} references
+   * @return {Promise<void>}
+   */
+  async _deleteReferenceRows (references) {
     /**
      * org, docid, branch, t[]
      * @type {Map<string,Map<string,Map<string,Set<string>>>>}
@@ -256,6 +292,46 @@ export class Persistence {
     await promise.all(deleteQuery.map(dq => this.sql`
       DELETE FROM yhub_ydoc_v1 WHERE org = ${dq.org} AND docid = ${dq.docid} AND branch = ${dq.branch} AND t = ANY(${dq.ts})
     `))
+  }
+
+  /**
+   * Every asset persisted for a room, decoded from the row columns without fetching anything
+   * from the persistence plugins.
+   *
+   * Unlike `retrieveDoc(room, { references: true })`, this can't omit a row: `retrieveDoc` only
+   * reports a reference once the plugin *retrieve* for it succeeded, so a temporarily unreadable
+   * object hides its row — and with it the `assetId` needed to ever delete that object. This is
+   * for deletion and inventory, where a silently short list is a correctness bug rather than a
+   * degraded read.
+   *
+   * @param {t.Room} room
+   * @return {Promise<Array<{ assetId: t.AssetId, asset: t.Asset }>>}
+   */
+  async listRoomAssets (room) {
+    const rows = await this.sql`
+      SELECT t, gcDoc, nongcDoc, contentmap, contentids
+        FROM yhub_ydoc_v1
+       WHERE org = ${room.org} AND docid = ${room.docid} AND branch = ${room.branch}
+    `
+    /**
+     * @type {Array<{ assetId: t.AssetId, asset: t.Asset }>}
+     */
+    const assets = []
+    rows.forEach(row => {
+      /**
+       * @param {t.AssetId} assetId
+       * @param {Buffer|null} column
+       */
+      const add = (assetId, column) => {
+        if (column == null) return
+        assets.push({ assetId, asset: /** @type {t.Asset} */ (buffer.decodeAny(column)) })
+      }
+      add(object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), gc: true, t: row.t }, room), row.gcdoc)
+      add(object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), gc: false, t: row.t }, room), row.nongcdoc)
+      add(object.assign({ type: /** @type {const} */ ('id:contentmap:v1'), t: row.t }, room), row.contentmap)
+      add(object.assign({ type: /** @type {const} */ ('id:contentids:v1'), t: row.t }, room), row.contentids)
+    })
+    return assets
   }
 
   async destroy () {

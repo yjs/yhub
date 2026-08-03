@@ -581,6 +581,73 @@ await yhub.pruneDoc(room, { from: Date.now() - 60 * 60 * 1000, to: Date.now() })
 await yhub.pruneDoc(room, { from: 0, to: Number.MAX_SAFE_INTEGER })
 ```
 
+#### `yhub.recheckAuth(room, opts?)`
+
+Force a permission re-check for the WebSocket connections of a room — use it when permissions on a
+document changed and connected clients should be affected immediately, not just on their next
+connect. The directive is distributed via the Redis stream, so it reaches connections on **all**
+servers. Each matching connection re-evaluates `auth.getAccessType(authInfo, room)` and is
+disconnected with close code `4401` (`'permission revoked'`) when its access type changed —
+including an `rw` → `r` downgrade (the client reconnects, re-authenticates, and resyncs at its new
+access level; a still-revoked client is rejected with `401 Unauthorized` at upgrade). A failing
+auth plugin fails closed: the connection is disconnected.
+
+```ts
+yhub.recheckAuth(
+  room: { org: string, docid: string, branch: string },
+  opts?: {
+    users?: Array<string | { [key: string]: any }> | null,  // default: null = every connection
+    forceDisconnect?: boolean                               // default: false
+  }
+): Promise<void>
+```
+
+**Matchers.** `users: null` matches every connection in the room. A string matches connections with
+that `userid`. A plain object matches a connection when each of its top-level properties deep-equals
+the corresponding property of the connection's authInfo — the authInfo may have additional
+properties, so `{ userid: 'X' }` matches the authInfo `{ userid: 'X', name: 'Kevin' }`, and `{}`
+matches everything. Properties are compared with deep equality as a whole (no recursive subset
+matching: `{ roles: ['editor'] }` does not match an authInfo with `roles: ['editor', 'admin']`).
+Matchers must be plain JSON-ish values from trusted code — values that don't survive lib0
+`encodeAny` are unsupported: functions never match, while a `Date` or `Map` decodes to the empty
+object `{}` and therefore matches **every** connection.
+
+**`forceDisconnect: true`** disconnects matching connections *without* re-checking. This drops
+sessions, it does not revoke access: clients auto-reconnect and re-authenticate within
+milliseconds, so revoke in your auth backend first. Force-disconnecting every connection of a busy
+room causes a reconnect thundering herd — all clients re-run the upgrade auth and initial sync at
+once.
+
+**Client handling.** `@y/websocket` reconnects indefinitely by default — a kicked, still-revoked
+client retries every ≤2.5s, hitting your auth backend with a 401 each time. Handle the close code
+in the app:
+
+```js
+provider.on('connection-close', event => {
+  if (event?.code === 4401) provider.disconnect() // permission revoked - stop reconnecting
+})
+```
+
+**Auth plugin contract.** The re-check reuses the `authInfo` captured at connect (`readAuthInfo`
+cannot be re-run — the original HTTP request is gone). `getAccessType` must consult a live
+authority (database, permission service) for the re-check to be meaningful; if access is derived
+from claims embedded in the authInfo itself (e.g. rooms listed in a JWT payload), a re-check
+recomputes the same stale answer — rely on `forceDisconnect` plus short token TTLs instead.
+
+There is deliberately no built-in REST route: expose it as a [custom API endpoint](#custom-api-endpoints)
+guarded by your own `accessPurpose` if you need HTTP access:
+
+```js
+createApiEndpoint('recheck-auth', {
+  accessPurpose: 'admin',
+  post: async req => { await req.yhub.recheckAuth(req.room, await req.any()) }
+})
+```
+
+> **Rolling upgrades:** servers and workers running a version older than this feature fail reading
+> a room stream that contains an `auth:check:v1` entry (for up to `minMessageLifetime`). Deploy the
+> new version to all processes before the first `recheckAuth` call.
+
 #### `yhub.agentTask(room, opts, handler)`
 
 Run an LLM agent task against a room. The handler receives a freshly hydrated `Y.Doc` (snapshot of the room's current state) and a new `Awareness` instance bound to it. Edits made inside the handler are streamed to all connected clients in real time with attribution derived from the options. The returned promise resolves with the handler's return value **only after** the agent's awareness has been cleared.

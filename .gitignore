@@ -3,6 +3,7 @@ node_modules
 tmp
 .env
 .env.testing
+compose.override.yaml
 .env.save*
 .env.backup*
 .DS_Store

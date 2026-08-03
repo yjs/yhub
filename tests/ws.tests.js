@@ -126,6 +126,27 @@ export const testAwarenessOnlyDoesNotPersist = async tc => {
 }
 
 /**
+ * A room that only ever receives auth:check directives must NOT be persisted (the compaction
+ * guard only advances on update/prune messages). The stream is still trimmed and cleaned up
+ * once the entries age past `minMessageLifetime`.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testAuthCheckOnlyDoesNotPersist = async tc => {
+  const { yhub, defaultRoom, defaultStream } = await utils.createTestCase(tc)
+  t.info('seeding the stream with an auth:check message (schedules a compact task)')
+  await yhub.recheckAuth(defaultRoom, { forceDisconnect: true })
+  t.info('waiting for compaction to run and the stream to be cleaned up')
+  await utils.waitTasksProcessed(yhub)
+  t.info('asserting nothing was persisted and the stream was trimmed away')
+  const persisted = await yhub.persistence.retrieveDoc(defaultRoom, { gc: true })
+  t.assert(persisted.lastClock === '0', 'auth-check-only room must not be persisted')
+  t.assert(persisted.gcDoc.length === 0, 'no gc doc assets should exist for an auth-check-only room')
+  const streamExists = await yhub.stream.redis.exists(defaultStream)
+  t.assert(!streamExists, 'auth-check-only stream should be trimmed and deleted (no persist, no infinite re-enqueue)')
+}
+
+/**
  * @param {t.TestCase} tc
  */
 export const testGcNonGcDocs = async tc => {

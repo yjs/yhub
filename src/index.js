@@ -69,14 +69,14 @@ export class YHub {
               this.conf.worker?.events?.taskStart?.({ room: task.room, timestamp: taskTs })
               taskLog.info('task started')
               // cheap pre-check: pull the stream and the persisted clock (no ydoc blobs, no S3) so
-              // we can skip the expensive fetch+merge when there is nothing new to persist. awareness
-              // messages don't change the document, so only update/prune messages advance lastUpdateClock.
+              // we can skip the expensive fetch+merge when there is nothing new to persist. only
+              // update/prune messages change the document and advance lastUpdateClock.
               const [cachedMessages, persisted] = await promise.all([
                 this.stream.getMessages([{ room: task.room, clock: '0' }]).then(ms => ms[0] || { messages: [], lastClock: '0' }),
                 this.persistence.retrieveDoc(task.room, {})
               ])
               const lastUpdateClock = cachedMessages.messages.reduce(
-                (clk, m) => m.type !== 'awareness:v1' ? strm.maxRedisClock(clk, m.redisClock) : clk,
+                (clk, m) => (m.type === 'ydoc:update:v1' || m.type === 'prune:v1') ? strm.maxRedisClock(clk, m.redisClock) : clk,
                 persisted.lastClock
               )
               if (!strm.isSmallerRedisClock(persisted.lastClock, lastUpdateClock)) {
@@ -176,7 +176,8 @@ export class YHub {
       lastClock,
       lastPersistedClock: persistedDoc.lastClock,
       references,
-      awareness
+      awareness,
+      authChecks: cachedMessages.messages.filter(m => t.$authCheckMessage.check(m))
     }
   }
 
@@ -202,6 +203,32 @@ export class YHub {
     if (prune != null) {
       await this.stream.addMessage(room, { type: 'prune:v1', prune })
     }
+  }
+
+  /**
+   * Force a permission re-check for the websocket connections of `room`, distributed via the
+   * redis stream to all servers. Each matching connection re-evaluates
+   * `auth.getAccessType(authInfo, room)` and is disconnected (close code 4401
+   * 'permission revoked') when its access type changed — the client then reconnects,
+   * re-authenticates, and resyncs at its new access level. With `forceDisconnect: true`,
+   * matching connections are disconnected without re-checking. Note that a disconnect cannot
+   * keep users out: reconnects are re-authenticated at upgrade, so revoke access in the auth
+   * plugin's authority first.
+   *
+   * `users` is an array of matchers; `null` matches every connection in the room. A string
+   * matcher matches connections with that `userid`. A plain-object matcher matches a
+   * connection when each of its top-level properties deep-equals the corresponding property
+   * of the connection's authInfo (the authInfo may have additional properties) — e.g.
+   * `{ userid: 'X' }` matches the authInfo `{ userid: 'X', name: 'Kevin' }`.
+   *
+   * @param {t.Room} room
+   * @param {object} opts
+   * @param {Array<string|Object<string,any>>?} [opts.users]
+   * @param {boolean} [opts.forceDisconnect]
+   * @returns {Promise<void>}
+   */
+  async recheckAuth (room, { users = null, forceDisconnect = false } = {}) {
+    await this.stream.addMessage(room, { type: 'auth:check:v1', users, forceDisconnect })
   }
 
   /**

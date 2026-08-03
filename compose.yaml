@@ -49,8 +49,9 @@ services:
     image: minio/minio:latest
     profiles: ["all", "db"]
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      # host ports 9000/9001 are commonly taken by other MinIO instances - yhub uses 9010/9011
+      - "9010:9000"
+      - "9011:9001"
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin

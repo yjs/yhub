@@ -150,7 +150,7 @@ const yhub = await createYHub({
     new S3PersistenceV1({
       bucket: env.getConf('S3_BUCKET'),
       endPoint: env.getConf('S3_ENDPOINT'),      // e.g. 's3.amazonaws.com' or 'localhost'
-      port: parseInt(env.getConf('S3_PORT')),    // e.g. 443 for AWS, 9000 for MinIO
+      port: parseInt(env.getConf('S3_PORT')),    // e.g. 443 for AWS, 9010 for local MinIO
       useSSL: env.getConf('S3_SSL') === 'true',
       accessKey: env.getConf('S3_ACCESS_KEY'),
       secretKey: env.getConf('S3_SECRET_KEY')
@@ -171,7 +171,7 @@ const yhub = await createYHub({
 ```bash
 # S3 configuration
 S3_ENDPOINT=localhost       # 's3.amazonaws.com' for AWS S3
-S3_PORT=9000               # 443 for AWS S3
+S3_PORT=9010               # 443 for AWS S3
 S3_SSL=false               # true for AWS S3
 S3_ACCESS_KEY=your-access-key
 S3_SECRET_KEY=your-secret-key
@@ -199,8 +199,8 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # Console
+      - "9010:9000"   # S3 API
+      - "9011:9001"   # Console
     volumes:
       - minio-data:/data
 
@@ -211,7 +211,7 @@ volumes:
 Then configure with:
 ```bash
 S3_ENDPOINT=localhost
-S3_PORT=9000
+S3_PORT=9010
 S3_SSL=false
 S3_ACCESS_KEY=minioadmin
 S3_SECRET_KEY=minioadmin

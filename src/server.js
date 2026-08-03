@@ -2,6 +2,8 @@ import * as uws from 'uws'
 import * as error from 'lib0/error'
 import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
+import * as f from 'lib0/function'
+import * as object from 'lib0/object'
 import * as promise from 'lib0/promise'
 import * as Y from '@y/y'
 import * as s from 'lib0/schema'
@@ -47,6 +49,24 @@ const reqToRoom = req => {
   const branch = /** @type {string} */ (req.getQuery('branch')) ?? 'main'
   return { org, docid, branch }
 }
+
+/**
+ * Close code sent when a connection is disconnected because its permissions changed (see
+ * `YHub.recheckAuth`). 4000-4999 is the websocket application range.
+ */
+export const wsCloseAuthRevoked = 4401
+
+/**
+ * Matcher semantics of `YHub.recheckAuth`: a string matcher matches connections with that
+ * `userid`; a plain-object matcher matches when each of its top-level properties deep-equals
+ * the corresponding authInfo property (the authInfo may have additional properties).
+ *
+ * @param {string|Object<string,any>} matcher
+ * @param {{ userid: string }} authInfo
+ */
+export const matchesAuthInfo = (matcher, authInfo) => s.$primitive.check(matcher)
+  ? authInfo.userid === matcher
+  : object.every(matcher, (v, k) => f.equalityDeep(v, /** @type {any} */ (authInfo)[k]))
 
 export class YHubServer {
   /**
@@ -577,6 +597,17 @@ class WSUser {
             // history-pruning directive: affects persisted history only, nothing to relay to clients
             break
           }
+          case 'auth:check:v1': {
+            if (message.users == null || message.users.some(u => matchesAuthInfo(u, this.authInfo))) {
+              if (message.forceDisconnect) {
+                this.log.info('force disconnect requested')
+                this.close(wsCloseAuthRevoked, 'permission revoked')
+              } else {
+                this.recheckAuth()
+              }
+            }
+            break
+          }
           default: {
             this.log.error('unexpected message type on stream: ' + /** @type {any} */ (message).type)
           }
@@ -596,6 +627,7 @@ class WSUser {
    * @param {Uint8Array<ArrayBuffer>} m
    */
   sendData (m) {
+    if (this.isClosed) return
     if (this.ws == null) {
       return this.log.warn('tried to send a message to client, but it is not connected yet')
     }
@@ -608,16 +640,45 @@ class WSUser {
   }
 
   /**
+   * Re-evaluate this connection's access via the auth plugin (see `YHub.recheckAuth`).
+   * Disconnects when the access type changed — the client reconnects, re-authenticates, and
+   * resyncs at its new access level (updating `hasWriteAccess` in place would silently drop
+   * a downgraded client's updates and diverge it from the server). Fails closed: an auth
+   * plugin error also disconnects.
+   */
+  async recheckAuth () {
+    try {
+      const accessType = await this.yhub.conf.server?.auth.getAccessType(this.authInfo, this.room)
+      if (this.isDestroyed) return
+      if (!t.hasReadAccess(accessType) || t.hasWriteAccess(accessType) !== this.hasWriteAccess) {
+        this.log.info({ accessType }, 'access changed, disconnecting')
+        this.close(wsCloseAuthRevoked, 'permission revoked')
+      }
+    } catch (err) {
+      this.log.warn({ err }, 'auth recheck failed, disconnecting')
+      this.close(wsCloseAuthRevoked, 'permission revoked')
+    }
+  }
+
+  /**
    * @param {number} code
    * @param {string} message
    */
-  closeWithError (code, message) {
-    this.log.error({ code, message }, 'closing connection with error')
+  close (code, message) {
     if (!this.isClosed) {
       this.ws?.end(code, message)
       this.isClosed = true
     }
     this.destroy()
+  }
+
+  /**
+   * @param {number} code
+   * @param {string} message
+   */
+  closeWithError (code, message) {
+    this.log.error({ code, message }, 'closing connection with error')
+    this.close(code, message)
   }
 
   destroy () {
@@ -699,6 +760,14 @@ const registerWebsocketServer = (yhub, app) => {
         const doctable = await yhub.getDoc(user.room, { gc: user.gc, nongc: !user.gc, awareness: true }, { gcOnMerge: false })
         const ydoc = doctable.gcDoc || doctable.nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
         const sv = await yhub.computePool.computeStateVector(ydoc, { room: user.room })
+        // the initial `lastReceivedClock` (below) is past any pending auth:check entry, so a
+        // check added between the upgrade's auth check and the stream read above would be
+        // silently consumed - re-check once here instead. `forceDisconnect` entries are
+        // deliberately replayed as a plain re-check: kicking on replay would loop a
+        // legitimately re-authorized user until the entry ages out of the stream.
+        if (doctable.authChecks.some(m => m.users == null || m.users.some(u => matchesAuthInfo(u, user.authInfo)))) {
+          await user.recheckAuth()
+        }
         if (user.isClosed) return
         ws.cork(() => {
           user.sendData(protocol.encodeSyncStep1(sv))

@@ -149,7 +149,7 @@ REDIS_PREFIX=y                    # Prefix for all Redis keys
 
 # S3 storage (MinIO compatible)
 S3_ENDPOINT=localhost
-S3_PORT=9000
+S3_PORT=9010
 S3_SSL=false
 S3_ACCESS_KEY=minioadmin
 S3_SECRET_KEY=minioadmin
@@ -192,7 +192,7 @@ Start the required services:
 # Using Docker (or podman)
 docker run -p 6379:6379 redis
 docker run -p 5432:5432 -e POSTGRES_USER=yhub -e POSTGRES_PASSWORD=yhub postgres:16-alpine
-docker run -p 9000:9000 -p 9001:9001 quay.io/minio/minio server /data --console-address ":9001"
+docker run -p 9010:9000 -p 9011:9001 quay.io/minio/minio server /data --console-address ":9001"
 
 # Or use the npm scripts
 npm run redis
@@ -322,7 +322,6 @@ y/hub is designed for horizontal scaling:
 
 I'm looking for sponsors that want to sponsor the following work:
 
-- Ability to kick out users when permissions on a document changed
 - Helm chart
 - More exhaustive logging and reporting of possible issues
 - More exhaustive testing
@@ -510,7 +509,7 @@ const yhub = await createYHub({
     new S3PersistenceV1({
       bucket:    'yhub',
       endPoint:  'localhost',
-      port:      9000,
+      port:      9010,
       useSSL:    false,
       accessKey: 'minioadmin',
       secretKey: 'minioadmin',

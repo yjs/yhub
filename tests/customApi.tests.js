@@ -12,7 +12,8 @@ import { registerApi } from '../src/api.js'
  */
 const decodeResponse = async response => buffer.decodeAny(new Uint8Array(await response.arrayBuffer()))
 
-const purposeHubPort = 9010
+// not 9010/9011 - those host ports belong to MinIO (see compose.yaml)
+const purposeHubPort = 9012
 const purposeHost = `localhost:${purposeHubPort}`
 
 /**

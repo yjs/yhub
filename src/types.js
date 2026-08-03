@@ -155,10 +155,21 @@ export const $pruneMessage = s.$({
 })
 
 /**
+ * Directive to re-check permissions of the websocket connections of a room (see
+ * `YHub.recheckAuth`). `users` is an array of authInfo matchers — `null` matches every
+ * connection. `forceDisconnect` disconnects matching connections without re-checking access.
+ */
+export const $authCheckMessage = s.$({
+  type: s.$literal('auth:check:v1'),
+  users: s.$array(s.$union(s.$string, s.$objectAny)).nullable,
+  forceDisconnect: s.$boolean
+})
+
+/**
  * A Message contains information w want to distribute to clients. They are usually put on the
  * distribution stream.
  */
-export const $message = s.$union($updateMessage, $awarenessMessage, $pruneMessage)
+export const $message = s.$union($updateMessage, $awarenessMessage, $pruneMessage, $authCheckMessage)
 
 /**
  * @typedef {s.Unwrap<typeof $message>} Message
@@ -203,7 +214,8 @@ export const $task = $compactTask
  *   contentmap: IfHasConf<Include, 'contentmap', Uint8Array<ArrayBuffer>>,
  *   references: IfHasConf<Include, 'references', Array<{ assetId: AssetId, asset: Asset }>>,
  *   contentids: IfHasConf<Include, 'contentids', Uint8Array<ArrayBuffer>>,
- *   awareness: IfHasConf<Include, 'awareness', Uint8Array<ArrayBuffer>>
+ *   awareness: IfHasConf<Include, 'awareness', Uint8Array<ArrayBuffer>>,
+ *   authChecks: Array<s.Unwrap<typeof $authCheckMessage>>
  * }, 1>} DocTable
  */
 

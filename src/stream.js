@@ -358,7 +358,7 @@ export class Stream {
         })
       })
     })
-    log.debug({ messages: res.map(r => ({ stream: r.streamName, ms: r.messages.map(m => ({ type: m.type, size: (m.type === 'prune:v1' ? m.prune : m.update).byteLength, rclock: m.redisClock })) })) }, 'retrieved messages')
+    log.debug({ messages: res.map(r => ({ stream: r.streamName, ms: r.messages.map(m => ({ type: m.type, size: (m.type === 'prune:v1' ? m.prune : m.type === 'auth:check:v1' ? null : m.update)?.byteLength, rclock: m.redisClock })) })) }, 'retrieved messages')
     return res
   }
 
@@ -458,7 +458,10 @@ export class Stream {
     const multi = this.redis.multi()
     for (const entry of entries) {
       const m = entry.message.m
-      if (m != null) multi.addMessage(live, /** @type {Buffer} */ (m))
+      // auth:check directives are transient (their intent was fulfilled while they were live) and
+      // not replay-idempotent - re-injected with a fresh clock they would kick matching
+      // connections again, so they are dropped instead
+      if (m != null && buffer.decodeAny(/** @type {Uint8Array<ArrayBuffer>} */ (m)).type !== 'auth:check:v1') multi.addMessage(live, /** @type {Buffer} */ (m))
     }
     multi.del(quar)
     await multi.exec()

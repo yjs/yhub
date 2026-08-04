@@ -270,10 +270,17 @@ export const $authPlugin = /** @type {s.Schema<AuthPlugin<any>>} */ (s.$object({
 export const createAuthPlugin = authDef => authDef
 
 /**
+ * The type of `req.query` when the endpoint method declares no `$query` spec.
+ *
+ * @typedef {{ [key: string]: any }} ApiQueryAny
+ */
+
+/**
  * The request object passed to custom api endpoint handlers (`server.api`). All properties are
  * plain snapshots taken before the handler runs - safe to access at any time. The only exception
  * is `aborted`, which flips to true once the client disconnects.
  *
+ * @template [Query=ApiQueryAny]
  * @typedef {object} ApiRequestBase
  * @property {import('./index.js').YHub} ApiRequestBase.yhub
  * @property {'get'|'post'|'put'|'patch'|'delete'} ApiRequestBase.method
@@ -283,37 +290,51 @@ export const createAuthPlugin = authDef => authDef
  * @property {UserAuthInfo} ApiRequestBase.authInfo
  * @property {'r'|'rw'} ApiRequestBase.accessType
  * @property {boolean} ApiRequestBase.aborted - true once the client disconnected. Check between expensive steps and return early.
- * @property {URLSearchParams} ApiRequestBase.query
+ * @property {Query} ApiRequestBase.query - the url query attributes as a plain object. Coerced & validated by the method's `$query` spec when declared; raw strings otherwise. Attributes not declared in the spec pass through as raw strings.
  * @property {() => Promise<Uint8Array<ArrayBuffer>>} ApiRequestBase.bytes - the raw request body
  * @property {() => Promise<any>} ApiRequestBase.any - the request body, lib0-any-decoded
  */
 
 /**
- * @typedef {ApiRequestBase & { org: string, docid: string, branch: string, room: Room }} ApiDocRequest
+ * @template [Query=ApiQueryAny]
+ * @typedef {ApiRequestBase<Query> & { org: string, docid: string, branch: string, room: Room }} ApiDocRequest
  */
 /**
- * @typedef {ApiRequestBase & { org: string, docid: null, branch: null, room: null }} ApiOrgRequest
+ * @template [Query=ApiQueryAny]
+ * @typedef {ApiRequestBase<Query> & { org: string, docid: null, branch: null, room: null }} ApiOrgRequest
  */
 /**
- * @typedef {ApiRequestBase & { org: null, docid: null, branch: null, room: null }} ApiGlobalRequest
+ * @template [Query=ApiQueryAny]
+ * @typedef {ApiRequestBase<Query> & { org: null, docid: null, branch: null, room: null }} ApiGlobalRequest
  */
 /**
  * @typedef {ApiDocRequest | ApiOrgRequest | ApiGlobalRequest} ApiRequest
  */
 
 /**
- * The method handlers of a custom api endpoint. `get` requires 'r' access, all other methods
+ * A method definition of a custom api endpoint: the `handler` plus per-method options. `$query`
+ * declares the supported query attributes as a shape object - values are schemas (`s.$number`),
+ * literals (`'a'`), or arrays of those (= unions) - or a prebuilt `s.$object(..)` schema. Query
+ * values arrive as strings and are coerced to number/boolean where the schema asks for it, then
+ * validated before the handler runs - failing requests are answered 400.
+ *
+ * @template Req
+ * @typedef {{ $query?: { [key: string]: any }, handler: (req: Req) => any }} ApiMethodDef
+ */
+
+/**
+ * The method definitions of a custom api endpoint. `get` requires 'r' access, all other methods
  * require 'rw'. Handler return values: a `Response` is written as-is, `null`/`undefined`
  * responds "204 No Content", a string responds as text/plain, a Uint8Array is sent raw
  * (application/octet-stream), and anything else is lib0-any-encoded (application/x-lib0any).
  *
  * @template Req
  * @typedef {object} ApiEndpointMethods
- * @property {(req: Req) => any} [ApiEndpointMethods.get]
- * @property {(req: Req) => any} [ApiEndpointMethods.post]
- * @property {(req: Req) => any} [ApiEndpointMethods.put]
- * @property {(req: Req) => any} [ApiEndpointMethods.patch]
- * @property {(req: Req) => any} [ApiEndpointMethods.delete]
+ * @property {ApiMethodDef<Req>} [ApiEndpointMethods.get]
+ * @property {ApiMethodDef<Req>} [ApiEndpointMethods.post]
+ * @property {ApiMethodDef<Req>} [ApiEndpointMethods.put]
+ * @property {ApiMethodDef<Req>} [ApiEndpointMethods.patch]
+ * @property {ApiMethodDef<Req>} [ApiEndpointMethods.delete]
  */
 
 /**
@@ -325,7 +346,7 @@ export const createAuthPlugin = authDef => authDef
  *
  * Fields: `version` (default: 'v1'), `scope` (default: 'doc'), `path` (additional named path
  * segments, e.g. '/:commentId'), `accessPurpose` (forwarded as `purpose` to the auth access
- * callback).
+ * callback). Each method is defined as a `{ $query?, handler }` object - see `ApiMethodDef`.
  *
  * @typedef {{ name: string, version?: string, scope?: 'doc', path?: string, accessPurpose?: string } & ApiEndpointMethods<ApiDocRequest>} ApiDocEndpoint
  */
@@ -340,14 +361,33 @@ export const createAuthPlugin = authDef => authDef
  */
 
 /**
+ * The type of `req.query` for a `$query` spec `Q` - `ApiQueryAny` when no spec is declared.
+ *
+ * @template Q
+ * @typedef {[Q] extends [undefined] ? ApiQueryAny : s.ReadSchemaUnwrapped<Q>} ApiQueryType
+ */
+/**
+ * @template {'doc'|'org'|'global'} Scope
+ * @template Query
+ * @typedef {Scope extends 'doc' ? ApiDocRequest<Query> : Scope extends 'org' ? ApiOrgRequest<Query> : ApiGlobalRequest<Query>} ApiScopedRequest
+ */
+
+/**
  * Define a custom api endpoint (`server.api`) with scope-aware handler typings and a preserved
  * literal name. Purely a typing helper - plain object literals work identically inside the
- * config; use this for endpoints defined in separate modules.
+ * config; use this for endpoints defined in separate modules. When a method declares a `$query`
+ * spec (e.g. `get: { $query: { limit: s.$number }, handler }`), that method's `req.query` is
+ * typed by the spec; without one it is `{ [key: string]: any }`.
  *
  * @template {string} Name
  * @template {'doc'|'org'|'global'} [Scope='doc']
+ * @template [QGet=undefined]
+ * @template [QPost=undefined]
+ * @template [QPut=undefined]
+ * @template [QPatch=undefined]
+ * @template [QDelete=undefined]
  * @param {Name} name
- * @param {{ version?: string, scope?: Scope, path?: string, accessPurpose?: string } & ApiEndpointMethods<Scope extends 'doc' ? ApiDocRequest : Scope extends 'org' ? ApiOrgRequest : ApiGlobalRequest>} opts
+ * @param {{ version?: string, scope?: Scope, path?: string, accessPurpose?: string, get?: { $query?: QGet, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QGet>>) => any }, post?: { $query?: QPost, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPost>>) => any }, put?: { $query?: QPut, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPut>>) => any }, patch?: { $query?: QPatch, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPatch>>) => any }, delete?: { $query?: QDelete, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QDelete>>) => any } }} opts
  * @return {ApiEndpoint & { name: Name }}
  */
 export const createApiEndpoint = (name, opts) => /** @type {any} */ ({ name, ...opts })

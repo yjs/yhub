@@ -3,6 +3,7 @@ import * as t from 'lib0/testing'
 import * as promise from 'lib0/promise'
 import * as buffer from 'lib0/buffer'
 import * as delta from 'lib0/delta'
+import * as s from 'lib0/schema'
 import * as types from '../src/types.js'
 import * as utils from './utils.js'
 import { registerApi } from '../src/api.js'
@@ -41,11 +42,13 @@ await utils.createTestHub({
       // intentionally no getOrgAccessType / getGlobalAccessType - org/global endpoints must deny
     }),
     api: [
-      { name: 'purposed', accessPurpose: 'comments', get: async () => ({ ok: true }), post: async () => ({ ok: true }) },
-      { name: 'unpurposed', get: async () => ({ ok: true }), post: async () => ({ ok: true }) },
-      { name: 'private', accessPurpose: 'admin', get: async () => ({ ok: true }) },
-      { name: 'orgless', scope: 'org', get: async () => ({ ok: true }) },
-      { name: 'globalless', scope: 'global', get: async () => ({ ok: true }) }
+      { name: 'purposed', accessPurpose: 'comments', get: { handler: async () => ({ ok: true }) }, post: { handler: async () => ({ ok: true }) } },
+      { name: 'unpurposed', get: { handler: async () => ({ ok: true }) }, post: { handler: async () => ({ ok: true }) } },
+      { name: 'private', accessPurpose: 'admin', get: { handler: async () => ({ ok: true }) } },
+      { name: 'orgless', scope: 'org', get: { handler: async () => ({ ok: true }) } },
+      { name: 'globalless', scope: 'global', get: { handler: async () => ({ ok: true }) } },
+      // prebuilt (partial) schema spec + auth-before-validation ordering (see testQuerySchema)
+      { name: 'qcheck', get: { $query: s.$partial({ n: s.$number }), handler: async req => req.query } }
     ]
   }
 })
@@ -65,7 +68,7 @@ await utils.createTestHub({
       async getAccessType () { return 'rw' }
     }),
     api: [
-      { name: 'echo', get: async req => ({ docid: req.docid }) }
+      { name: 'echo', get: { handler: async req => ({ docid: req.docid }) } }
     ]
   }
 })
@@ -151,6 +154,84 @@ export const testPathParams = async tc => {
   // the item route shares the collection's name ('echo') - routing is by url depth
   const res = await fetch(`http://${utils.yhubHost}/api/v1/echo/${org}/${docid}/c123`)
   t.compare(await decodeResponse(res), { commentId: 'c123', docid })
+}
+
+/**
+ * @param {t.TestCase} tc
+ */
+export const testQuerySchema = async tc => {
+  const { org } = await utils.createTestCase(tc)
+  const base = `http://${utils.yhubHost}/api/v1/typedq/${org}/${tc.testName}-doc`
+  await t.groupAsync('declared attrs are coerced, undeclared pass through as raw strings', async () => {
+    const res = await fetch(`${base}?limit=42&active=true&extra=7&mode=a&page=2&lit=x&mixed=false`)
+    t.assert(res.status === 200)
+    const body = await decodeResponse(res)
+    t.compare(body.query, { limit: 42, active: true, extra: '7', mode: 'a', page: 2, lit: 'x', mixed: false })
+    t.assert(body.isNumber === true)
+  })
+  await t.groupAsync('number forms and union branches', async () => {
+    const res = await fetch(`${base}?limit=-4.5&mixed=3&mode=b&page=1&lit=x`)
+    const body = await decodeResponse(res)
+    t.assert(body.query.limit === -4.5)
+    t.assert(body.query.mixed === 3)
+    // s.coerce numbers follow Number() semantics
+    const resExp = await fetch(`${base}?limit=1e3&mode=a&page=1&lit=x`)
+    t.assert((await decodeResponse(resExp)).query.limit === 1000)
+  })
+  await t.groupAsync('missing required attribute responds 400', async () => {
+    const res = await fetch(base)
+    t.assert(res.status === 400)
+    t.compare(await decodeResponse(res), { error: 'invalid query: [limit] undefined doesn\'t match number', code: 'invalid-query' })
+  })
+  await t.groupAsync('invalid attributes respond 400 naming the attribute', async () => {
+    for (const [query, errMsg] of /** @type {Array<[string, string]>} */ ([
+      ['limit=abc', '[limit] "abc" doesn\'t match number'],
+      ['limit=', '[limit] "" doesn\'t match number'],
+      ['limit=1&active=1', '[active] "1" doesn\'t match boolean'],
+      ['limit=1&mode=c', '[mode] "c" doesn\'t match a | b'],
+      ['limit=1&page=3', '[page] "3" doesn\'t match 1 | 2'],
+      ['limit=1&lit=y', '[lit] "y" doesn\'t match x']
+    ])) {
+      // base pairs keep the required mode/page/lit valid; a case's own pair wins (last-wins)
+      const res = await fetch(`${base}?mode=a&page=1&lit=x&${query}`)
+      t.assert(res.status === 400, `?${query} must fail`)
+      t.compare(await decodeResponse(res), { error: `invalid query: ${errMsg}`, code: 'invalid-query' })
+    }
+  })
+  await t.groupAsync('$query is per-method: post has none, values stay raw', async () => {
+    const res = await fetch(`${base}?limit=abc`, { method: 'POST' })
+    t.assert(res.status === 200)
+    t.assert((await decodeResponse(res)).raw.limit === 'abc')
+  })
+  await t.groupAsync('repeated keys: last wins, also for the routing branch', async () => {
+    const res = await fetch(`${base}?limit=1&limit=2&mode=a&page=1&lit=x&branch=b1&branch=b2`)
+    const body = await decodeResponse(res)
+    t.assert(body.query.limit === 2)
+    // req.branch and req.query.branch must agree on the same occurrence
+    t.assert(body.branch === 'b2')
+    t.assert(body.query.branch === 'b2')
+  })
+  await t.groupAsync('branch keeps its routing meaning and passes through undeclared', async () => {
+    const res = await fetch(`${base}?limit=1&branch=b2&mode=a&page=1&lit=x`)
+    const body = await decodeResponse(res)
+    t.assert(body.branch === 'b2')
+    t.assert(body.query.branch === 'b2')
+  })
+  await t.groupAsync('prebuilt s.$object(..).partial spec: attrs optional, still coerced+validated', async () => {
+    const absent = await fetch(`http://${purposeHost}/api/v1/qcheck/o/d`)
+    t.assert(absent.status === 200)
+    t.compare(await decodeResponse(absent), {})
+    const coerced = await fetch(`http://${purposeHost}/api/v1/qcheck/o/d?n=5`)
+    t.compare(await decodeResponse(coerced), { n: 5 })
+    const invalid = await fetch(`http://${purposeHost}/api/v1/qcheck/o/d?n=abc`)
+    t.assert(invalid.status === 400)
+  })
+  await t.groupAsync('auth is decided before query validation', async () => {
+    const unauthedRes = await fetch(`http://${purposeHost}/api/v1/qcheck/o/d?n=abc`, { headers: { 'x-no-auth': '1' } })
+    t.assert(unauthedRes.status === 401)
+    const authedRes = await fetch(`http://${purposeHost}/api/v1/qcheck/o/d?n=abc`)
+    t.assert(authedRes.status === 400)
+  })
 }
 
 /**
@@ -308,41 +389,52 @@ export const testSpecValidation = _tc => {
   const fakeYhub = (api, apiPrefix) => ({ conf: { server: { auth: null, api, apiPrefix } } })
   const handler = async () => ({})
   // valid baseline
-  registerApi(fakeYhub([{ name: 'a', get: handler }]), stubApp)
+  registerApi(fakeYhub([{ name: 'a', get: { handler } }]), stubApp)
   t.assert(patterns[0] === '/api/v1/a/:org/:docid')
   // same name under a different version is fine
-  registerApi(fakeYhub([{ name: 'a', get: handler }, { name: 'a', version: 'v2', get: handler }]), stubApp)
+  registerApi(fakeYhub([{ name: 'a', get: { handler } }, { name: 'a', version: 'v2', get: { handler } }]), stubApp)
   // same name at a different url depth is fine (collection + item)
-  registerApi(fakeYhub([{ name: 'a', get: handler }, { name: 'a', path: '/:id', get: handler }]), stubApp)
+  registerApi(fakeYhub([{ name: 'a', get: { handler } }, { name: 'a', path: '/:id', get: { handler } }]), stubApp)
   // duplicate (name, version) at the same url depth
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: handler }, { name: 'a', version: 'v1', get: handler }]), stubApp))
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/:x', get: handler }, { name: 'a', path: '/:y', get: handler }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { handler } }, { name: 'a', version: 'v1', get: { handler } }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/:x', get: { handler } }, { name: 'a', path: '/:y', get: { handler } }]), stubApp))
   // scope params count towards depth: doc-scope collides with org-scope + one path param
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: handler }, { name: 'a', scope: 'org', path: '/:id', get: handler }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { handler } }, { name: 'a', scope: 'org', path: '/:id', get: { handler } }]), stubApp))
   // name must be a single segment
-  t.fails(() => registerApi(fakeYhub([{ name: 'a/b', get: handler }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a/b', get: { handler } }]), stubApp))
   // name is required, version and accessPurpose must be strings
-  t.fails(() => registerApi(fakeYhub([{ get: handler }]), stubApp))
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', version: 2, get: handler }]), stubApp))
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', accessPurpose: 42, get: handler }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ get: { handler } }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', version: 2, get: { handler } }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', accessPurpose: 42, get: { handler } }]), stubApp))
   // at least one method handler
   t.fails(() => registerApi(fakeYhub([{ name: 'a' }]), stubApp))
   // invalid scope
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', scope: 'world', get: handler }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', scope: 'world', get: { handler } }]), stubApp))
+  // methods must be { handler } objects - the bare-function form of the pre-0.4 api throws
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: handler }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: {} }]), stubApp))
+  // $query accepts a shape object (schemas, literals, arrays = unions) or an s.$object schema
+  registerApi(fakeYhub([{ name: 'a', get: { $query: { q: s.$string, m: ['x', 'y'], l: 'z' }, handler } }]), stubApp)
+  registerApi(fakeYhub([{ name: 'a', get: { $query: s.$object({ q: s.$string }), handler } }]), stubApp)
+  // attribute names shadowing Object.prototype members are legitimate
+  registerApi(fakeYhub([{ name: 'a', get: { $query: { constructor: s.$string, toString: s.$string }, handler } }]), stubApp)
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { $query: s.$number, handler } }]), stubApp))
+  // a shape value that is neither a schema nor a schema definition (s.$ throws)
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { $query: { q: new Date() }, handler } }]), stubApp))
   // path params: named only, unique, org/docid/branch reserved
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/static', get: handler }]), stubApp))
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/:org', get: handler }]), stubApp))
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/:branch', get: handler }]), stubApp))
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/:x/:x', get: handler }]), stubApp))
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', path: ':x', get: handler }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/static', get: { handler } }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/:org', get: { handler } }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/:branch', get: { handler } }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/:x/:x', get: { handler } }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', path: ':x', get: { handler } }]), stubApp))
   // configurable prefix: served under the renamed segment
   patterns.length = 0
-  registerApi(fakeYhub([{ name: 'a', get: handler }], 'collaboration'), stubApp)
+  registerApi(fakeYhub([{ name: 'a', get: { handler } }], 'collaboration'), stubApp)
   t.assert(patterns[0] === '/collaboration/v1/a/:org/:docid')
   // the prefix must be a single bare segment that doesn't collide with built-in routes
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: handler }], 'my/api'), stubApp))
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: handler }], '/collaboration'), stubApp))
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: handler }], ''), stubApp))
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: handler }], 'ydoc'), stubApp))
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: handler }], 'ws'), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { handler } }], 'my/api'), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { handler } }], '/collaboration'), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { handler } }], ''), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { handler } }], 'ydoc'), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { handler } }], 'ws'), stubApp))
 }

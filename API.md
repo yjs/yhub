@@ -267,6 +267,7 @@ collide with a built-in route (`ydoc`, `rollback`, `prune`, `changeset`, `activi
 rejected at startup, which is what keeps the reservation guarantee intact for any prefix.
 
 ```js
+import * as s from 'lib0/schema'
 import { createYHub, createAuthPlugin, apiError } from '@y/hub'
 
 const yhub = await createYHub({
@@ -279,21 +280,27 @@ const yhub = await createYHub({
       {
         name: 'comments',
         accessPurpose: 'comments', // forwarded to getAccessType as `purpose`
-        get: async req => ({ comments: await readComments(req.room), viewer: req.authInfo.userid }),
-        post: async req => {
-          const { text } = await req.any()
-          if (!text) throw apiError(400, 'text is required')
-          await saveComment(req.room, req.authInfo.userid, text)
+        get: {
+          // supported query attributes - parsed & validated before the handler runs (see below)
+          $query: { limit: s.$number.optional, resolved: s.$boolean.optional },
+          handler: async req => ({ comments: await readComments(req.room, req.query), viewer: req.authInfo.userid })
+        },
+        post: {
+          handler: async req => {
+            const { text } = await req.any()
+            if (!text) throw apiError(400, 'text is required')
+            await saveComment(req.room, req.authInfo.userid, text)
+          }
         }
       },
       // item route sharing the collection's name → GET /api/v1/comments/{org}/{docid}/{commentId}
-      { name: 'comments', path: '/:commentId', get: async req => await getComment(req.room, req.params.commentId) },
+      { name: 'comments', path: '/:commentId', get: { handler: async req => await getComment(req.room, req.params.commentId) } },
       // a breaking revision of the same endpoint → GET /api/v2/comments/{org}/{docid}
-      { name: 'comments', version: 'v2', get: async req => ({ comments: await readCommentsV2(req.room) }) },
+      { name: 'comments', version: 'v2', get: { handler: async req => ({ comments: await readCommentsV2(req.room) }) } },
       // org scope → GET /api/v1/docs/{org}
-      { name: 'docs', scope: 'org', get: async req => ({ docs: await listDocs(req.org) }) },
+      { name: 'docs', scope: 'org', get: { handler: async req => ({ docs: await listDocs(req.org) }) } },
       // global scope → GET /api/v1/stats
-      { name: 'stats', scope: 'global', get: async req => ({ uptime: process.uptime() }) }
+      { name: 'stats', scope: 'global', get: { handler: async req => ({ uptime: process.uptime() }) } }
     ]
   }
 })
@@ -314,23 +321,55 @@ startup.
 | `scope` | `'doc' \| 'org' \| 'global'` | `'doc'` | route shape: `/api/{version}/{name}/{org}/{docid}`, `/api/{version}/{name}/{org}`, or `/api/{version}/{name}` |
 | `path` | `string` | `''` | extra named path segments appended to the route, e.g. `'/:commentId'` (named params only, available via `req.params`) |
 | `accessPurpose` | `string` | `null` | forwarded as `purpose` to the auth access callback (see below) |
-| `get`, `post`, `put`, `patch`, `delete` | `(req) => any` | — | async handlers; at least one is required. `get` requires `'r'` access, all other methods require `'rw'`. |
+| `get`, `post`, `put`, `patch`, `delete` | `{ $query?, handler }` | — | method definitions; at least one is required. `handler` is the async request handler; `$query` optionally declares the supported query attributes (see below). `get` requires `'r'` access, all other methods require `'rw'`. The method object is also where future per-method options will live. |
 
 Because the prefix, names, and versions are single segments, every request under the api namespace
 has the fixed shape `/{apiPrefix}/{version}/{apiname}/...` — easy for proxies to inspect
 positionally.
 
+#### Query attributes (`$query`)
+
+A method's `$query` declares its supported query attributes as a shape object: each value is a
+lib0 schema (`s.$number`), a literal (`'a'` ≙ `s.$literal('a')`), or an array of those
+(≙ a union, e.g. `['a', 'b']`). A prebuilt `s.$object(..)` / `s.$partial(..)` schema works too
+(`$partial` makes every attribute optional). Query values arrive as url strings and are coerced
+against each attribute's schema via lib0's `s.coerce`: numeric strings (`Number()`-parseable,
+non-empty) become numbers, `'true'`/`'false'` become booleans, literals match their string form
+(`?page=2` satisfies `s.$literal(2)`), and unions/optionals are descended. Each declared attribute
+is validated **before the request object is created**: a failing or missing required attribute
+answers `400 { error, code: 'invalid-query' }` — `error` names the attribute, e.g.
+`invalid query: [limit] "abc" doesn't match number` — without invoking the handler. Attributes
+*not* declared in `$query` pass through as raw strings, and a method without `$query` receives all
+values raw.
+
+```js
+get: {
+  $query: {
+    limit: s.$number.optional, // ?limit=50 → req.query.limit === 50
+    resolved: s.$boolean.optional, // ?resolved=true → req.query.resolved === true
+    order: ['asc', 'desc'] // required; anything but ?order=asc / ?order=desc → 400
+  },
+  handler: async req => { /* ... */ }
+}
+```
+
 Handlers are typed by `scope`: doc-scoped handlers receive a non-null `req.room`, org-scoped
 handlers receive `req.org` only, global handlers neither. Plain object literals inside `api: [...]`
 get these typings automatically. For endpoints defined in separate modules (where contextual typing
 can't reach), use the `createApiEndpoint` helper — it also preserves the literal endpoint name for
-tooling:
+tooling, and types `req.query` by the method's `$query` spec (`{ [key: string]: any }` when there
+is none):
 
 ```js
+import * as s from 'lib0/schema'
 import { createApiEndpoint } from '@y/hub'
 
 export const comments = createApiEndpoint('comments', {
-  get: async req => ({ comments: await readComments(req.room) }) // req.room: Room (non-null)
+  get: {
+    $query: { limit: s.$number.optional },
+    // req.room: Room (non-null), req.query.limit: number|undefined (coerced from the url string)
+    handler: async req => ({ comments: await readComments(req.room, { limit: req.query.limit ?? 50 }) })
+  }
 })
 ```
 
@@ -374,7 +413,7 @@ any time, also after `await`s:
 | `org` | `string \| null` | `null` for global scope |
 | `docid`, `branch`, `room` | | only set for doc scope; `branch` from `?branch=` (default `'main'`) |
 | `params` | `{ [name]: string }` | the named path segments declared via `path` |
-| `query` | `URLSearchParams` | parsed url query |
+| `query` | `{ [name]: any }` | the url query attributes as a plain object. Attributes declared in the method's `$query` are coerced & validated (and typed via `createApiEndpoint`); all others are raw strings. Repeated keys: last wins. |
 | `headers` | `{ [name]: string }` | lowercased request headers |
 | `authInfo` | | whatever `readAuthInfo` returned |
 | `accessType` | `'r' \| 'rw'` | the granted access |
@@ -646,7 +685,7 @@ guarded by your own `accessPurpose` if you need HTTP access:
 ```js
 createApiEndpoint('recheck-auth', {
   accessPurpose: 'admin',
-  post: async req => { await req.yhub.recheckAuth(req.room, await req.any()) }
+  post: { handler: async req => { await req.yhub.recheckAuth(req.room, await req.any()) } }
 })
 ```
 

@@ -4,6 +4,7 @@ import { WebSocket } from 'ws'
 import { WebsocketProvider } from '@y/websocket'
 import * as t from 'lib0/testing' // eslint-disable-line
 import * as promise from 'lib0/promise'
+import * as s from 'lib0/schema'
 import { createYHub, apiError, createApiEndpoint } from '@y/hub'
 import * as number from 'lib0/number'
 import { S3PersistenceV1 } from '@y/hub/plugins/s3'
@@ -41,46 +42,76 @@ export const apiTestState = { slowAborted: null }
 const testApiSpecs = [
   {
     name: 'echo',
-    get: async req => ({ org: req.org, docid: req.docid, branch: req.branch, room: req.room, q: req.query.get('q'), userid: req.authInfo.userid, header: req.headers['x-echo'] ?? null }),
-    post: async req => ({ received: await req.any(), rawLen: (await req.bytes()).byteLength }),
-    put: async () => 'hello',
-    patch: async () => new Uint8Array([1, 2, 3]),
-    delete: async () => undefined
+    get: { handler: async req => ({ org: req.org, docid: req.docid, branch: req.branch, room: req.room, q: req.query.q, userid: req.authInfo.userid, header: req.headers['x-echo'] ?? null }) },
+    post: { handler: async req => ({ received: await req.any(), rawLen: (await req.bytes()).byteLength }) },
+    put: { handler: async () => 'hello' },
+    patch: { handler: async () => new Uint8Array([1, 2, 3]) },
+    delete: { handler: async () => undefined }
   },
-  { name: 'echo', version: 'v2', get: async () => ({ v: 2 }) },
+  { name: 'echo', version: 'v2', get: { handler: async () => ({ v: 2 }) } },
   // item route sharing the collection's name - routes differ in url depth
-  { name: 'echo', path: '/:commentId', get: async req => ({ commentId: req.params.commentId, docid: req.docid }) },
+  { name: 'echo', path: '/:commentId', get: { handler: async req => ({ commentId: req.params.commentId, docid: req.docid }) } },
   {
     name: 'docs',
     scope: 'org',
-    get: async req => {
-      // @ts-expect-error room is null in org scope - regression guard for the scope-typed request
-      req.room?.docid // eslint-disable-line no-unused-expressions
-      return { org: req.org, room: req.room, docid: req.docid }
+    get: {
+      handler: async req => {
+        // @ts-expect-error room is null in org scope - regression guard for the scope-typed request
+        req.room?.docid // eslint-disable-line no-unused-expressions
+        return { org: req.org, room: req.room, docid: req.docid }
+      }
     }
   },
-  { name: 'stats', scope: 'global', get: async req => ({ ok: true, org: req.org }) },
-  { name: 'resp', get: async () => new Response('{"a":1}', { status: 201, headers: { 'content-type': 'application/json', 'x-test': 'yes' } }) },
+  { name: 'stats', scope: 'global', get: { handler: async req => ({ ok: true, org: req.org }) } },
+  { name: 'resp', get: { handler: async () => new Response('{"a":1}', { status: 201, headers: { 'content-type': 'application/json', 'x-test': 'yes' } }) } },
   {
     name: 'fail',
-    get: async () => { throw apiError(404, 'nope', { code: 'not-found' }) },
-    post: async () => { throw new Error('boom') },
+    get: { handler: async () => { throw apiError(404, 'nope', { code: 'not-found' }) } },
+    post: { handler: async () => { throw new Error('boom') } },
     // a foreign error carrying a numeric `status` must not leak its message (only apiError does)
-    put: async () => { throw Object.assign(new Error('secret-internal'), { status: 502 }) }
+    put: { handler: async () => { throw Object.assign(new Error('secret-internal'), { status: 502 }) } }
   },
   // defined via the typing helper: doc scope by default, req.room is non-null - no casts needed
   createApiEndpoint('getdoc', {
-    get: async req => {
-      const { gcDoc } = await req.yhub.getDoc(req.room, { gc: true }, { gcOnMerge: false })
-      return { doc: gcDoc }
+    get: {
+      handler: async req => {
+        const { gcDoc } = await req.yhub.getDoc(req.room, { gc: true }, { gcOnMerge: false })
+        return { doc: gcDoc }
+      }
     }
+  }),
+  // per-method $query spec: values are coerced+validated, req.query is typed by the shape
+  createApiEndpoint('typedq', {
+    get: {
+      $query: {
+        limit: s.$number,
+        active: s.$boolean.optional,
+        mode: ['a', 'b'], // array = union of literals
+        page: [1, 2],
+        lit: 'x', // bare literal = s.$literal('x')
+        mixed: s.$union(s.$number, s.$boolean).optional,
+        // an attribute named after an Object.prototype member must still detect absence correctly
+        toString: s.$string.optional
+      },
+      handler: async req => {
+        // @ts-expect-error limit is a coerced number, not a string - regression guard for typed queries
+        req.query.limit?.toUpperCase // eslint-disable-line no-unused-expressions
+        // @ts-expect-error undeclared query attributes are not part of the typed query object
+        req.query.undeclared // eslint-disable-line no-unused-expressions
+        return { query: req.query, branch: req.branch, isNumber: typeof req.query.limit === 'number' }
+      }
+    },
+    // no $query: this method's req.query is the untyped raw-string object
+    post: { handler: async req => ({ raw: req.query }) }
   }),
   {
     name: 'slow',
-    get: async req => {
-      await promise.wait(300)
-      apiTestState.slowAborted = req.aborted
-      return { ok: true }
+    get: {
+      handler: async req => {
+        await promise.wait(300)
+        apiTestState.slowAborted = req.aborted
+        return { ok: true }
+      }
     }
   }
 ]

@@ -2,6 +2,7 @@ import * as buffer from 'lib0/buffer'
 import * as error from 'lib0/error'
 import * as number from 'lib0/number'
 import * as promise from 'lib0/promise'
+import * as s from 'lib0/schema'
 import * as t from './types.js'
 import { logger } from './logger.js'
 
@@ -164,14 +165,37 @@ export const registerApi = (yhub, app) => {
       throw error.create(`api endpoint "${name}" defines no method handlers`)
     }
     methods.forEach(method => {
+      const def = endpoint[method]
+      if (typeof def?.handler !== 'function') {
+        throw error.create(`api endpoint "${name}": ${method}.handler must be a function`)
+      }
+      const querySpec = def.$query ?? null
+      /**
+       * @type {((o: any) => { err: string|null, result: any })|null}
+       */
+      let coerceQuery = null
+      if (querySpec != null) {
+        const isSchema = s.$$object.check(querySpec)
+        // prototype check, not `constructor === Object` - a shape may declare an attribute named "constructor"
+        if (!isSchema && Object.getPrototypeOf(querySpec) !== Object.prototype && Object.getPrototypeOf(querySpec) !== null) {
+          throw error.create(`api endpoint "${name}": ${method}.$query must be a shape object or s.$object(..) schema`)
+        }
+        try {
+          // s.$ lifts literals to $literal, arrays to $union, passes schemas through
+          coerceQuery = s.coerce(isSchema ? querySpec : s.$object(Object.fromEntries(Object.entries(querySpec).map(([key, v]) => [key, s.$(v)]))))
+        } catch (_err) {
+          throw error.create(`api endpoint "${name}": invalid ${method}.$query`)
+        }
+      }
       app[apiMethods[method]](pattern, createApiHandler(yhub, {
         method,
-        handler: /** @type {(req: t.ApiRequest) => any} */ (endpoint[method]),
+        handler: /** @type {(req: t.ApiRequest) => any} */ (def.handler),
         requiredAccess: method === 'get' ? 'r' : 'rw',
         scope,
         accessPurpose,
         pathParams,
-        paramOffset
+        paramOffset,
+        coerceQuery
       }))
     })
   })
@@ -187,9 +211,10 @@ export const registerApi = (yhub, app) => {
  * @param {string|null} opts.accessPurpose
  * @param {Array<string>} opts.pathParams
  * @param {number} opts.paramOffset
+ * @param {((o: any) => { err: string|null, result: any })|null} opts.coerceQuery
  * @returns {(res: import('uws').HttpResponse, req: import('uws').HttpRequest) => void}
  */
-const createApiHandler = (yhub, { method, handler, requiredAccess, scope, accessPurpose, pathParams, paramOffset }) => (res, req) => {
+const createApiHandler = (yhub, { method, handler, requiredAccess, scope, accessPurpose, pathParams, paramOffset, coerceQuery }) => (res, req) => {
   const ctx = { aborted: false }
   /**
    * @type {t.ApiRequest|null}
@@ -231,7 +256,12 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
     const rawQuery = req.getQuery()
     const org = scope === 'global' ? null : /** @type {string} */ (req.getParameter(0))
     const docid = scope === 'doc' ? /** @type {string} */ (req.getParameter(1)) : null
-    const branch = scope === 'doc' ? (req.getQuery('branch') ?? 'main') : null
+    /**
+     * @type {{ [key: string]: any }}
+     */
+    let query = Object.fromEntries(new URLSearchParams(rawQuery))
+    // derived from the parsed query so that repeated ?branch keys resolve like req.query (last wins)
+    const branch = scope === 'doc' ? /** @type {string} */ (query.branch ?? 'main') : null
     /**
      * @type {{ [name: string]: string }}
      */
@@ -260,10 +290,11 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
         // handled by the catch below, which waits for the upload to complete before responding
         throw apiError(number.parseInt(authResult.status), authResult.error)
       }
-      /**
-       * @type {URLSearchParams|null}
-       */
-      let query = null
+      if (coerceQuery != null) {
+        const { err, result } = coerceQuery(query)
+        if (err != null) throw apiError(400, `invalid query: ${err}`, { code: 'invalid-query' })
+        query = result
+      }
       apiReq = /** @type {t.ApiRequest} */ ({
         yhub,
         method,
@@ -277,9 +308,7 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
         authInfo: authResult.authInfo,
         accessType: /** @type {'r'|'rw'} */ (authResult.accessType),
         aborted: ctx.aborted,
-        get query () {
-          return query ?? (query = new URLSearchParams(rawQuery))
-        },
+        query,
         bytes: () => bodyPromise,
         any: () => bodyPromise.then(buffer.decodeAny)
       })

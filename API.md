@@ -259,8 +259,12 @@ await prune({ from: activity[i].from, to: activity[j].to })
 
 Define your own rest endpoints — served from the same process and guarded by the same auth plugin
 as the built-in endpoints — via the `server.api` config section. Every custom endpoint lives under
-`/api/{version}/{name}/...`, a namespace that is **contractually reserved for your endpoints**:
-y/hub will never register a built-in route under `/api/*`.
+`/{apiPrefix}/{version}/{name}/...`, a namespace that is **contractually reserved for your
+endpoints**: y/hub will never register a built-in route under it. The prefix defaults to `api` and
+can be renamed via `server.apiPrefix` (e.g. `apiPrefix: 'collaboration'` serves everything under
+`/collaboration/{version}/{name}/...`). It must be a single bare path segment; prefixes that would
+collide with a built-in route (`ydoc`, `rollback`, `prune`, `changeset`, `activity`, `ws`) are
+rejected at startup, which is what keeps the reservation guarantee intact for any prefix.
 
 ```js
 import { createYHub, createAuthPlugin, apiError } from '@y/hub'
@@ -312,8 +316,9 @@ startup.
 | `accessPurpose` | `string` | `null` | forwarded as `purpose` to the auth access callback (see below) |
 | `get`, `post`, `put`, `patch`, `delete` | `(req) => any` | — | async handlers; at least one is required. `get` requires `'r'` access, all other methods require `'rw'`. |
 
-Because names and versions are single segments, every request under `/api/` has the fixed shape
-`/api/{version}/{apiname}/...` — easy for proxies to inspect positionally.
+Because the prefix, names, and versions are single segments, every request under the api namespace
+has the fixed shape `/{apiPrefix}/{version}/{apiname}/...` — easy for proxies to inspect
+positionally.
 
 Handlers are typed by `scope`: doc-scoped handlers receive a non-null `req.room`, org-scoped
 handlers receive `req.org` only, global handlers neither. Plain object literals inside `api: [...]`
@@ -426,7 +431,8 @@ const yhub = await createYHub(config)
 | `server` | `object \| null` | no | HTTP/WebSocket server config. Set to `null` to run without a server (worker/script mode). |
 | `server.port` | `number` | yes* | Port to listen on |
 | `server.auth` | `AuthPlugin` | yes* | Auth plugin created with `createAuthPlugin`. `getAccessType(authInfo, room, purpose)` receives the `accessPurpose` of custom api endpoints as `purpose` (null-ish otherwise). The optional `getOrgAccessType(authInfo, org, purpose)` / `getGlobalAccessType(authInfo, purpose)` callbacks authorize org-/global-scoped custom endpoints — when missing, endpoints of that scope deny all access. |
-| `server.api` | `ApiSpec[]` | no | Custom rest endpoints served under `/api/{version}/{name}/...`. See [Custom API endpoints](#custom-api-endpoints). |
+| `server.api` | `ApiSpec[]` | no | Custom rest endpoints served under `/{apiPrefix}/{version}/{name}/...`. See [Custom API endpoints](#custom-api-endpoints). |
+| `server.apiPrefix` | `string` | no | First path segment of the custom api namespace, e.g. `'collaboration'` → `/collaboration/{version}/{name}/...`. A single path segment; must not collide with built-in routes. Default: `'api'` |
 | `server.maxDocSize` | `number` | no | Maximum Ydoc size in bytes, used for WebSocket payload limits. Default: 500 MB |
 | `worker` | `object \| null` | no | Background compaction worker config. Set to `null` to disable. |
 | `worker.taskConcurrency` | `number` | yes* | Maximum number of compaction tasks to process in parallel |

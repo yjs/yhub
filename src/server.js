@@ -498,7 +498,7 @@ export const createYHubServer = async (yhub, conf) => {
     }
   })
 
-  // custom rest endpoints defined in `conf.server.api` - served under `/api/{version}/{name}/...`
+  // custom rest endpoints defined in `conf.server.api` - served under `/{apiPrefix}/{version}/{name}/...`
   registerApi(yhub, app)
 
   await promise.create((resolve, reject) => {

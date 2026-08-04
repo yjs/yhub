@@ -50,6 +50,26 @@ await utils.createTestHub({
   }
 })
 
+// a hub with a renamed custom-api prefix: endpoints are served under /collaboration/...
+// instead of /api/...
+const prefixHubPort = 9014
+const prefixHost = `localhost:${prefixHubPort}`
+
+await utils.createTestHub({
+  worker: null,
+  server: {
+    port: prefixHubPort,
+    apiPrefix: 'collaboration',
+    auth: types.createAuthPlugin({
+      async readAuthInfo () { return { userid: 'prefixUser' } },
+      async getAccessType () { return 'rw' }
+    }),
+    api: [
+      { name: 'echo', get: async req => ({ docid: req.docid }) }
+    ]
+  }
+})
+
 /**
  * @param {t.TestCase} tc
  */
@@ -255,21 +275,41 @@ export const testPurposeAndAuth = async _tc => {
 }
 
 /**
+ * @param {t.TestCase} tc
+ */
+export const testCustomApiPrefix = async tc => {
+  await utils.createTestCase(tc)
+  const docid = tc.testName + '-doc'
+  const res = await fetch(`http://${prefixHost}/collaboration/v1/echo/testOrg/${docid}`)
+  t.assert(res.status === 200)
+  t.assert((await decodeResponse(res)).docid === docid)
+  // the default prefix is not served on this hub
+  const apiFailed = await fetch(`http://${prefixHost}/api/v1/echo/testOrg/${docid}`).then(res => !res.ok, () => true)
+  t.assert(apiFailed, 'endpoints must not also be served under the default prefix')
+}
+
+/**
  * @param {t.TestCase} _tc
  */
 export const testSpecValidation = _tc => {
   /**
+   * @type {Array<string>}
+   */
+  const patterns = []
+  /**
    * @type {any}
    */
-  const stubApp = { get: () => stubApp, post: () => stubApp, put: () => stubApp, patch: () => stubApp, del: () => stubApp }
+  const stubApp = { get: (/** @type {string} */ p) => { patterns.push(p); return stubApp }, post: () => stubApp, put: () => stubApp, patch: () => stubApp, del: () => stubApp }
   /**
    * @param {Array<any>} api
+   * @param {string} [apiPrefix]
    * @return {any}
    */
-  const fakeYhub = api => ({ conf: { server: { auth: null, api } } })
+  const fakeYhub = (api, apiPrefix) => ({ conf: { server: { auth: null, api, apiPrefix } } })
   const handler = async () => ({})
   // valid baseline
   registerApi(fakeYhub([{ name: 'a', get: handler }]), stubApp)
+  t.assert(patterns[0] === '/api/v1/a/:org/:docid')
   // same name under a different version is fine
   registerApi(fakeYhub([{ name: 'a', get: handler }, { name: 'a', version: 'v2', get: handler }]), stubApp)
   // same name at a different url depth is fine (collection + item)
@@ -295,4 +335,14 @@ export const testSpecValidation = _tc => {
   t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/:branch', get: handler }]), stubApp))
   t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/:x/:x', get: handler }]), stubApp))
   t.fails(() => registerApi(fakeYhub([{ name: 'a', path: ':x', get: handler }]), stubApp))
+  // configurable prefix: served under the renamed segment
+  patterns.length = 0
+  registerApi(fakeYhub([{ name: 'a', get: handler }], 'collaboration'), stubApp)
+  t.assert(patterns[0] === '/collaboration/v1/a/:org/:docid')
+  // the prefix must be a single bare segment that doesn't collide with built-in routes
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: handler }], 'my/api'), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: handler }], '/collaboration'), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: handler }], ''), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: handler }], 'ydoc'), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: handler }], 'ws'), stubApp))
 }

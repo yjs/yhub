@@ -317,7 +317,8 @@ export const createAuthPlugin = authDef => authDef
  */
 
 /**
- * A custom rest endpoint served at `/api/{version}/{name}/...` - see API.md. One name may serve
+ * A custom rest endpoint served at `/{apiPrefix}/{version}/{name}/...` (default prefix: `api`,
+ * see `server.apiPrefix`) - see API.md. One name may serve
  * several routes with distinct url depths (e.g. a collection plus an item route via
  * `path: '/:commentId'`). Handlers are typed by `scope`: doc-scoped handlers receive a non-null
  * `room`, org-scoped handlers receive `org` only, global handlers neither.
@@ -403,10 +404,16 @@ export const $config = s.$object({
     port: s.$number,
     auth: $authPlugin,
     /**
-     * Custom rest endpoints served under `/api/{version}/{name}/...`. See API.md.
+     * Custom rest endpoints served under `/{apiPrefix}/{version}/{name}/...`. See API.md.
      * @type {s.$Optional<s.Schema<Array<ApiEndpoint>>>}
      */
     api: /** @type {s.$Optional<s.Schema<Array<ApiEndpoint>>>} */ (s.$array(s.$objectAny).optional),
+    /**
+     * First path segment under which the custom `api` endpoints are served - e.g.
+     * 'collaboration' serves them at `/collaboration/{version}/{name}/...` (default: 'api').
+     * A single path segment; must not collide with built-in routes.
+     */
+    apiPrefix: s.$string.optional,
     /**
      * Maximum expected Ydoc size in bytes. Used as baseline to calculate WebSocket
      * maxPayloadLength and maxBackpressure. (default: 500MB)

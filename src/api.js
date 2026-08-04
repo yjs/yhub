@@ -116,12 +116,16 @@ const apiSegmentRegex = /^[A-Za-z0-9_-]+$/
 
 /**
  * Register the custom rest endpoints defined in `conf.server.api` under
- * `/api/{version}/{name}/...`. See API.md.
+ * `/{apiPrefix}/{version}/{name}/...` (default prefix: `api`). See API.md.
  *
  * @param {import('./index.js').YHub} yhub
  * @param {import('uws').TemplatedApp} app
  */
 export const registerApi = (yhub, app) => {
+  const prefix = yhub.conf.server?.apiPrefix ?? 'api'
+  if (typeof prefix !== 'string' || !apiSegmentRegex.test(prefix) || ['ydoc', 'rollback', 'prune', 'changeset', 'activity', 'ws'].includes(prefix)) {
+    throw error.create(`invalid api prefix "${prefix}" - must be a single path segment that doesn't collide with built-in routes`)
+  }
   /**
    * @type {Set<string>}
    */
@@ -154,7 +158,7 @@ export const registerApi = (yhub, app) => {
       throw error.create(`duplicate api endpoint "${name}" (version "${version}", ${paramOffset + pathParams.length} url params)`)
     }
     registered.add(routeKey)
-    const pattern = `/api/${version}/${name}${scope === 'global' ? '' : '/:org'}${scope === 'doc' ? '/:docid' : ''}${path}`
+    const pattern = `/${prefix}/${version}/${name}${scope === 'global' ? '' : '/:org'}${scope === 'doc' ? '/:docid' : ''}${path}`
     const methods = /** @type {Array<keyof typeof apiMethods>} */ (Object.keys(apiMethods)).filter(method => endpoint[method] != null)
     if (methods.length === 0) {
       throw error.create(`api endpoint "${name}" defines no method handlers`)

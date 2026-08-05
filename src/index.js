@@ -208,7 +208,7 @@ export class YHub {
   /**
    * Force a permission re-check for the websocket connections of `room`, distributed via the
    * redis stream to all servers. Each matching connection re-evaluates
-   * `auth.getAccessType(authInfo, room)` and is disconnected (close code 4401
+   * `auth.getAccessType(authInfo, room, null)` and is disconnected (close code 4401
    * 'permission revoked') when its access type changed — the client then reconnects,
    * re-authenticates, and resyncs at its new access level. With `forceDisconnect: true`,
    * matching connections are disconnected without re-checking. Note that a disconnect cannot

@@ -248,9 +248,8 @@ export const $authPlugin = /** @type {s.Schema<AuthPlugin<any>>} */ (s.$object({
  */
 
 /**
- * `purpose` is the `accessPurpose` of a custom api endpoint (`null` when unset). Built-in
- * endpoints and websocket connections don't supply it, so treat `purpose == null` (loose
- * comparison) as "no purpose".
+ * `purpose` is the `accessPurpose` of a custom api endpoint — `null` when unset and for
+ * built-in endpoints and websocket connections.
  *
  * `getOrgAccessType` / `getGlobalAccessType` authorize org-/global-scoped custom api endpoints.
  * When missing, requests to endpoints of that scope are denied.
@@ -258,9 +257,9 @@ export const $authPlugin = /** @type {s.Schema<AuthPlugin<any>>} */ (s.$object({
  * @template {UserAuthInfo} AuthInfo
  * @typedef {object} AuthPlugin
  * @property {(req:import('uws').HttpRequest) => Promise<AuthInfo|null>} AuthPlugin.readAuthInfo - return null (or throw) to reject the request with 401
- * @property {(authInfo: AuthInfo, room: Room, purpose?: string|null) => Promise<AccessType>} AuthPlugin.getAccessType:
- * @property {(authInfo: AuthInfo, org: string, purpose?: string|null) => Promise<AccessType>} [AuthPlugin.getOrgAccessType]
- * @property {(authInfo: AuthInfo, purpose?: string|null) => Promise<AccessType>} [AuthPlugin.getGlobalAccessType]
+ * @property {(authInfo: AuthInfo, room: Room, purpose: string|null) => Promise<AccessType>} AuthPlugin.getAccessType:
+ * @property {(authInfo: AuthInfo, org: string, purpose: string|null) => Promise<AccessType>} [AuthPlugin.getOrgAccessType]
+ * @property {(authInfo: AuthInfo, purpose: string|null) => Promise<AccessType>} [AuthPlugin.getGlobalAccessType]
  */
 
 /**

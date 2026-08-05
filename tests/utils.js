@@ -108,7 +108,7 @@ const testApiSpecs = [
   // validated when ?branch is omitted
   createApiEndpoint('branched', {
     get: {
-      $query: { branch: ['main', 'b2'] },
+      $query: { branch: [s.$literal('main'), s.$literal('b2')] },
       handler: async req => ({ branch: req.branch, qbranch: req.query.branch })
     }
   }),

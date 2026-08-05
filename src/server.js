@@ -252,7 +252,7 @@ class WSUser {
    */
   async recheckAuth () {
     try {
-      const accessType = await this.yhub.conf.server?.auth.getAccessType(this.authInfo, this.room)
+      const accessType = await this.yhub.conf.server?.auth.getAccessType(this.authInfo, this.room, null)
       if (this.isDestroyed) return
       if (!t.hasReadAccess(accessType) || t.hasWriteAccess(accessType) !== this.hasWriteAccess) {
         this.log.info({ accessType }, 'access changed, disconnecting')
@@ -331,7 +331,7 @@ const registerWebsocketServer = (yhub, app, prefix) => {
         const customAttributions = parseCustomAttributionsParam(customAttributionsParam)
         const authInfo = await yhub.conf.server?.auth.readAuthInfo(req)
         s.$string.expect(authInfo.userid)
-        const accessType = authInfo && await yhub.conf.server?.auth.getAccessType(authInfo, room)
+        const accessType = authInfo && await yhub.conf.server?.auth.getAccessType(authInfo, room, null)
         if (authInfo == null || !t.hasReadAccess(accessType)) {
           log.info({ url, userid: authInfo?.userid ?? null }, 'ws upgrade denied, insufficient access')
           res.cork(() => {

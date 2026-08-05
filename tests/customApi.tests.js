@@ -79,7 +79,7 @@ await utils.createTestHub({
 export const testDocScope = async tc => {
   const { org } = await utils.createTestCase(tc)
   const docid = tc.testName + '-doc'
-  const res = await fetch(`http://${utils.yhubHost}/api/v1/echo/${org}/${docid}?q=42&branch=b2`, { headers: { 'x-echo': 'hi' } })
+  const res = await fetch(`http://${utils.yhubHost}/api/echo/v1/${org}/${docid}?q=42&branch=b2`, { headers: { 'x-echo': 'hi' } })
   t.assert(res.status === 200)
   t.assert(res.headers.get('content-type') === 'application/x-lib0any')
   const body = await decodeResponse(res)
@@ -89,7 +89,7 @@ export const testDocScope = async tc => {
   t.assert(body.userid === 'user1')
   t.assert(body.header === 'hi')
   // branch defaults to main
-  const resDefault = await fetch(`http://${utils.yhubHost}/api/v1/echo/${org}/${docid}`)
+  const resDefault = await fetch(`http://${utils.yhubHost}/api/echo/v1/${org}/${docid}`)
   t.compare((await decodeResponse(resDefault)).room, { org, docid, branch: 'main' })
 }
 
@@ -98,7 +98,7 @@ export const testDocScope = async tc => {
  */
 export const testMethodsAndReturnValues = async tc => {
   const { org } = await utils.createTestCase(tc)
-  const base = `http://${utils.yhubHost}/api/v1/echo/${org}/${tc.testName}-doc`
+  const base = `http://${utils.yhubHost}/api/echo/v1/${org}/${tc.testName}-doc`
   await t.groupAsync('post: any-encoded body round-trip, bytes() after any()', async () => {
     const reqBody = { a: [1, 'x'], nested: { ok: true } }
     const res = await fetch(base, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: /** @type {Uint8Array<ArrayBuffer>} */ (buffer.encodeAny(reqBody)) })
@@ -139,9 +139,9 @@ export const testMethodsAndReturnValues = async tc => {
 export const testVersioning = async tc => {
   const { org } = await utils.createTestCase(tc)
   const docid = tc.testName + '-doc'
-  const resV2 = await fetch(`http://${utils.yhubHost}/api/v2/echo/${org}/${docid}`)
+  const resV2 = await fetch(`http://${utils.yhubHost}/api/echo/v2/${org}/${docid}`)
   t.compare(await decodeResponse(resV2), { v: 2 })
-  const resV1 = await fetch(`http://${utils.yhubHost}/api/v1/echo/${org}/${docid}`)
+  const resV1 = await fetch(`http://${utils.yhubHost}/api/echo/v1/${org}/${docid}`)
   t.assert((await decodeResponse(resV1)).v === undefined)
 }
 
@@ -152,7 +152,7 @@ export const testPathParams = async tc => {
   const { org } = await utils.createTestCase(tc)
   const docid = tc.testName + '-doc'
   // the item route shares the collection's name ('echo') - routing is by url depth
-  const res = await fetch(`http://${utils.yhubHost}/api/v1/echo/${org}/${docid}/c123`)
+  const res = await fetch(`http://${utils.yhubHost}/api/echo/v1/${org}/${docid}/c123`)
   t.compare(await decodeResponse(res), { commentId: 'c123', docid })
 }
 
@@ -161,7 +161,7 @@ export const testPathParams = async tc => {
  */
 export const testQuerySchema = async tc => {
   const { org } = await utils.createTestCase(tc)
-  const base = `http://${utils.yhubHost}/api/v1/typedq/${org}/${tc.testName}-doc`
+  const base = `http://${utils.yhubHost}/api/typedq/v1/${org}/${tc.testName}-doc`
   await t.groupAsync('declared attrs are coerced, undeclared pass through as raw strings', async () => {
     const res = await fetch(`${base}?limit=42&active=true&extra=7&mode=a&page=2&lit=x&mixed=false`)
     t.assert(res.status === 200)
@@ -217,19 +217,28 @@ export const testQuerySchema = async tc => {
     t.assert(body.branch === 'b2')
     t.assert(body.query.branch === 'b2')
   })
+  await t.groupAsync('a declared branch attribute constrains the requested branch', async () => {
+    const branchedBase = `http://${utils.yhubHost}/api/branched/v1/${org}/${tc.testName}-doc`
+    // ?branch omitted: the server default 'main' is materialized and validated
+    t.compare(await decodeResponse(await fetch(branchedBase)), { branch: 'main', qbranch: 'main' })
+    t.compare(await decodeResponse(await fetch(`${branchedBase}?branch=b2`)), { branch: 'b2', qbranch: 'b2' })
+    const invalid = await fetch(`${branchedBase}?branch=x`)
+    t.assert(invalid.status === 400)
+    t.assert((await decodeResponse(invalid)).code === 'invalid-query')
+  })
   await t.groupAsync('prebuilt s.$object(..).partial spec: attrs optional, still coerced+validated', async () => {
-    const absent = await fetch(`http://${purposeHost}/api/v1/qcheck/o/d`)
+    const absent = await fetch(`http://${purposeHost}/api/qcheck/v1/o/d`)
     t.assert(absent.status === 200)
     t.compare(await decodeResponse(absent), {})
-    const coerced = await fetch(`http://${purposeHost}/api/v1/qcheck/o/d?n=5`)
+    const coerced = await fetch(`http://${purposeHost}/api/qcheck/v1/o/d?n=5`)
     t.compare(await decodeResponse(coerced), { n: 5 })
-    const invalid = await fetch(`http://${purposeHost}/api/v1/qcheck/o/d?n=abc`)
+    const invalid = await fetch(`http://${purposeHost}/api/qcheck/v1/o/d?n=abc`)
     t.assert(invalid.status === 400)
   })
   await t.groupAsync('auth is decided before query validation', async () => {
-    const unauthedRes = await fetch(`http://${purposeHost}/api/v1/qcheck/o/d?n=abc`, { headers: { 'x-no-auth': '1' } })
+    const unauthedRes = await fetch(`http://${purposeHost}/api/qcheck/v1/o/d?n=abc`, { headers: { 'x-no-auth': '1' } })
     t.assert(unauthedRes.status === 401)
-    const authedRes = await fetch(`http://${purposeHost}/api/v1/qcheck/o/d?n=abc`)
+    const authedRes = await fetch(`http://${purposeHost}/api/qcheck/v1/o/d?n=abc`)
     t.assert(authedRes.status === 400)
   })
 }
@@ -239,9 +248,9 @@ export const testQuerySchema = async tc => {
  */
 export const testOrgAndGlobalScope = async tc => {
   const { org } = await utils.createTestCase(tc)
-  const orgRes = await fetch(`http://${utils.yhubHost}/api/v1/docs/${org}`)
+  const orgRes = await fetch(`http://${utils.yhubHost}/api/docs/v1/${org}`)
   t.compare(await decodeResponse(orgRes), { org, room: null, docid: null })
-  const globalRes = await fetch(`http://${utils.yhubHost}/api/v1/stats`)
+  const globalRes = await fetch(`http://${utils.yhubHost}/api/stats/v1`)
   t.compare(await decodeResponse(globalRes), { ok: true, org: null })
 }
 
@@ -250,7 +259,7 @@ export const testOrgAndGlobalScope = async tc => {
  */
 export const testResponseReturn = async tc => {
   const { org } = await utils.createTestCase(tc)
-  const res = await fetch(`http://${utils.yhubHost}/api/v1/resp/${org}/${tc.testName}-doc`)
+  const res = await fetch(`http://${utils.yhubHost}/api/resp/v1/${org}/${tc.testName}-doc`)
   t.assert(res.status === 201)
   t.assert(res.headers.get('content-type') === 'application/json')
   t.assert(res.headers.get('x-test') === 'yes')
@@ -263,7 +272,7 @@ export const testResponseReturn = async tc => {
  */
 export const testErrors = async tc => {
   const { org } = await utils.createTestCase(tc)
-  const base = `http://${utils.yhubHost}/api/v1/fail/${org}/${tc.testName}-doc`
+  const base = `http://${utils.yhubHost}/api/fail/v1/${org}/${tc.testName}-doc`
   await t.groupAsync('apiError produces status + { error, ...extra }', async () => {
     const res = await fetch(base)
     t.assert(res.status === 404)
@@ -292,7 +301,7 @@ export const testYhubAccess = async tc => {
   const { ydoc } = await createWsClient({ waitForSync: true })
   ydoc.get().applyDelta(delta.create().insert('hello api').done())
   await promise.untilAsync(async () => {
-    const res = await fetch(`http://${utils.yhubHost}/api/v1/getdoc/${org}/${ydoc.guid}`)
+    const res = await fetch(`http://${utils.yhubHost}/api/getdoc/v1/${org}/${ydoc.guid}`)
     const { doc } = await decodeResponse(res)
     const yd = new Y.Doc()
     Y.applyUpdate(yd, doc)
@@ -307,14 +316,14 @@ export const testAbort = async tc => {
   const { org } = await utils.createTestCase(tc)
   utils.apiTestState.slowAborted = null
   const controller = new AbortController()
-  const aborted = fetch(`http://${utils.yhubHost}/api/v1/slow/${org}/${tc.testName}-doc`, { signal: controller.signal }).catch(() => null)
+  const aborted = fetch(`http://${utils.yhubHost}/api/slow/v1/${org}/${tc.testName}-doc`, { signal: controller.signal }).catch(() => null)
   await promise.wait(50)
   controller.abort()
   await aborted
   await promise.wait(500)
   t.assert(utils.apiTestState.slowAborted === true)
   // the server is still healthy and req.aborted is false for an undisturbed request
-  const res = await fetch(`http://${utils.yhubHost}/api/v1/slow/${org}/${tc.testName}-doc`)
+  const res = await fetch(`http://${utils.yhubHost}/api/slow/v1/${org}/${tc.testName}-doc`)
   t.assert(res.status === 200)
   t.assert(utils.apiTestState.slowAborted === false)
 }
@@ -325,32 +334,32 @@ export const testAbort = async tc => {
 export const testPurposeAndAuth = async _tc => {
   await t.groupAsync('accessPurpose is forwarded, purpose grants rw', async () => {
     purposeCalls.length = 0
-    const res = await fetch(`http://${purposeHost}/api/v1/purposed/o/d`)
+    const res = await fetch(`http://${purposeHost}/api/purposed/v1/o/d`)
     t.assert(res.status === 200)
     t.assert(purposeCalls[purposeCalls.length - 1] === 'comments')
-    const postRes = await fetch(`http://${purposeHost}/api/v1/purposed/o/d`, { method: 'POST' })
+    const postRes = await fetch(`http://${purposeHost}/api/purposed/v1/o/d`, { method: 'POST' })
     t.assert(postRes.status === 200)
   })
   await t.groupAsync('unset accessPurpose arrives as null, plain access applies', async () => {
     purposeCalls.length = 0
-    const res = await fetch(`http://${purposeHost}/api/v1/unpurposed/o/d`)
+    const res = await fetch(`http://${purposeHost}/api/unpurposed/v1/o/d`)
     t.assert(res.status === 200)
     t.assert(purposeCalls[purposeCalls.length - 1] === null)
-    const postRes = await fetch(`http://${purposeHost}/api/v1/unpurposed/o/d`, { method: 'POST' })
+    const postRes = await fetch(`http://${purposeHost}/api/unpurposed/v1/o/d`, { method: 'POST' })
     t.assert(postRes.status === 403)
   })
   await t.groupAsync('purpose-private endpoint denies', async () => {
-    const res = await fetch(`http://${purposeHost}/api/v1/private/o/d`)
+    const res = await fetch(`http://${purposeHost}/api/private/v1/o/d`)
     t.assert(res.status === 403)
   })
   await t.groupAsync('org/global scope without the auth callback fails closed', async () => {
-    const orgRes = await fetch(`http://${purposeHost}/api/v1/orgless/o`)
+    const orgRes = await fetch(`http://${purposeHost}/api/orgless/v1/o`)
     t.assert(orgRes.status === 403)
-    const globalRes = await fetch(`http://${purposeHost}/api/v1/globalless`)
+    const globalRes = await fetch(`http://${purposeHost}/api/globalless/v1`)
     t.assert(globalRes.status === 403)
   })
   await t.groupAsync('failed readAuthInfo responds 401', async () => {
-    const res = await fetch(`http://${purposeHost}/api/v1/unpurposed/o/d`, { headers: { 'x-no-auth': '1' } })
+    const res = await fetch(`http://${purposeHost}/api/unpurposed/v1/o/d`, { headers: { 'x-no-auth': '1' } })
     t.assert(res.status === 401)
   })
 }
@@ -359,13 +368,19 @@ export const testPurposeAndAuth = async _tc => {
  * @param {t.TestCase} tc
  */
 export const testCustomApiPrefix = async tc => {
-  await utils.createTestCase(tc)
+  const { createWsClient } = await utils.createTestCase(tc)
   const docid = tc.testName + '-doc'
-  const res = await fetch(`http://${prefixHost}/collaboration/v1/echo/testOrg/${docid}`)
+  const res = await fetch(`http://${prefixHost}/collaboration/echo/v1/testOrg/${docid}`)
   t.assert(res.status === 200)
   t.assert((await decodeResponse(res)).docid === docid)
+  // the built-in endpoints follow the prefix
+  const ydocRes = await fetch(`http://${prefixHost}/collaboration/ydoc/v1/testOrg/${docid}`)
+  t.assert(ydocRes.status === 200)
+  t.assert(buffer.decodeAny(new Uint8Array(await ydocRes.arrayBuffer())).doc instanceof Uint8Array)
+  // ...and so does the websocket route
+  await createWsClient({ wsUrl: `ws://${prefixHost}/collaboration/ws/v1/testOrg`, waitForSync: true })
   // the default prefix is not served on this hub
-  const apiFailed = await fetch(`http://${prefixHost}/api/v1/echo/testOrg/${docid}`).then(res => !res.ok, () => true)
+  const apiFailed = await fetch(`http://${prefixHost}/api/echo/v1/testOrg/${docid}`).then(res => !res.ok, () => true)
   t.assert(apiFailed, 'endpoints must not also be served under the default prefix')
 }
 
@@ -388,9 +403,10 @@ export const testSpecValidation = _tc => {
    */
   const fakeYhub = (api, apiPrefix) => ({ conf: { server: { auth: null, api, apiPrefix } } })
   const handler = async () => ({})
-  // valid baseline
+  // valid baseline - membership, not position: the built-in endpoints register first
   registerApi(fakeYhub([{ name: 'a', get: { handler } }]), stubApp)
-  t.assert(patterns[0] === '/api/v1/a/:org/:docid')
+  t.assert(patterns.includes('/api/a/v1/:org/:docid'))
+  t.assert(patterns.includes('/api/ydoc/v1/:org/:docid'))
   // same name under a different version is fine
   registerApi(fakeYhub([{ name: 'a', get: { handler } }, { name: 'a', version: 'v2', get: { handler } }]), stubApp)
   // same name at a different url depth is fine (collection + item)
@@ -427,14 +443,23 @@ export const testSpecValidation = _tc => {
   t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/:branch', get: { handler } }]), stubApp))
   t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/:x/:x', get: { handler } }]), stubApp))
   t.fails(() => registerApi(fakeYhub([{ name: 'a', path: ':x', get: { handler } }]), stubApp))
-  // configurable prefix: served under the renamed segment
+  // built-in names are default endpoints - taken at v1, free at other versions
+  t.fails(() => registerApi(fakeYhub([{ name: 'ydoc', get: { handler } }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'ws', get: { handler } }]), stubApp)) // seeded ws route key
+  registerApi(fakeYhub([{ name: 'ydoc', version: 'v2', get: { handler } }]), stubApp)
+  // configurable prefix: everything - built-ins included - is served under the renamed segment
   patterns.length = 0
   registerApi(fakeYhub([{ name: 'a', get: { handler } }], 'collaboration'), stubApp)
-  t.assert(patterns[0] === '/collaboration/v1/a/:org/:docid')
-  // the prefix must be a single bare segment that doesn't collide with built-in routes
+  t.assert(patterns.includes('/collaboration/a/v1/:org/:docid'))
+  t.assert(patterns.includes('/collaboration/activity/v1/:org/:docid'))
+  // former reserved prefixes are now valid - there are no top-level routes left to collide with
+  patterns.length = 0
+  registerApi(fakeYhub([{ name: 'a', get: { handler } }], 'ydoc'), stubApp)
+  t.assert(patterns.includes('/ydoc/a/v1/:org/:docid'))
+  t.assert(patterns.includes('/ydoc/ydoc/v1/:org/:docid'))
+  registerApi(fakeYhub([{ name: 'a', get: { handler } }], 'ws'), stubApp)
+  // the prefix must be a single bare segment
   t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { handler } }], 'my/api'), stubApp))
   t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { handler } }], '/collaboration'), stubApp))
   t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { handler } }], ''), stubApp))
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { handler } }], 'ydoc'), stubApp))
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { handler } }], 'ws'), stubApp))
 }

@@ -12,6 +12,7 @@ import * as fs from 'node:fs'
 import * as prng from 'lib0/prng'
 import * as buffer from 'lib0/buffer'
 import * as awarenessProtocol from '@y/protocols/awareness'
+import { WebSocket } from 'ws'
 
 /**
  * @param {string} path
@@ -76,11 +77,11 @@ export const testChangesetRestApi = async tc => {
   await promise.wait(3000)
   // fetch timestamps
   console.log('finished creating documents - fetching activity')
-  const activity = (await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)).activity
+  const activity = (await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false`)).activity
   console.log('received activity', activity)
   t.assert(activity.length === 3)
   {
-    const changeset = await fetchYhubResponse(`/changeset/${org}/${ydoc.guid}?from=${activity[1].from}&to=${activity[1].to}&ydoc=true&delta=true&attributions=true`)
+    const changeset = await fetchYhubResponse(`/api/changeset/v1/${org}/${ydoc.guid}?from=${activity[1].from}&to=${activity[1].to}&ydoc=true&delta=true&attributions=true`)
     console.log(changeset)
     // `ydoc` is a single gc:false doc baked at `to`; apply to a gc:false doc to keep deleted content
     const ydocAtTo = new Y.Doc({ gc: false })
@@ -95,7 +96,7 @@ export const testChangesetRestApi = async tc => {
     t.compare(clientDelta, changeset.delta)
   }
   { // rollback
-    const rollbackResult = await postYhubRequest(`/rollback/${org}/${ydoc.guid}`, { from: activity[1].from, to: activity[1].to }) // undo (delete "hello" & insert "!")
+    const rollbackResult = await postYhubRequest(`/api/rollback/v1/${org}/${ydoc.guid}`, { from: activity[1].from, to: activity[1].to }) // undo (delete "hello" & insert "!")
     console.log(rollbackResult)
     await promise.wait(3000)
     const { ydoc: xdoc } = await createWsClient({ waitForSync: true })
@@ -123,9 +124,9 @@ export const testActivityYdocRoundTrip = async tc => {
   await promise.wait(100)
   ydoc.get().applyDelta(delta.create().insert('hi ').done()) // -> 'hi world!'
   await promise.wait(3000)
-  const all = (await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)).activity
+  const all = (await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false`)).activity
   t.assert(all.length === 3)
-  const res = await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false&from=${all[2].from}&ydoc=true&delta=true&attributions=true`)
+  const res = await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false&from=${all[2].from}&ydoc=true&delta=true&attributions=true`)
   t.assert(res.ydoc != null && Array.isArray(res.activity) && res.activity.length === 1, 'ydoc=true wraps { ydoc, activity }')
   const shared = new Y.Doc({ gc: false })
   Y.applyUpdate(shared, res.ydoc)
@@ -157,17 +158,17 @@ export const testPruneHistory = async tc => {
   ydoc.get().applyDelta(delta.create().insert('hi ').done()) // fresh insertion -> 'hi world'
   await utils.waitTasksProcessed(yhub)
   // before pruning: insert('hello world'), delete('hello '), insert('hi ') => 3 activity events
-  const before = (await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)).activity
+  const before = (await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false`)).activity
   console.log('activity before prune', before)
   t.assert(before.length === 3)
   const from = Math.min(...before.map((/** @type {{ from: number }} */ a) => a.from))
   const to = Math.max(...before.map((/** @type {{ to: number }} */ a) => a.to))
   // prune content inserted AND deleted within [from, to] -> the churned 'hello '
-  const pruneResult = await postYhubRequest(`/prune/${org}/${ydoc.guid}`, { from, to })
+  const pruneResult = await postYhubRequest(`/api/prune/v1/${org}/${ydoc.guid}`, { from, to })
   t.assert(pruneResult.success === true)
   await utils.waitTasksProcessed(yhub)
   // after pruning: the delete event for 'hello ' is gone (its insert+delete churn pruned) => 2 events
-  const after = (await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)).activity
+  const after = (await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false`)).activity
   console.log('activity after prune', after)
   t.assert(after.length === 2, 'pruning removes the churned insert+delete from history')
   // the visible document is unchanged by pruning
@@ -185,7 +186,7 @@ export const testPruneHistoryRequiresFilter = async tc => {
   const { ydoc } = createWsClient()
   ydoc.get().applyDelta(delta.create().insert('content').done())
   await promise.wait(100)
-  const emptyPrune = await postYhubRequest(`/prune/${org}/${ydoc.guid}`, {})
+  const emptyPrune = await postYhubRequest(`/api/prune/v1/${org}/${ydoc.guid}`, {})
   t.assert(emptyPrune.error != null, 'prune without filters should return an error')
 }
 
@@ -209,7 +210,7 @@ export const testAttributeInsertedContent = async tc => {
   /**
    * @type {{ attributions: Uint8Array }}
    */
-  const response = await fetchYhubResponse(`/changeset/${org}/${ydoc.guid}?&attributions=true`)
+  const response = await fetchYhubResponse(`/api/changeset/v1/${org}/${ydoc.guid}?attributions=true`)
   const attributions = Y.decodeContentMap(response.attributions)
   // render all inserts (extracting deletions from the equation so they stay properly deleted)
   console.log({ attributions })
@@ -276,7 +277,7 @@ export const testYdocRestApi = async tc => {
   provider.destroy()
 
   // Retrieve the document via GET
-  const getResponse = await fetchYhubResponse(`/ydoc/${org}/${initialDoc.guid}`)
+  const getResponse = await fetchYhubResponse(`/api/ydoc/v1/${org}/${initialDoc.guid}`)
   t.assert(getResponse.doc instanceof Uint8Array, 'GET response should contain doc as Uint8Array')
 
   // Apply remote state to a local document and make changes
@@ -289,7 +290,7 @@ export const testYdocRestApi = async tc => {
   const update = Y.encodeStateAsUpdate(localDoc)
 
   // Send update via PATCH
-  const patchResponse = await patchYhubRequest(`/ydoc/${org}/${initialDoc.guid}`, { update })
+  const patchResponse = await patchYhubRequest(`/api/ydoc/v1/${org}/${initialDoc.guid}`, { update })
   t.assert(patchResponse.success === true, 'PATCH should return success')
 
   // Wait for changes to propagate and verify via websocket
@@ -310,11 +311,11 @@ export const testCustomAttributionsRollback = async tc => {
   provider.destroy()
 
   // Fetch doc state, apply change 1 with custom attribution source=import
-  const get1 = await fetchYhubResponse(`/ydoc/${org}/${initialDoc.guid}`)
+  const get1 = await fetchYhubResponse(`/api/ydoc/v1/${org}/${initialDoc.guid}`)
   const doc1 = new Y.Doc()
   Y.applyUpdate(doc1, get1.doc)
   doc1.get().applyDelta(delta.create().retain(5).insert(' beautiful').done())
-  const patchRes1 = await patchYhubRequest(`/ydoc/${org}/${initialDoc.guid}`, {
+  const patchRes1 = await patchYhubRequest(`/api/ydoc/v1/${org}/${initialDoc.guid}`, {
     update: Y.encodeStateAsUpdate(doc1),
     customAttributions: [{ k: 'source', v: 'userA' }]
   })
@@ -322,14 +323,14 @@ export const testCustomAttributionsRollback = async tc => {
   await promise.wait(500)
 
   // Fetch doc state, apply change 2 with custom attribution source=manual
-  const get2 = await fetchYhubResponse(`/ydoc/${org}/${initialDoc.guid}`)
+  const get2 = await fetchYhubResponse(`/api/ydoc/v1/${org}/${initialDoc.guid}`)
   const doc2 = new Y.Doc()
   Y.applyUpdate(doc2, get2.doc)
   // doc should now be "hello beautiful world"
   console.log('should be "hello beautiful world"', doc2.get().toDelta().toJSON())
   t.compare(doc2.get().toDelta(), delta.create(delta.$deltaAny).insert('hello beautiful world'))
   doc2.get().applyDelta(delta.create().insert('hey ').done())
-  const patchRes2 = await patchYhubRequest(`/ydoc/${org}/${initialDoc.guid}`, {
+  const patchRes2 = await patchYhubRequest(`/api/ydoc/v1/${org}/${initialDoc.guid}`, {
     update: Y.encodeStateAsUpdate(doc2),
     customAttributions: [{ k: 'source', v: 'userB' }]
   })
@@ -341,11 +342,11 @@ export const testCustomAttributionsRollback = async tc => {
   t.compare(beforeRollback.get().toDelta(), delta.create(delta.$deltaAny).insert('hey hello beautiful world'))
 
   // Rollback without any filter should return an error
-  const emptyRollback = await postYhubRequest(`/rollback/${org}/${initialDoc.guid}`, {})
+  const emptyRollback = await postYhubRequest(`/api/rollback/v1/${org}/${initialDoc.guid}`, {})
   t.assert(emptyRollback.error != null, 'Rollback without filters should return an error')
 
   // Rollback only changes with source=userA
-  const rollbackResult = await postYhubRequest(`/rollback/${org}/${initialDoc.guid}`, {
+  const rollbackResult = await postYhubRequest(`/api/rollback/v1/${org}/${initialDoc.guid}`, {
     withCustomAttributions: [{ k: 'source', v: 'userA' }]
   })
   t.assert(rollbackResult.success === true)
@@ -360,7 +361,7 @@ export const testCustomAttributionsRollback = async tc => {
   /**
    * @type {Array<any>}
    */
-  const activityUserA = (await fetchYhubResponse(`/activity/${org}/${initialDoc.guid}?group=false&withCustomAttributions=source:userA&delta=true&customAttributions=true&delta=true`)).activity
+  const activityUserA = (await fetchYhubResponse(`/api/activity/v1/${org}/${initialDoc.guid}?group=false&withCustomAttributions=source:userA&delta=true&customAttributions=true&delta=true`)).activity
   console.log('activity', JSON.stringify(activityUserA))
   t.assert(activityUserA.length === 1)
   activityUserA.forEach(act => {
@@ -486,7 +487,7 @@ export const testLargeDoc = async tc => {
     utils.cleanPreviousClients()
     await promise.wait(1000)
     await t.measureTimeAsync('fetching /activity from test api', async () => {
-      const activity = (await fetchYhubResponse(`/activity/${org}/${docidFull}?group=true`)).activity
+      const activity = (await fetchYhubResponse(`/api/activity/v1/${org}/${docidFull}?group=true`)).activity
       logMemoryUsed('fetched activity')
       console.log({ activity })
       t.assert(activity.length > 0)
@@ -535,10 +536,10 @@ export const testActivityContentIdsFilter = async tc => {
       item = item.left
     }
     const contentIdsParam = encodeURIComponent(buffer.toBase64(Y.encodeContentIds(Y.createContentIds(idset, idset))))
-    return (await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false&contentIds=${contentIdsParam}&delta=true`)).activity
+    return (await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false&contentIds=${contentIdsParam}&delta=true`)).activity
   }
   // Without filter: both attribute changes should appear
-  const allActivity = (await fetchYhubResponse(`/activity/${org}/${ydoc.guid}?group=false`)).activity
+  const allActivity = (await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false`)).activity
   t.assert(allActivity.length === 2, 'expected 2 activity entries without contentIds filter')
   console.log({ allActivity })
   // Encode ContentIds derived from the captured 'someattr' update
@@ -736,14 +737,14 @@ export const testPatchAwarenessOnly = async tc => {
   const { ydoc, provider } = await createWsClient({ waitForSync: true })
   const fakeClientid = 0xfeed
 
-  const presentRes = await patchYhubRequest(`/ydoc/${org}/${ydoc.guid}`, {
+  const presentRes = await patchYhubRequest(`/api/ydoc/v1/${org}/${ydoc.guid}`, {
     awareness: encodeOneEntry(fakeClientid, 1, { user: 'alice' })
   })
   t.assert(presentRes.success === true, 'awareness-only PATCH succeeded')
   await promise.wait(200)
   t.compare(provider.awareness.states.get(fakeClientid), { user: 'alice' })
 
-  const disconnectRes = await patchYhubRequest(`/ydoc/${org}/${ydoc.guid}`, {
+  const disconnectRes = await patchYhubRequest(`/api/ydoc/v1/${org}/${ydoc.guid}`, {
     awareness: encodeOneEntry(fakeClientid, 2, null)
   })
   t.assert(disconnectRes.success === true, 'awareness disconnect PATCH succeeded')
@@ -767,7 +768,7 @@ export const testPatchUpdateAndAwarenessTogether = async tc => {
   const update = Y.encodeStateAsUpdate(local)
   const fakeClientid = 0xbeef
 
-  const res = await patchYhubRequest(`/ydoc/${org}/${ydoc.guid}`, {
+  const res = await patchYhubRequest(`/api/ydoc/v1/${org}/${ydoc.guid}`, {
     update,
     awareness: encodeOneEntry(fakeClientid, 1, { user: 'bob' })
   })
@@ -786,7 +787,7 @@ export const testPatchUpdateAndAwarenessTogether = async tc => {
 export const testPatchEmptyBodyIs400 = async tc => {
   const { org, createWsClient } = await utils.createTestCase(tc)
   const { ydoc } = await createWsClient({ waitForSync: true, syncAwareness: false })
-  const res = await patchYhubRequest(`/ydoc/${org}/${ydoc.guid}`, {})
+  const res = await patchYhubRequest(`/api/ydoc/v1/${org}/${ydoc.guid}`, {})
   t.assert(res.error === 'Invalid request body', `expected 400 error body, got ${JSON.stringify(res)}`)
 }
 
@@ -801,10 +802,10 @@ export const testGetYdocWithAwareness = async tc => {
   const { org, defaultRoom } = await utils.createTestCase(tc)
   const fakeClientid = 0xabba
   // Seed awareness via the already-validated PATCH path.
-  await patchYhubRequest(`/ydoc/${org}/${defaultRoom.docid}`, {
+  await patchYhubRequest(`/api/ydoc/v1/${org}/${defaultRoom.docid}`, {
     awareness: encodeOneEntry(fakeClientid, 1, { user: 'alice' })
   })
-  const res = await fetchYhubResponse(`/ydoc/${org}/${defaultRoom.docid}?awareness=true`)
+  const res = await fetchYhubResponse(`/api/ydoc/v1/${org}/${defaultRoom.docid}?awareness=true`)
   t.assert(res.doc instanceof Uint8Array, 'doc returned as Uint8Array')
   t.assert(res.awareness instanceof Uint8Array, 'awareness returned as Uint8Array')
   // Confirm the bytes are bare-format by feeding them directly to applyAwarenessUpdate.
@@ -821,10 +822,10 @@ export const testGetYdocWithAwareness = async tc => {
  */
 export const testGetYdocWithoutAwarenessFlagOmitsField = async tc => {
   const { org, defaultRoom } = await utils.createTestCase(tc)
-  await patchYhubRequest(`/ydoc/${org}/${defaultRoom.docid}`, {
+  await patchYhubRequest(`/api/ydoc/v1/${org}/${defaultRoom.docid}`, {
     awareness: encodeOneEntry(0xface, 1, { user: 'someone' })
   })
-  const res = await fetchYhubResponse(`/ydoc/${org}/${defaultRoom.docid}`)
+  const res = await fetchYhubResponse(`/api/ydoc/v1/${org}/${defaultRoom.docid}`)
   t.assert(res.doc instanceof Uint8Array, 'doc returned as Uint8Array')
   t.assert(!('awareness' in res), 'awareness field omitted without ?awareness=true')
 }
@@ -837,9 +838,46 @@ export const testGetYdocWithoutAwarenessFlagOmitsField = async tc => {
  */
 export const testGetYdocEmptyAwarenessOmitsField = async tc => {
   const { org, defaultRoom } = await utils.createTestCase(tc)
-  const res = await fetchYhubResponse(`/ydoc/${org}/${defaultRoom.docid}?awareness=true`)
+  const res = await fetchYhubResponse(`/api/ydoc/v1/${org}/${defaultRoom.docid}?awareness=true`)
   t.assert(res.doc instanceof Uint8Array, 'doc returned as Uint8Array')
   t.assert(!('awareness' in res), 'awareness field omitted when room has no awareness state')
+}
+
+/**
+ * Object-returning built-ins are served as x-lib0any; pre-encoded responses stay octet-stream.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testBuiltinContentTypes = async tc => {
+  const { org, defaultRoom } = await utils.createTestCase(tc)
+  const ydocRes = await fetch(`http://${utils.yhubHost}/api/ydoc/v1/${org}/${defaultRoom.docid}`)
+  t.assert(ydocRes.headers.get('content-type') === 'application/x-lib0any')
+  t.assert(buffer.decodeAny(new Uint8Array(await ydocRes.arrayBuffer())).doc instanceof Uint8Array)
+  const activityRes = await fetch(`http://${utils.yhubHost}/api/activity/v1/${org}/${defaultRoom.docid}?group=false`)
+  t.assert(activityRes.headers.get('content-type') === 'application/octet-stream')
+}
+
+/**
+ * The pre-0.4 top-level routes are gone - uws answers unmatched routes with its default 404.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testOldRoutesRemoved = async tc => {
+  const { org, defaultRoom } = await utils.createTestCase(tc)
+  for (const path of [`/ydoc/${org}/${defaultRoom.docid}`, `/changeset/${org}/${defaultRoom.docid}`, `/activity/${org}/${defaultRoom.docid}`]) {
+    t.assert((await fetch(`http://${utils.yhubHost}${path}`)).status === 404, `${path} must 404`)
+  }
+  for (const path of [`/rollback/${org}/${defaultRoom.docid}`, `/prune/${org}/${defaultRoom.docid}`]) {
+    const res = await fetch(`http://${utils.yhubHost}${path}`, { method: 'POST', body: /** @type {Uint8Array<ArrayBuffer>} */ (buffer.encodeAny({ from: 1 })) })
+    t.assert(res.status === 404, `${path} must 404`)
+  }
+  // the old ws path hits no route - uws answers 404 and the upgrade fails
+  const rejected = await new Promise(resolve => {
+    const sock = new WebSocket(`ws://${utils.yhubHost}/ws/${org}/${defaultRoom.docid}`)
+    sock.on('error', () => resolve(true))
+    sock.on('open', () => { sock.close(); resolve(false) })
+  })
+  t.assert(rejected, 'old ws route must reject the upgrade')
 }
 
 // /**
@@ -863,7 +901,7 @@ export const testGetYdocEmptyAwarenessOmitsField = async tc => {
 //   })
 //
 //   // Call activity API with delta=true and group=false - this combination previously caused errors
-//   const activity = await fetchYhubResponse(`/activity/${defaultRoom.org}/${defaultRoom.docid}?delta=true&group=false`)
+//   const activity = await fetchYhubResponse(`/api/activity/v1/${defaultRoom.org}/${defaultRoom.docid}?delta=true&group=false`)
 //   console.log('activity result', JSON.stringify(activity))
 //   t.assert(Array.isArray(activity))
 // }

@@ -1,6 +1,5 @@
 import * as uws from 'uws'
 import * as error from 'lib0/error'
-import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 import * as f from 'lib0/function'
 import * as object from 'lib0/object'
@@ -8,13 +7,12 @@ import * as promise from 'lib0/promise'
 import * as Y from '@y/y'
 import * as s from 'lib0/schema'
 import * as time from 'lib0/time'
-import * as number from 'lib0/number'
 import * as t from './types.js'
 import * as protocol from './protocol.js'
 import * as math from 'lib0/math'
-import * as buffer from 'lib0/buffer'
 import { mergeUpdates } from './y-utils.js'
-import { setCorsHeaders, sendErrorResponse, authenticateRequest, registerApi } from './api.js'
+import { registerApi, resolveApiPrefix } from './api.js'
+import { parseCustomAttributionsParam } from './builtin-api.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'ws' })
@@ -32,13 +30,6 @@ const createContentMapFromParams = (contentids, userid, customAttributions) => {
     [Y.createContentAttribute('delete', userid), Y.createContentAttribute('deleteAt', now), ...customAttributions.map(attr => Y.createContentAttribute('delete:' + attr.k, attr.v))]
   ))
 }
-
-/**
- * @param {string|undefined} param
- * @returns {Array<{k: string, v: string}>}
- */
-const parseCustomAttributionsParam = (param) =>
-  param ? param.split(',').map(entry => { const [k, ...rest] = entry.split(':'); return { k, v: rest.join(':') } }) : []
 
 /**
  * @param {uws.HttpRequest} req
@@ -93,8 +84,9 @@ export const createYHubServer = async (yhub, conf) => {
   const app = uws.App({})
   const yhubServer = new YHubServer(yhub, conf, app)
   yhub.server = yhubServer
-  registerWebsocketServer(yhub, app)
-  // The REST API defined in `API.md`
+  // resolve once, before any route registration - an invalid prefix fails fast
+  const prefix = resolveApiPrefix(yhub)
+  registerWebsocketServer(yhub, app, prefix)
 
   // Handle CORS preflight requests
   app.options('/*', (res, req) => {
@@ -110,395 +102,7 @@ export const createYHubServer = async (yhub, conf) => {
     })
   })
 
-  // GET /ydoc/{org}/{docid} - Retrieve the Yjs document
-  app.get('/ydoc/:org/:docid', async (res, req) => {
-    const room = reqToRoom(req)
-    const gc = req.getQuery('gc') !== 'false'
-    const includeAwareness = req.getQuery('awareness') === 'true'
-    log.debug({ endpoint: 'GET /ydoc', room }, 'api request')
-    let aborted = false
-    res.onAborted(() => {
-      aborted = true
-    })
-    const authResult = await authenticateRequest(yhub, req, room, 'r')
-    if ('error' in authResult) {
-      if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
-      return
-    }
-    try {
-      const { gcDoc, nongcDoc, awareness } = await yhub.getDoc(room, { gc, nongc: !gc, awareness: includeAwareness }, { gcOnMerge: false })
-      const ydoc = gcDoc || nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
-      if (aborted) return
-      /** @type {{ doc: Uint8Array, awareness?: Uint8Array }} */
-      const body = { doc: ydoc }
-      // mergeAwarenessUpdates returns wire-format (messageAwareness uint + varUint8Array).
-      // Strip the wrapper so the caller gets bare bytes consumable by applyAwarenessUpdate
-      // and by the PATCH /ydoc `awareness` field.
-      if (awareness != null && awareness.byteLength > 3) {
-        const dec = decoding.createDecoder(awareness)
-        decoding.readVarUint(dec)
-        body.awareness = decoding.readVarUint8Array(dec)
-      }
-      const encoder = encoding.createEncoder()
-      encoding.writeAny(encoder, body)
-      const response = encoding.toUint8Array(encoder)
-      res.cork(() => {
-        setCorsHeaders(res)
-        res.writeStatus('200 OK')
-        res.writeHeader('Content-Type', 'application/octet-stream')
-        res.end(response)
-      })
-    } catch (err) {
-      log.error({ err, room }, 'error handling ydoc request')
-      if (aborted) return
-      sendErrorResponse(res, '500 Internal Server Error', { error: 'Failed to retrieve document' })
-    }
-  })
-
-  // PATCH /ydoc/{org}/{docid} - Update the Yjs document
-  app.patch('/ydoc/:org/:docid', (res, req) => {
-    const room = reqToRoom(req)
-    log.debug({ endpoint: 'PATCH /ydoc', room }, 'api request')
-    const authPromise = authenticateRequest(yhub, req, room, 'rw')
-    let buffer = Buffer.allocUnsafe(0)
-    let aborted = false
-    res.onAborted(() => {
-      aborted = true
-    })
-    /**
-     * @param {Buffer} buffer
-     */
-    const handleUpdateRequest = async buffer => {
-      const authResult = await authPromise
-      if (aborted) return
-      if ('error' in authResult) {
-        sendErrorResponse(res, authResult.status, { error: authResult.error })
-        return
-      }
-      try {
-        const decoder = decoding.createDecoder(buffer)
-        const decodedBody = decoding.readAny(decoder)
-        if (s.$object({ update: s.$uint8Array.optional, awareness: s.$uint8Array.optional, customAttributions: s.$array(s.$object({ k: s.$string, v: s.$string })).optional }).check(decodedBody) && (decodedBody.update != null || decodedBody.awareness != null)) {
-          const { update, awareness, customAttributions = [] } = decodedBody
-          if (update != null) {
-            // Get current document state to diff against
-            const { gcDoc, nongcDoc } = await yhub.getDoc(room, { gc: true, nongc: false }, { gcOnMerge: false })
-            const currentDoc = gcDoc || nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
-            const result = await yhub.computePool.patchYdoc({
-              update,
-              currentDoc,
-              userid: authResult.authInfo.userid,
-              customAttributions
-            }, { room })
-            if (result != null) {
-              await yhub.stream.addMessage(room, { type: 'ydoc:update:v1', contentmap: result.contentmap, update: result.update })
-            }
-          }
-          if (awareness != null) {
-            await yhub.stream.addMessage(room, { type: 'awareness:v1', update: awareness })
-          }
-          if (!aborted) {
-            const encoder = encoding.createEncoder()
-            encoding.writeAny(encoder, { success: true, message: 'Document updated' })
-            const response = encoding.toUint8Array(encoder)
-            res.cork(() => {
-              setCorsHeaders(res)
-              res.writeStatus('200 OK')
-              res.writeHeader('Content-Type', 'application/octet-stream')
-              res.end(response)
-            })
-          }
-          return
-        }
-      } catch (_err) {
-        log.warn({ err: _err }, 'error parsing update request')
-      }
-      if (!aborted) {
-        sendErrorResponse(res, '400 Bad Request', { error: 'Invalid request body' })
-      }
-    }
-    res.onData((chunk, isLast) => {
-      const chunkBuffer = Buffer.from(chunk)
-      buffer = Buffer.concat([buffer, chunkBuffer])
-      if (isLast) {
-        handleUpdateRequest(buffer).catch(err => {
-          log.error({ err }, 'error handling update request')
-          if (!aborted) sendErrorResponse(res, '500 Internal Server Error', { error: 'Internal server error' })
-        })
-      }
-    })
-  })
-
-  // POST /rollback/{guid} - Rollback changes matching the pattern
-  app.post('/rollback/:org/:docid', (res, req) => {
-    const room = reqToRoom(req)
-    log.debug({ endpoint: 'POST /rollback', room }, 'api request')
-    const authPromise = authenticateRequest(yhub, req, room, 'rw')
-    let buffer = Buffer.allocUnsafe(0)
-    let aborted = false
-    res.onAborted(() => {
-      aborted = true
-    })
-    /**
-     * @param {Buffer} buffer
-     */
-    const handleRollbackRequest = async buffer => {
-      const authResult = await authPromise
-      if (aborted) return
-      if ('error' in authResult) {
-        sendErrorResponse(res, authResult.status, { error: authResult.error })
-        return
-      }
-      try {
-        const decoder = decoding.createDecoder(buffer)
-        // body structure: { from?: number, to?: number, by?: string, contentIds?: buffer }
-        const decodedBody = decoding.readAny(decoder)
-        if (s.$object({ from: s.$number.optional, to: s.$number.optional, by: s.$string.optional, contentIds: s.$uint8Array.optional, customAttributions: s.$array(s.$object({ k: s.$string, v: s.$string })).optional, withCustomAttributions: s.$array(s.$object({ k: s.$string, v: s.$string })).optional }).check(decodedBody)) {
-          const { from, to, by, contentIds: contentIdsBin, customAttributions = [], withCustomAttributions = null } = decodedBody
-          if (!from && !to && !by && !contentIdsBin && (withCustomAttributions ?? []).length === 0) {
-            !aborted && sendErrorResponse(res, '400 Bad Request', { error: 'Rollback requires at least one filter (from, to, by, contentIds, or withCustomAttributions)' })
-            return
-          }
-          const { contentmap: contentmapBin, nongcDoc } = await yhub.getDoc(room, { nongc: true, contentmap: true })
-          const { update, contentmap } = await yhub.computePool.rollback({
-            nongcDoc,
-            contentmapBin,
-            from,
-            to,
-            by,
-            contentIds: contentIdsBin,
-            withCustomAttributions,
-            userid: authResult.authInfo.userid,
-            customAttributions
-          }, { room })
-          if (update) {
-            await yhub.stream.addMessage(room, {
-              type: 'ydoc:update:v1',
-              update,
-              contentmap
-            })
-          }
-          if (!aborted) {
-            const encoder = encoding.createEncoder()
-            encoding.writeAny(encoder, { success: true, message: 'Rollback completed' })
-            const response = encoding.toUint8Array(encoder)
-            res.cork(() => {
-              setCorsHeaders(res)
-              res.writeStatus('200 OK')
-              res.writeHeader('Content-Type', 'application/octet-stream')
-              res.end(response)
-            })
-          }
-          return
-        }
-        // couldn't parse correctly. throw error
-      } catch (err) {
-        log.warn({ err }, 'error parsing rollback request')
-      }
-      if (!aborted) {
-        sendErrorResponse(res, '400 Bad Request', { error: 'error consuming request' })
-      }
-    }
-    res.onData((chunk, isLast) => {
-      const chunkBuffer = Buffer.from(chunk)
-      buffer = Buffer.concat([buffer, chunkBuffer])
-      if (isLast) {
-        handleRollbackRequest(buffer).catch(err => {
-          log.error({ err }, 'error handling rollback request')
-          if (!aborted) sendErrorResponse(res, '500 Internal Server Error', { error: 'Internal server error' })
-        })
-      }
-    })
-  })
-
-  // POST /prune/{guid} - Permanently prune churned history (content inserted and deleted within the range)
-  app.post('/prune/:org/:docid', (res, req) => {
-    const room = reqToRoom(req)
-    log.debug({ endpoint: 'POST /prune', room }, 'api request')
-    const authPromise = authenticateRequest(yhub, req, room, 'rw')
-    let buffer = Buffer.allocUnsafe(0)
-    let aborted = false
-    res.onAborted(() => {
-      aborted = true
-    })
-    /**
-     * @param {Buffer} buffer
-     */
-    const handlePruneRequest = async buffer => {
-      const authResult = await authPromise
-      if (aborted) return
-      if ('error' in authResult) {
-        sendErrorResponse(res, authResult.status, { error: authResult.error })
-        return
-      }
-      try {
-        const decoder = decoding.createDecoder(buffer)
-        // body structure: { from?: number, to?: number, by?: string, contentIds?: buffer }
-        const decodedBody = decoding.readAny(decoder)
-        if (s.$object({ from: s.$number.optional, to: s.$number.optional, by: s.$string.optional, contentIds: s.$uint8Array.optional, withCustomAttributions: s.$array(s.$object({ k: s.$string, v: s.$string })).optional }).check(decodedBody)) {
-          const { from, to, by, contentIds, withCustomAttributions = null } = decodedBody
-          if (!from && !to && !by && !contentIds && (withCustomAttributions ?? []).length === 0) {
-            !aborted && sendErrorResponse(res, '400 Bad Request', { error: 'Prune requires at least one filter (from, to, by, contentIds, or withCustomAttributions)' })
-            return
-          }
-          await yhub.pruneDoc(room, { from, to, by, contentIds, withCustomAttributions })
-          if (!aborted) {
-            const encoder = encoding.createEncoder()
-            encoding.writeAny(encoder, { success: true, message: 'Prune completed' })
-            const response = encoding.toUint8Array(encoder)
-            res.cork(() => {
-              setCorsHeaders(res)
-              res.writeStatus('200 OK')
-              res.writeHeader('Content-Type', 'application/octet-stream')
-              res.end(response)
-            })
-          }
-          return
-        }
-        // couldn't parse correctly. throw error
-      } catch (err) {
-        log.warn({ err }, 'error parsing prune request')
-      }
-      if (!aborted) {
-        sendErrorResponse(res, '400 Bad Request', { error: 'error consuming request' })
-      }
-    }
-    res.onData((chunk, isLast) => {
-      const chunkBuffer = Buffer.from(chunk)
-      buffer = Buffer.concat([buffer, chunkBuffer])
-      if (isLast) {
-        handlePruneRequest(buffer).catch(err => {
-          log.error({ err }, 'error handling prune request')
-          if (!aborted) sendErrorResponse(res, '500 Internal Server Error', { error: 'Internal server error' })
-        })
-      }
-    })
-  })
-
-  // GET /changeset/{guid} - Get attributed changes and document states
-  app.get('/changeset/:org/:docid', async (res, req) => {
-    const room = reqToRoom(req)
-    log.debug({ endpoint: 'GET /changeset', room }, 'api request')
-    const by = req.getQuery('by')
-    const _from = req.getQuery('from')
-    const _to = req.getQuery('to')
-    const from = _from == null ? null : number.parseInt(_from)
-    const to = _to == null ? null : number.parseInt(_to)
-    const includeYdoc = req.getQuery('ydoc') === 'true'
-    const includeDelta = req.getQuery('delta') === 'true'
-    const includeAttributions = req.getQuery('attributions') === 'true'
-    const withCustomAttributionsParam = req.getQuery('withCustomAttributions')
-    /** @type {Array<{k: string, v: string}>|null} */
-    const withCustomAttributions = withCustomAttributionsParam ? parseCustomAttributionsParam(withCustomAttributionsParam) : null
-    let aborted = false
-    res.onAborted(() => {
-      aborted = true
-      log.debug('request aborted')
-    })
-    const authResult = await authenticateRequest(yhub, req, room, 'r')
-    if ('error' in authResult) {
-      if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
-      return
-    }
-    try {
-      const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeYdoc), String(includeDelta), String(includeAttributions), withCustomAttributionsParam || '']
-      const responseData = await yhub.stream.cachedGet('changeset', cacheArgs, async () => {
-        const { nongcDoc, contentmap: contentmapBin } = await yhub.getDoc(room, { nongc: true, contentmap: true })
-        return yhub.computePool.changeset({
-          nongcDoc,
-          contentmapBin,
-          from,
-          to,
-          by: by || '',
-          withCustomAttributions,
-          includeYdoc,
-          includeDelta,
-          includeAttributions
-        }, { room })
-      })
-      if (!aborted) {
-        res.cork(() => {
-          setCorsHeaders(res)
-          res.writeStatus('200 OK')
-          res.writeHeader('Content-Type', 'application/octet-stream')
-          res.end(responseData)
-        })
-      }
-    } catch (err) {
-      log.error({ err, room }, 'error handling changeset request')
-      if (!aborted) sendErrorResponse(res, '500 Internal Server Error', { error: 'Failed to compute changeset' })
-    }
-  })
-
-  // GET /activity/{guid} - Get all editing timestamps for a document
-  app.get('/activity/:org/:docid', async (res, req) => {
-    const room = reqToRoom(req)
-    log.debug({ endpoint: 'GET /activity', room }, 'api request')
-    const by = req.getQuery('by')
-    const from = number.parseInt(req.getQuery('from') || '0')
-    const to = number.parseInt(req.getQuery('to') || number.MAX_SAFE_INTEGER.toString())
-    const includeDelta = req.getQuery('delta') === 'true'
-    const includeYdoc = req.getQuery('ydoc') === 'true'
-    const includeAttributions = req.getQuery('attributions') === 'true'
-    const limit = number.parseInt(req.getQuery('limit') || number.MAX_SAFE_INTEGER.toString())
-    const reverse = req.getQuery('order') === 'desc'
-    const group = req.getQuery('group') !== 'false'
-    const groupMaxGap = number.parseInt(req.getQuery('groupMaxGap') || '1000')
-    const groupMaxDuration = number.parseInt(req.getQuery('groupMaxDuration') || number.MAX_SAFE_INTEGER.toString())
-    const withCustomAttributionsParam = req.getQuery('withCustomAttributions')
-    /** @type {Array<{k: string, v: string}>|null} */
-    const withCustomAttributions = withCustomAttributionsParam ? parseCustomAttributionsParam(withCustomAttributionsParam) : null
-    const includeCustomAttributions = req.getQuery('customAttributions') === 'true'
-    const contentIdsParam = req.getQuery('contentIds')
-    const contentIdsBin = contentIdsParam ? buffer.fromBase64(contentIdsParam) : undefined
-    let aborted = false
-    res.onAborted(() => {
-      aborted = true
-      log.debug('request aborted')
-    })
-    const authResult = await authenticateRequest(yhub, req, room, 'r')
-    if ('error' in authResult) {
-      if (!aborted) sendErrorResponse(res, authResult.status, { error: authResult.error })
-      return
-    }
-    try {
-      const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by || '', String(includeDelta), String(includeYdoc), String(includeAttributions), String(limit), reverse ? 'desc' : 'asc', String(group), String(groupMaxGap), String(groupMaxDuration), withCustomAttributionsParam || '', String(includeCustomAttributions), contentIdsParam || '']
-      const responseData = await yhub.stream.cachedGet('activity', cacheArgs, async () => {
-        const { contentmap: contentmapBin, nongcDoc } = await yhub.getDoc(room, { nongc: true, contentmap: true })
-        return yhub.computePool.activity({
-          nongcDoc,
-          contentmapBin,
-          from,
-          to,
-          by: by || '',
-          contentIds: contentIdsBin,
-          withCustomAttributions,
-          includeCustomAttributions,
-          includeDelta,
-          includeYdoc,
-          includeAttributions,
-          limit,
-          reverse,
-          group,
-          groupMaxGap,
-          groupMaxDuration
-        }, { room })
-      })
-      if (!aborted) {
-        res.cork(() => {
-          setCorsHeaders(res)
-          res.writeStatus('200 OK')
-          res.writeHeader('Content-Type', 'application/octet-stream')
-          res.end(responseData)
-        })
-      }
-    } catch (err) {
-      log.error({ err, room }, 'error handling activity request')
-      if (!aborted) sendErrorResponse(res, '500 Internal Server Error', { error: 'Failed to compute activity' })
-    }
-  })
-
-  // custom rest endpoints defined in `conf.server.api` - served under `/{apiPrefix}/{version}/{name}/...`
+  // built-in + custom rest endpoints - served under `/{apiPrefix}/{name}/{version}/...`
   registerApi(yhub, app)
 
   await promise.create((resolve, reject) => {
@@ -698,10 +302,11 @@ class WSUser {
 /**
  * @param {import('./index.js').YHub} yhub
  * @param {uws.TemplatedApp} app
+ * @param {string} prefix
  */
-const registerWebsocketServer = (yhub, app) => {
+const registerWebsocketServer = (yhub, app, prefix) => {
   const maxDocSize = s.$number.cast(yhub.conf.server?.maxDocSize)
-  app.ws('/ws/:org/:docid', /** @type {uws.WebSocketBehavior<{ user: WSUser }>} */ ({
+  app.ws(`/${prefix}/ws/v1/:org/:docid`, /** @type {uws.WebSocketBehavior<{ user: WSUser }>} */ ({
     compression: uws.DISABLED,
     maxPayloadLength: maxDocSize,
     maxBackpressure: math.round(maxDocSize * 1.2),

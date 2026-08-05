@@ -284,7 +284,7 @@ export const createAuthPlugin = authDef => authDef
  * @typedef {object} ApiRequestBase
  * @property {import('./index.js').YHub} ApiRequestBase.yhub
  * @property {'get'|'post'|'put'|'patch'|'delete'} ApiRequestBase.method
- * @property {string} ApiRequestBase.path - the request path, e.g. '/api/v1/comments/acme/readme'
+ * @property {string} ApiRequestBase.path - the request path, e.g. '/api/comments/v1/acme/readme'
  * @property {{ [name: string]: string }} ApiRequestBase.params - the named path segments declared via `path`
  * @property {{ [name: string]: string }} ApiRequestBase.headers - lowercased request headers
  * @property {UserAuthInfo} ApiRequestBase.authInfo
@@ -338,7 +338,7 @@ export const createAuthPlugin = authDef => authDef
  */
 
 /**
- * A custom rest endpoint served at `/{apiPrefix}/{version}/{name}/...` (default prefix: `api`,
+ * A custom rest endpoint served at `/{apiPrefix}/{name}/{version}/...` (default prefix: `api`,
  * see `server.apiPrefix`) - see API.md. One name may serve
  * several routes with distinct url depths (e.g. a collection plus an item route via
  * `path: '/:commentId'`). Handlers are typed by `scope`: doc-scoped handlers receive a non-null
@@ -444,14 +444,14 @@ export const $config = s.$object({
     port: s.$number,
     auth: $authPlugin,
     /**
-     * Custom rest endpoints served under `/{apiPrefix}/{version}/{name}/...`. See API.md.
+     * Custom rest endpoints served under `/{apiPrefix}/{name}/{version}/...`. See API.md.
      * @type {s.$Optional<s.Schema<Array<ApiEndpoint>>>}
      */
     api: /** @type {s.$Optional<s.Schema<Array<ApiEndpoint>>>} */ (s.$array(s.$objectAny).optional),
     /**
-     * First path segment under which the custom `api` endpoints are served - e.g.
-     * 'collaboration' serves them at `/collaboration/{version}/{name}/...` (default: 'api').
-     * A single path segment; must not collide with built-in routes.
+     * First path segment under which all endpoints are served - built-in and custom rest
+     * endpoints plus the websocket route `/{apiPrefix}/ws/v1/...` - e.g. 'collaboration' serves
+     * everything at `/collaboration/{name}/{version}/...` (default: 'api'). A single path segment.
      */
     apiPrefix: s.$string.optional,
     /**

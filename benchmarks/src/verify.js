@@ -32,7 +32,7 @@ const WsPolyfill = /** @type {any} */ (class extends WebSocket {
  */
 const realClient = docid => {
   const ydoc = new Y.Doc({ guid: docid })
-  const provider = new WebsocketProvider(`ws://localhost:${config.hub.basePort}/ws/${config.hub.org}`, docid, ydoc, {
+  const provider = new WebsocketProvider(`ws://localhost:${config.hub.basePort}/api/ws/v1/${config.hub.org}`, docid, ydoc, {
     WebSocketPolyfill: WsPolyfill,
     socketTimeout: 1000_000,
     disableBc: true,

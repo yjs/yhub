@@ -6,8 +6,8 @@
 // shared yhub deployment.
 //
 // Differences from the in-process `yhub.agentTask` (src/agents.js):
-// - Drives the workflow entirely through `GET /ydoc?awareness=true` and
-//   `PATCH /ydoc` (no Redis / stream access).
+// - Drives the workflow entirely through `GET /api/ydoc/v1?awareness=true` and
+//   `PATCH /api/ydoc/v1` (no Redis / stream access).
 // - No `author` / `promptBy` / `displayedAuthor` — those become responsibilities
 //   of the caller. The handler can call `awareness.setLocalState(...)` to seed
 //   any presence state it wants (and the live-PATCH loop ships it).
@@ -91,7 +91,7 @@ export const restAgentTask = async (
   { customAttributions = [], clearAwareness = 0, fetchInit = {} } = {},
   handler
 ) => {
-  const docUrl = `${baseUrl}/ydoc/${encodeURIComponent(org)}/${encodeURIComponent(docid)}?branch=${encodeURIComponent(branch)}`
+  const docUrl = `${baseUrl}/api/ydoc/v1/${encodeURIComponent(org)}/${encodeURIComponent(docid)}?branch=${encodeURIComponent(branch)}`
 
   // Fetch the current state (gc'd) and any existing awareness in one go.
   const initial = await restGet(`${docUrl}&awareness=true`, fetchInit)

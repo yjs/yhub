@@ -275,7 +275,7 @@ services:
 Clients connect via WebSocket with auth token as query parameter:
 
 ```
-ws://localhost:3000/ws/{org}/{docid}?yauth={token}&branch={branch}
+ws://localhost:3000/api/ws/v1/{org}/{docid}?yauth={token}&branch={branch}
 ```
 
 - `org` - Organization/namespace

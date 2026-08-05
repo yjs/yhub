@@ -32,7 +32,7 @@ export class RawClient {
    * @param {boolean} [opts.gc]
    */
   constructor ({ port, docid, org = config.hub.org, branch = 'main', gc = true }) {
-    this.url = `ws://localhost:${port}/ws/${encodeURIComponent(org)}/${encodeURIComponent(docid)}?branch=${branch}&gc=${gc}`
+    this.url = `ws://localhost:${port}/api/ws/v1/${encodeURIComponent(org)}/${encodeURIComponent(docid)}?branch=${branch}&gc=${gc}`
     this.docid = docid
     /** @type {WebSocket|null} */
     this.ws = null

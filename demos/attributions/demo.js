@@ -34,7 +34,7 @@ const authToken = await fetch(`http://${location.host}/auth/token`).then(request
 
 const ydoc = new Y.Doc()
 const yhubHost = 'localhost:3002'
-const provider = new WebsocketProvider(`ws://${yhubHost}/ws`, room, ydoc, { params: { yauth: authToken }, disableBc: true })
+const provider = new WebsocketProvider(`ws://${yhubHost}/api/ws/v1`, room, ydoc, { params: { yauth: authToken }, disableBc: true })
 
 // The auth token expires eventually (by default in one hour)
 // Periodically pull a new auth token (e.g. every 30 minutes) and update the auth parameter
@@ -130,7 +130,7 @@ const populateSelect = (select, timestamps) => {
 
 const fetchTimestamps = async () => {
   try {
-    const response = await fetch(`http://${yhubHost}/activity/${room}`)
+    const response = await fetch(`http://${yhubHost}/api/activity/v1/${room}`)
     const data = await response.arrayBuffer()
     const decoder = decoding.createDecoder(new Uint8Array(data))
     const { timestamps } = decoding.readAny(decoder)
@@ -159,7 +159,7 @@ renderBtn.addEventListener('click', async () => {
     return
   }
   try {
-    const response = await fetch(`http://${yhubHost}/changeset/${room}?from=${from}&to=${to}&delta=true&ydoc=true`)
+    const response = await fetch(`http://${yhubHost}/api/changeset/v1/${room}?from=${from}&to=${to}&delta=true&ydoc=true`)
     const data = await response.arrayBuffer()
     const decoder = decoding.createDecoder(new Uint8Array(data))
     const result = decoding.readAny(decoder)
@@ -194,7 +194,7 @@ rollbackBtn.addEventListener('click', async () => {
     const encoder = encoding.createEncoder()
     encoding.writeAny(encoder, { from: Number(from), to: Number(to) })
     const body = encoding.toUint8Array(encoder)
-    const response = await fetch(`http://${yhubHost}/rollback/${room}`, {
+    const response = await fetch(`http://${yhubHost}/api/rollback/v1/${room}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/octet-stream'

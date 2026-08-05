@@ -22,7 +22,7 @@ Optionally, you may fork the document to a branch, which users can use for
 implementing suggestions. Branched documents have a gc'd version and a non-gc'd
 version as well.
 
-* `ws://{host}/ws/{org}/{docid}` parameters: `{ gc?: boolean, branch?: string, customAttributions?: string }`
+* `ws://{host}/api/ws/v1/{org}/{docid}` parameters: `{ gc?: boolean, branch?: string, customAttributions?: string }`
   * `gc=true` (default): standard garbage-collected document
   * `gc=false`: full document history which can be used to reconstruct editing history.
   * `branch="main"`: (default) The default branch-name if not specified otherwise.
@@ -33,22 +33,22 @@ version as well.
 
 Retrieve and update the Yjs document via REST API.
 
-#### GET /ydoc/{org}/{docid}
+#### GET /api/ydoc/v1/{org}/{docid}
 
 Retrieve the current state of the Yjs document.
 
-* `GET /ydoc/{org}/{docid}` parameters: `{ gc?: boolean, branch?: string, awareness?: boolean }`
+* `GET /api/ydoc/v1/{org}/{docid}` parameters: `{ gc?: boolean, branch?: string, awareness?: boolean }`
   * `gc=true` (default): retrieve the garbage-collected document
   * `gc=false`: retrieve the full document history (non-gc version)
   * `branch="main"` (default): the branch to retrieve
   * `awareness=true`: also include the room's merged awareness state in the response (default: omitted)
-  * Returns `{ doc: Uint8Array, awareness?: Uint8Array }`. `doc` is the encoded Yjs document update. `awareness`, when requested and non-empty, contains the bare awareness update bytes (same format as `encodeAwarenessUpdate(...)` and as the `awareness` field accepted by `PATCH /ydoc`) — directly consumable by `applyAwarenessUpdate`. Omitted when the room has no awareness state.
+  * Returns `{ doc: Uint8Array, awareness?: Uint8Array }`. `doc` is the encoded Yjs document update. `awareness`, when requested and non-empty, contains the bare awareness update bytes (same format as `encodeAwarenessUpdate(...)` and as the `awareness` field accepted by `PATCH /api/ydoc/v1`) — directly consumable by `applyAwarenessUpdate`. Omitted when the room has no awareness state.
 
-#### PATCH /ydoc/{org}/{docid}
+#### PATCH /api/ydoc/v1/{org}/{docid}
 
 Update the Yjs document with new changes. Requires write access.
 
-* `PATCH /ydoc/{org}/{docid}` body: `{ update?: Uint8Array, awareness?: Uint8Array, customAttributions?: Array<{ k: string, v: string }> }` parameters: `{ branch?: string }`
+* `PATCH /api/ydoc/v1/{org}/{docid}` body: `{ update?: Uint8Array, awareness?: Uint8Array, customAttributions?: Array<{ k: string, v: string }> }` parameters: `{ branch?: string }`
   * `update`: optional Yjs update (encoded via `Y.encodeStateAsUpdate` or similar). Diffed against the current document state — only new content is applied and attributed. Attributions are automatically assigned to the authenticated user.
   * `awareness`: optional awareness update bytes — the bare output of `encodeAwarenessUpdate(awareness, clientIds)` from `@y/protocols/awareness` (no `messageAwareness` wire-format prefix). Distributed to connected clients through the same Redis channel the WebSocket path uses.
   * `customAttributions`: optional array of key-value pairs to attach as custom attributions to the `update`'s changes. Stored as `insert:<key>` / `delete:<key>` attribution attributes alongside the standard ones. Has no effect when only `awareness` is supplied.
@@ -65,7 +65,7 @@ import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 
 // Retrieve the current document
-const getResponse = await fetch('/ydoc/my-org/my-doc-id')
+const getResponse = await fetch('/api/ydoc/v1/my-org/my-doc-id')
 const getBuffer = await getResponse.arrayBuffer()
 const getDecoder = decoding.createDecoder(new Uint8Array(getBuffer))
 const { doc } = decoding.readAny(getDecoder)
@@ -83,7 +83,7 @@ const encoder = encoding.createEncoder()
 encoding.writeAny(encoder, { update })
 const body = encoding.toUint8Array(encoder)
 
-const patchResponse = await fetch('/ydoc/my-org/my-doc-id', {
+const patchResponse = await fetch('/api/ydoc/v1/my-org/my-doc-id', {
   method: 'PATCH',
   headers: { 'Content-Type': 'application/octet-stream' },
   body
@@ -95,7 +95,7 @@ const patchResponse = await fetch('/ydoc/my-org/my-doc-id', {
 Rollback all changes that match the pattern. The changes will be distributed via
 websockets.
 
-* `POST /rollback/{org}/{docid}` body: `{ from?: number, to?: number, by?: string, contentIds?: Y.ContentIds, customAttributions?: Array<{ k: string, v: string }>, withCustomAttributions?: Array<{ k: string, v: string }> }`
+* `POST /api/rollback/v1/{org}/{docid}` body: `{ from?: number, to?: number, by?: string, contentIds?: Y.ContentIds, customAttributions?: Array<{ k: string, v: string }>, withCustomAttributions?: Array<{ k: string, v: string }> }`
   * `from`/`to`: unix timestamp range filter
   * `by=string`: comma-separated list of user-ids that matches the attributions
   * `contentIds`: Changeset that describes the changes between two versions.
@@ -104,19 +104,19 @@ websockets.
 
 #### Example
 
-* Rollback all changes that happened after timestamp `X`: `POST /rollback/{org}/{docid}?from=X`
+* Rollback all changes that happened after timestamp `X`: `POST /api/rollback/v1/{org}/{docid}?from=X`
   * If your "versions" have timestamps, this call enables you to revert to a specific
     version of the document.
-* Rollback all changes from user-id `U` that happened between timestamp `X` and `Y`: `POST /rollback/{org}/{docid}?by=U&from=X&to=Y`
+* Rollback all changes from user-id `U` that happened between timestamp `X` and `Y`: `POST /api/rollback/v1/{org}/{docid}?by=U&from=X&to=Y`
   * This call enables you to undo all changes within a certain editing-interval.
-* Rollback all changes of a certain user between two versions: `POST /rollback/{org}/{docid}` body: `{ by: userid, contentIds: Y.createContentIdsFromDocDiff(prevYDoc, nextYDoc) }`
+* Rollback all changes of a certain user between two versions: `POST /api/rollback/v1/{org}/{docid}` body: `{ by: userid, contentIds: Y.createContentIdsFromDocDiff(prevYDoc, nextYDoc) }`
 
 ### Changeset
 
 Visualize attributed changes using either pure deltas or by retrieving the
 before and after state of a Yjs doc. Optionally, include relevant attributions.
 
-* `GET /changeset/{org}/docid` parameters: `{ from?: number, to?: number, by?: string, ydoc?: boolean, contentIds?: Y.ContentIds, delta?: boolean, attributions?: boolean, withCustomAttributions?: string }`
+* `GET /api/changeset/v1/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, ydoc?: boolean, contentIds?: Y.ContentIds, delta?: boolean, attributions?: boolean, withCustomAttributions?: string }`
   * `from`/`to`: unix timestamp range filter
   * `by=string`: comma-separated list of user-ids that matches the attributions
   * `withCustomAttributions=string`: filter by custom attributions using `key:value` pairs, comma-separated (e.g. `source:import,tag:v2`). Only changes matching all specified attributions are included.
@@ -130,9 +130,9 @@ The `ydoc` is the document at `to`; its alive content already *is* that point-in
 
 #### Example: visualize editing trail of the past day
 
-* Retrieve activity `GET /activity/{org}/{docid}?from={now-1day}`
+* Retrieve activity `GET /api/activity/v1/{org}/{docid}?from={now-1day}`
 * Optionally, bundle changes that belong to each other: `[1, 2, 70, 71] ⇒ [2, 71]` - because `1,2` and `70,71` belong to each other.
-* For each timestamp: `GET /changeset/{org}/{docid}?from=timestamps[I - 1]&to=timestamps[I]&delta=true&attributions=true`
+* For each timestamp: `GET /api/changeset/v1/{org}/{docid}?from=timestamps[I - 1]&to=timestamps[I]&delta=true&attributions=true`
 * The `delta` renders the document as it was at `to`, with the changes attributed to the `[from, to]` interval highlighted.
 
 ### Activity
@@ -140,7 +140,7 @@ The `ydoc` is the document at `to`; its alive content already *is* that point-in
 Retrieve all editing-timestamps for a certain document. Use
 the activity API and the changeset API to reconstruct an editing trail.
 
-* `GET /activity/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, groupMaxGap?: number, groupMaxDuration?: number, delta?: boolean, withCustomAttributions?: string, customAttributions?: boolean, contentIds?: string }`
+* `GET /api/activity/v1/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, groupMaxGap?: number, groupMaxDuration?: number, delta?: boolean, withCustomAttributions?: string, customAttributions?: boolean, contentIds?: string }`
   * `from`/`to`: unix timestamp range filter
   * `by=string`: comma-separated list of user-ids to filter by
   * `withCustomAttributions=string`: filter by custom attributions using `key:value` pairs, comma-separated (e.g. `source:import,tag:v2`). Only changes matching all specified attributions are included.
@@ -206,7 +206,7 @@ state* are never affected.
 > history cannot be recovered. The operation is distributed as a directive on the Redis stream and
 > applied the next time the document is retrieved or compacted.
 
-* `POST /prune/{org}/{docid}` body: `{ from?: number, to?: number, by?: string, contentIds?: Y.ContentIds, withCustomAttributions?: Array<{ k: string, v: string }> }`
+* `POST /api/prune/v1/{org}/{docid}` body: `{ from?: number, to?: number, by?: string, contentIds?: Y.ContentIds, withCustomAttributions?: Array<{ k: string, v: string }> }`
   * `from`/`to`: unix timestamp range filter. Only content whose insertion **and** deletion *both* fall within `[from, to]` is pruned.
   * `by=string`: comma-separated list of user-ids that matches the attributions
   * `contentIds`: restrict pruning to the changes described by a `Y.ContentIds`
@@ -220,14 +220,14 @@ Given the edits `insert "a"` → `delete "a"` → `insert "b"`, the activity API
 three steps. Pruning a range that contains all three collapses the churned `"a"`, so only
 `insert "b"` remains visible — the insertion of `"b"` is kept because it was never deleted.
 
-* Compact all churn within an editing interval: `POST /prune/{org}/{docid}` body: `{ from: X, to: Y }`
+* Compact all churn within an editing interval: `POST /api/prune/v1/{org}/{docid}` body: `{ from: X, to: Y }`
 * Compact only a specific user's churn in that interval: body: `{ from: X, to: Y, by: U }`
 * Compact the **entire** document history — pass an all-encompassing range: body: `{ from: 0, to: Number.MAX_SAFE_INTEGER }`
 
 ```js
 import * as buffer from 'lib0/buffer'
 
-const prune = body => fetch(`http://${yhubHost}/prune/${org}/${docid}`, {
+const prune = body => fetch(`http://${yhubHost}/api/prune/v1/${org}/${docid}`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/octet-stream' },
   body: buffer.encodeAny(body)
@@ -248,7 +248,7 @@ entries into a single step in the timeline:
 import * as buffer from 'lib0/buffer'
 
 // read the editing timeline (responses are lib0-encoded binary)
-const res = await fetch(`http://${yhubHost}/activity/${org}/${docid}?group=false`)
+const res = await fetch(`http://${yhubHost}/api/activity/v1/${org}/${docid}?group=false`)
 const activity = buffer.decodeAny(new Uint8Array(await res.arrayBuffer()))
 
 // merge activity entries `i..j`: prune everything that was inserted and deleted between them
@@ -258,13 +258,15 @@ await prune({ from: activity[i].from, to: activity[j].to })
 ### Custom API endpoints
 
 Define your own rest endpoints — served from the same process and guarded by the same auth plugin
-as the built-in endpoints — via the `server.api` config section. Every custom endpoint lives under
-`/{apiPrefix}/{version}/{name}/...`, a namespace that is **contractually reserved for your
-endpoints**: y/hub will never register a built-in route under it. The prefix defaults to `api` and
-can be renamed via `server.apiPrefix` (e.g. `apiPrefix: 'collaboration'` serves everything under
-`/collaboration/{version}/{name}/...`). It must be a single bare path segment; prefixes that would
-collide with a built-in route (`ydoc`, `rollback`, `prune`, `changeset`, `activity`, `ws`) are
-rejected at startup, which is what keeps the reservation guarantee intact for any prefix.
+as the built-in endpoints — via the `server.api` config section. Every endpoint — built-in and
+custom — lives under `/{apiPrefix}/{name}/{version}/...`. The built-in endpoints (`ydoc`,
+`rollback`, `prune`, `changeset`, `activity`, plus the websocket route at `/{apiPrefix}/ws/v1/...`)
+are default endpoints in the same namespace, so their names are taken at `v1`: a custom endpoint
+reusing a built-in name at `v1` (same url depth) throws the duplicate-endpoint error at startup,
+while a different version (e.g. `name: 'ydoc', version: 'v2'`) is free. The prefix defaults to
+`api` and can be renamed via `server.apiPrefix` (e.g. `apiPrefix: 'collaboration'` serves
+everything — built-ins included — under `/collaboration/{name}/{version}/...`). It must be a
+single bare path segment (`^[A-Za-z0-9_-]+$`).
 
 ```js
 import * as s from 'lib0/schema'
@@ -276,7 +278,7 @@ const yhub = await createYHub({
     port: 8080,
     auth: createAuthPlugin({ /* see below */ }),
     api: [
-      // doc scope (default) → GET/POST /api/v1/comments/{org}/{docid}
+      // doc scope (default) → GET/POST /api/comments/v1/{org}/{docid}
       {
         name: 'comments',
         accessPurpose: 'comments', // forwarded to getAccessType as `purpose`
@@ -293,13 +295,13 @@ const yhub = await createYHub({
           }
         }
       },
-      // item route sharing the collection's name → GET /api/v1/comments/{org}/{docid}/{commentId}
+      // item route sharing the collection's name → GET /api/comments/v1/{org}/{docid}/{commentId}
       { name: 'comments', path: '/:commentId', get: { handler: async req => await getComment(req.room, req.params.commentId) } },
-      // a breaking revision of the same endpoint → GET /api/v2/comments/{org}/{docid}
+      // a breaking revision of the same endpoint → GET /api/comments/v2/{org}/{docid}
       { name: 'comments', version: 'v2', get: { handler: async req => ({ comments: await readCommentsV2(req.room) }) } },
-      // org scope → GET /api/v1/docs/{org}
+      // org scope → GET /api/docs/v1/{org}
       { name: 'docs', scope: 'org', get: { handler: async req => ({ docs: await listDocs(req.org) }) } },
-      // global scope → GET /api/v1/stats
+      // global scope → GET /api/stats/v1
       { name: 'stats', scope: 'global', get: { handler: async req => ({ uptime: process.uptime() }) } }
     ]
   }
@@ -318,13 +320,13 @@ startup.
 |---|---|---|---|
 | `name` | `string` | — | required; a single path segment (`^[A-Za-z0-9_-]+$`). Prefer camelCase — the name doubles as a property name in future typed clients. |
 | `version` | `string` | `'v1'` | a single path segment; bump for breaking revisions of an endpoint |
-| `scope` | `'doc' \| 'org' \| 'global'` | `'doc'` | route shape: `/api/{version}/{name}/{org}/{docid}`, `/api/{version}/{name}/{org}`, or `/api/{version}/{name}` |
+| `scope` | `'doc' \| 'org' \| 'global'` | `'doc'` | route shape: `/api/{name}/{version}/{org}/{docid}`, `/api/{name}/{version}/{org}`, or `/api/{name}/{version}` |
 | `path` | `string` | `''` | extra named path segments appended to the route, e.g. `'/:commentId'` (named params only, available via `req.params`) |
 | `accessPurpose` | `string` | `null` | forwarded as `purpose` to the auth access callback (see below) |
 | `get`, `post`, `put`, `patch`, `delete` | `{ $query?, handler }` | — | method definitions; at least one is required. `handler` is the async request handler; `$query` optionally declares the supported query attributes (see below). `get` requires `'r'` access, all other methods require `'rw'`. The method object is also where future per-method options will live. |
 
 Because the prefix, names, and versions are single segments, every request under the api namespace
-has the fixed shape `/{apiPrefix}/{version}/{apiname}/...` — easy for proxies to inspect
+has the fixed shape `/{apiPrefix}/{apiname}/{version}/...` — easy for proxies to inspect
 positionally.
 
 #### Query attributes (`$query`)
@@ -341,6 +343,12 @@ answers `400 { error, code: 'invalid-query' }` — `error` names the attribute, 
 `invalid query: [limit] "abc" doesn't match number` — without invoking the handler. Attributes
 *not* declared in `$query` pass through as raw strings, and a method without `$query` receives all
 values raw.
+
+Doc-scoped endpoints may declare `branch` to constrain the requested branch (e.g.
+`branch: 'main'`, a pattern, or a union like `['main', 'preview']`). Because `branch` defaults to
+`'main'` server-side, the effective branch is validated when `?branch` is omitted — `branch:
+'main'` accepts implicit-main requests, and `req.query.branch` always equals `req.branch`.
+Undeclared `branch` passes through raw.
 
 ```js
 get: {
@@ -409,7 +417,7 @@ any time, also after `await`s:
 |---|---|---|
 | `yhub` | `YHub` | the yhub instance — query documents via `yhub.getDoc(req.room, ...)`, access `stream`, `persistence`, `computePool`, `agentTask` |
 | `method` | `string` | `'get' \| 'post' \| 'put' \| 'patch' \| 'delete'` |
-| `path` | `string` | the request path, e.g. `/api/v1/comments/acme/readme` |
+| `path` | `string` | the request path, e.g. `/api/comments/v1/acme/readme` |
 | `org` | `string \| null` | `null` for global scope |
 | `docid`, `branch`, `room` | | only set for doc scope; `branch` from `?branch=` (default `'main'`) |
 | `params` | `{ [name]: string }` | the named path segments declared via `path` |
@@ -440,7 +448,7 @@ a generic `500` without leaking internals.
 import * as buffer from 'lib0/buffer'
 
 // call a custom endpoint
-const res = await fetch(`http://${yhubHost}/api/v1/comments/${org}/${docid}`)
+const res = await fetch(`http://${yhubHost}/api/comments/v1/${org}/${docid}`)
 const { comments } = buffer.decodeAny(new Uint8Array(await res.arrayBuffer()))
 ```
 
@@ -470,8 +478,8 @@ const yhub = await createYHub(config)
 | `server` | `object \| null` | no | HTTP/WebSocket server config. Set to `null` to run without a server (worker/script mode). |
 | `server.port` | `number` | yes* | Port to listen on |
 | `server.auth` | `AuthPlugin` | yes* | Auth plugin created with `createAuthPlugin`. `getAccessType(authInfo, room, purpose)` receives the `accessPurpose` of custom api endpoints as `purpose` (null-ish otherwise). The optional `getOrgAccessType(authInfo, org, purpose)` / `getGlobalAccessType(authInfo, purpose)` callbacks authorize org-/global-scoped custom endpoints — when missing, endpoints of that scope deny all access. |
-| `server.api` | `ApiSpec[]` | no | Custom rest endpoints served under `/{apiPrefix}/{version}/{name}/...`. See [Custom API endpoints](#custom-api-endpoints). |
-| `server.apiPrefix` | `string` | no | First path segment of the custom api namespace, e.g. `'collaboration'` → `/collaboration/{version}/{name}/...`. A single path segment; must not collide with built-in routes. Default: `'api'` |
+| `server.api` | `ApiSpec[]` | no | Custom rest endpoints served under `/{apiPrefix}/{name}/{version}/...`, next to the built-in ones. See [Custom API endpoints](#custom-api-endpoints). |
+| `server.apiPrefix` | `string` | no | First path segment under which all endpoints are served — built-in and custom rest endpoints plus the websocket route `/{apiPrefix}/ws/v1/...` — e.g. `'collaboration'` → `/collaboration/{name}/{version}/...`. A single path segment. Default: `'api'` |
 | `server.maxDocSize` | `number` | no | Maximum Ydoc size in bytes, used for WebSocket payload limits. Default: 500 MB |
 | `worker` | `object \| null` | no | Background compaction worker config. Set to `null` to disable. |
 | `worker.taskConcurrency` | `number` | yes* | Maximum number of compaction tasks to process in parallel |
@@ -594,7 +602,7 @@ await yhub.unsafePersistDoc(
 
 Permanently prune *churned* history — content that was both inserted **and** deleted within the
 filtered range. The prune is distributed via the Redis stream and baked into persistence on the next
-compaction. This is the programmatic equivalent of `POST /prune/{org}/{docid}`.
+compaction. This is the programmatic equivalent of `POST /api/prune/v1/{org}/{docid}`.
 
 > **Warning:** pruning is irreversible. Live content (inserted but never deleted) and the current
 > visible document state are never affected.
@@ -714,7 +722,7 @@ yhub.agentTask(
 Behavior:
 
 * The handler's `ydoc` is a snapshot at task start; concurrent edits from other clients during the task are **not** merged back in. The handler's own edits are still distributed live.
-* `author` flows into the standard `insert` / `delete` content attributions, the same way the authenticated user-id does on the WS and REST paths. `customAttributions` entries become `insert:${k}` / `delete:${k}` attributions, matching the `customAttributions` shape accepted by `PATCH /ydoc` and the WebSocket query param. `promptBy` is sugar for one such entry and is merged with any explicit `customAttributions`.
+* `author` flows into the standard `insert` / `delete` content attributions, the same way the authenticated user-id does on the WS and REST paths. `customAttributions` entries become `insert:${k}` / `delete:${k}` attributions, matching the `customAttributions` shape accepted by `PATCH /api/ydoc/v1` and the WebSocket query param. `promptBy` is sugar for one such entry and is merged with any explicit `customAttributions`.
 * `displayedAuthor` is pre-seeded into the agent's awareness as `{ user: { name: displayedAuthor } }` so other clients can render the agent (cursor labels, presence panels). It is **never** recorded in the contentmap. The handler can replace or augment it with `awareness.setLocalState(...)`.
 * On success, awareness is cleared after `clearAwareness` seconds (default `0` = immediately; `false` = don't clear). On any error — from the handler or from the underlying stream forwarding — awareness is cleared **immediately** regardless of `clearAwareness`, and the error is re-thrown from the returned promise.
 

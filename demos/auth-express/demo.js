@@ -84,7 +84,7 @@ elemToggleConnect.addEventListener('change', () => {
   localStorage.setItem('should-connect', elemToggleConnect.checked ? 'true' : 'false')
 })
 
-const yhubUrl = 'ws://localhost:3002/ws'
+const yhubUrl = 'ws://localhost:3002/api/ws/v1'
 
 // request an auth token before trying to connect
 const authToken = await fetch(`http://${location.host}/auth/token`).then(request => request.text())

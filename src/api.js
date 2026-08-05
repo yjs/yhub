@@ -4,6 +4,7 @@ import * as number from 'lib0/number'
 import * as promise from 'lib0/promise'
 import * as s from 'lib0/schema'
 import * as t from './types.js'
+import { builtinApi } from './builtin-api.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'api' })
@@ -11,7 +12,7 @@ const log = logger.child({ module: 'api' })
 /**
  * @param {import('uws').HttpResponse} res
  */
-export const setCorsHeaders = (res) => {
+const setCorsHeaders = (res) => {
   res.writeHeader('Access-Control-Allow-Origin', '*')
   res.writeHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
   res.writeHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
@@ -22,7 +23,7 @@ export const setCorsHeaders = (res) => {
  * @param {string} status
  * @param {{ [key: string]: any, error: string }} body
  */
-export const sendErrorResponse = (res, status, body) => {
+const sendErrorResponse = (res, status, body) => {
   const response = buffer.encodeAny(body)
   res.cork(() => {
     // the status must be written before any header - otherwise uws locks the status to "200 OK"
@@ -102,36 +103,42 @@ const authenticate = async (yhub, req, requiredAccess, getAccess) => {
   }
 }
 
-/**
- * @param {import('./index.js').YHub} yhub
- * @param {import('uws').HttpRequest} req
- * @param {t.Room} room
- * @param {'r' | 'rw'} requiredAccess
- * @param {string|null} [purpose]
- */
-export const authenticateRequest = (yhub, req, room, requiredAccess, purpose = null) =>
-  authenticate(yhub, req, requiredAccess, authInfo => yhub.conf.server?.auth?.getAccessType(authInfo, room, purpose) ?? null)
-
 const apiMethods = /** @type {{ get: 'get', post: 'post', put: 'put', patch: 'patch', delete: 'del' }} */ ({ get: 'get', post: 'post', put: 'put', patch: 'patch', delete: 'del' })
 const apiSegmentRegex = /^[A-Za-z0-9_-]+$/
 
 /**
- * Register the custom rest endpoints defined in `conf.server.api` under
- * `/{apiPrefix}/{version}/{name}/...` (default prefix: `api`). See API.md.
+ * Resolve and validate `conf.server.apiPrefix` (default: 'api'). All routes - built-in rest
+ * endpoints, custom endpoints, and the websocket route - are mounted under this segment.
+ *
+ * @param {import('./index.js').YHub} yhub
+ */
+export const resolveApiPrefix = yhub => {
+  const prefix = yhub.conf.server?.apiPrefix ?? 'api'
+  if (typeof prefix !== 'string' || !apiSegmentRegex.test(prefix)) {
+    throw error.create(`invalid api prefix "${prefix}" - must be a single path segment`)
+  }
+  return prefix
+}
+
+/**
+ * Register the built-in rest endpoints and the custom endpoints defined in `conf.server.api`
+ * under `/{apiPrefix}/{name}/{version}/...` (default prefix: `api`). The built-ins register
+ * first, so a custom endpoint colliding with one fails at startup like any duplicate. See API.md.
  *
  * @param {import('./index.js').YHub} yhub
  * @param {import('uws').TemplatedApp} app
  */
 export const registerApi = (yhub, app) => {
-  const prefix = yhub.conf.server?.apiPrefix ?? 'api'
-  if (typeof prefix !== 'string' || !apiSegmentRegex.test(prefix) || ['ydoc', 'rollback', 'prune', 'changeset', 'activity', 'ws'].includes(prefix)) {
-    throw error.create(`invalid api prefix "${prefix}" - must be a single path segment that doesn't collide with built-in routes`)
-  }
+  const prefix = resolveApiPrefix(yhub)
   /**
    * @type {Set<string>}
    */
   const registered = new Set()
-  yhub.conf.server?.api?.forEach(endpoint => {
+  // the websocket endpoint is mounted at /{prefix}/ws/v1/{org}/{docid} via app.ws (see
+  // registerWebsocketServer in server.js) - occupy its route key so a colliding custom endpoint
+  // fails at startup like any duplicate
+  registered.add('ws/v1/2')
+  ;[...builtinApi, ...(yhub.conf.server?.api ?? [])].forEach(endpoint => {
     const { name, version = 'v1', scope = 'doc', path = '', accessPurpose = null } = endpoint
     if (typeof name !== 'string' || !apiSegmentRegex.test(name) || typeof version !== 'string' || !apiSegmentRegex.test(version) || (scope !== 'doc' && scope !== 'org' && scope !== 'global') || (accessPurpose !== null && typeof accessPurpose !== 'string')) {
       throw error.create(`invalid api endpoint: name="${name}" version="${version}" scope="${scope}"`)
@@ -154,12 +161,12 @@ export const registerApi = (yhub, app) => {
     const paramOffset = scope === 'doc' ? 2 : (scope === 'org' ? 1 : 0)
     // one name may serve several routes (e.g. collection + item) as long as their total segment
     // counts differ - routes of equal depth would collapse to the same uws pattern
-    const routeKey = `${version}/${name}/${paramOffset + pathParams.length}`
+    const routeKey = `${name}/${version}/${paramOffset + pathParams.length}`
     if (registered.has(routeKey)) {
       throw error.create(`duplicate api endpoint "${name}" (version "${version}", ${paramOffset + pathParams.length} url params)`)
     }
     registered.add(routeKey)
-    const pattern = `/${prefix}/${version}/${name}${scope === 'global' ? '' : '/:org'}${scope === 'doc' ? '/:docid' : ''}${path}`
+    const pattern = `/${prefix}/${name}/${version}${scope === 'global' ? '' : '/:org'}${scope === 'doc' ? '/:docid' : ''}${path}`
     const methods = /** @type {Array<keyof typeof apiMethods>} */ (Object.keys(apiMethods)).filter(method => endpoint[method] != null)
     if (methods.length === 0) {
       throw error.create(`api endpoint "${name}" defines no method handlers`)
@@ -174,12 +181,14 @@ export const registerApi = (yhub, app) => {
        * @type {((o: any) => { err: string|null, result: any })|null}
        */
       let coerceQuery = null
+      let queryDeclaresBranch = false
       if (querySpec != null) {
         const isSchema = s.$$object.check(querySpec)
         // prototype check, not `constructor === Object` - a shape may declare an attribute named "constructor"
         if (!isSchema && Object.getPrototypeOf(querySpec) !== Object.prototype && Object.getPrototypeOf(querySpec) !== null) {
           throw error.create(`api endpoint "${name}": ${method}.$query must be a shape object or s.$object(..) schema`)
         }
+        queryDeclaresBranch = scope === 'doc' && Object.hasOwn(/** @type {object} */ (isSchema ? querySpec.shape : querySpec), 'branch')
         try {
           // s.$ lifts literals to $literal, arrays to $union, passes schemas through
           coerceQuery = s.coerce(isSchema ? querySpec : s.$object(Object.fromEntries(Object.entries(querySpec).map(([key, v]) => [key, s.$(v)]))))
@@ -195,7 +204,8 @@ export const registerApi = (yhub, app) => {
         accessPurpose,
         pathParams,
         paramOffset,
-        coerceQuery
+        coerceQuery,
+        queryDeclaresBranch
       }))
     })
   })
@@ -212,9 +222,10 @@ export const registerApi = (yhub, app) => {
  * @param {Array<string>} opts.pathParams
  * @param {number} opts.paramOffset
  * @param {((o: any) => { err: string|null, result: any })|null} opts.coerceQuery
+ * @param {boolean} opts.queryDeclaresBranch
  * @returns {(res: import('uws').HttpResponse, req: import('uws').HttpRequest) => void}
  */
-const createApiHandler = (yhub, { method, handler, requiredAccess, scope, accessPurpose, pathParams, paramOffset, coerceQuery }) => (res, req) => {
+const createApiHandler = (yhub, { method, handler, requiredAccess, scope, accessPurpose, pathParams, paramOffset, coerceQuery, queryDeclaresBranch }) => (res, req) => {
   const ctx = { aborted: false }
   /**
    * @type {t.ApiRequest|null}
@@ -291,6 +302,9 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
         throw apiError(number.parseInt(authResult.status), authResult.error)
       }
       if (coerceQuery != null) {
+        // a declared `branch` attribute validates the effective branch - materialize the server
+        // default so `branch: 'main'` accepts requests that omit ?branch
+        if (queryDeclaresBranch && query.branch === undefined) query.branch = branch
         const { err, result } = coerceQuery(query)
         if (err != null) throw apiError(400, `invalid query: ${err}`, { code: 'invalid-query' })
         query = result

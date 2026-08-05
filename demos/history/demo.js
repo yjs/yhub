@@ -113,7 +113,7 @@ elemToggleRenderVersion.addEventListener('change', () => {
   }
 })
 
-const yhubUrl = 'ws://localhost:3002/ws/' + org
+const yhubUrl = 'ws://localhost:3002/api/ws/v1/' + org
 
 // request an auth token before trying to connect
 const authToken = await fetch(`http://${location.host}/auth/token`).then(request => request.text())
@@ -227,7 +227,7 @@ let currentVersionRange = null
  */
 const renderVersions = async (from, to) => {
   try {
-    const response = await fetch(`${yhubApiUrl}/changeset/${org}/${docid}?yauth=${authToken}&from=${from}&to=${to}&ydoc=true&attributions=true`)
+    const response = await fetch(`${yhubApiUrl}/api/changeset/v1/${org}/${docid}?yauth=${authToken}&from=${from}&to=${to}&ydoc=true&attributions=true`)
     if (response.ok) {
       const arrayBuffer = await response.arrayBuffer()
       const history = buffer.decodeAny(new Uint8Array(arrayBuffer))
@@ -259,7 +259,7 @@ const renderVersions = async (from, to) => {
 const rollback = async () => {
   if (currentVersionRange === null) return
   try {
-    const response = await fetch(`${yhubApiUrl}/rollback/${org}/${docid}?yauth=${authToken}`, {
+    const response = await fetch(`${yhubApiUrl}/api/rollback/v1/${org}/${docid}?yauth=${authToken}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/octet-stream'
@@ -376,7 +376,7 @@ const renderVersionList = () => {
  */
 const fetchActivity = async () => {
   try {
-    const response = await fetch(`${yhubApiUrl}/activity/${org}/${docid}?yauth=${authToken}&delta=true`)
+    const response = await fetch(`${yhubApiUrl}/api/activity/v1/${org}/${docid}?yauth=${authToken}&delta=true`)
     if (response.ok) {
       const arrayBuffer = await response.arrayBuffer()
       const data = buffer.decodeAny(new Uint8Array(arrayBuffer))

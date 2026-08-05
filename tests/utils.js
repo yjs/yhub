@@ -104,6 +104,14 @@ const testApiSpecs = [
     // no $query: this method's req.query is the untyped raw-string object
     post: { handler: async req => ({ raw: req.query }) }
   }),
+  // a declared `branch` attribute constrains the requested branch - the server default 'main' is
+  // validated when ?branch is omitted
+  createApiEndpoint('branched', {
+    get: {
+      $query: { branch: ['main', 'b2'] },
+      handler: async req => ({ branch: req.branch, qbranch: req.query.branch })
+    }
+  }),
   {
     name: 'slow',
     get: {
@@ -184,7 +192,7 @@ export const createTestHub = (conf) => {
 /**
  * @param {number} port
  */
-export const wsUrlFromPort = port => `ws://localhost:${port}/ws/${defaultOrg}`
+export const wsUrlFromPort = port => `ws://localhost:${port}/api/ws/v1/${defaultOrg}`
 
 export const defaultOrg = 'testOrg'
 export const yhubHost = `localhost:${yhubPort}`

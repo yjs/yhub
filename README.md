@@ -274,7 +274,7 @@ const authToken = await fetch('/auth/token').then(r => r.text())
 
 const ydoc = new Y.Doc()
 const provider = new WebsocketProvider(
-  'ws://localhost:3002/ws',
+  'ws://localhost:3002/api/ws/v1',
   'my-document-room',
   ydoc,
   {
@@ -394,7 +394,7 @@ across restarts, mount a volume:
 docker run -p 3002:3002 -v yhub-data:/data ghcr.io/yjs/yhub/standalone:latest
 ```
 
-Connect a Yjs client to `ws://localhost:3002/ws/my-org/my-doc` and start
+Connect a Yjs client to `ws://localhost:3002/api/ws/v1/my-org/my-doc` and start
 collaborating.
 
 > **Note:** The standalone container uses open authentication (any client can

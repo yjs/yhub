@@ -29,6 +29,61 @@ version as well.
   * `branch=string`: Optionally, define a custom branch. Changes won't be automatically synced with other branches.
   * `customAttributions=string`: optional comma-separated `key:value` pairs (e.g. `source:ai,model:gpt4`). All updates sent through this connection will include these custom attributions in the contentmap, stored as `insert:<key>` / `delete:<key>` attribution attributes alongside the standard ones.
 
+### Errors
+
+Every yhub error is either **transient** — retry with backoff — or **permanent** — retrying
+yields the same result until the app acts. Classification is by range, so clients stay correct
+when codes are added:
+
+* **WebSocket:** reconnect with backoff — unless `code >= 4400 && code < 4500`, then stop.
+* **REST:** retry `5xx` and `429` with backoff; every other `4xx` is permanent.
+
+#### WebSocket close codes
+
+| Close code | Meaning | Reconnect? |
+|---|---|---|
+| `4400`–`4499` | permanent yhub errors — `4401` permission revoked (see [`yhub.recheckAuth`](#yhubrecheckauthroom-opts); exported as `wsCloseAuthRevoked`) | no — act first (e.g. re-authenticate), then reconnect deliberately |
+| `4500`–`4599` | reserved for transient yhub errors (none sent today) | yes |
+| `1011` | internal error — initial sync, message handling, or stream relay failed | yes |
+| `1013` | try again later — backpressure limit exceeded, or the auth backend was unavailable during a re-check | yes |
+| `1002` `1003` `1008` | standard permanent codes — yhub never sends them | no |
+| *(none)* | closed without a close frame — browsers report `1006`, `@y/websocket` emits `connection-close` with `event = null` | yes |
+
+A missing close frame is routine: server shutdown, the 120s idle timeout (pings are sent
+automatically — only a dead link times out), and network or proxy failures. Always transient.
+
+A denied upgrade is HTTP, never a close code: `401` unauthenticated, `403` insufficient access,
+or the status of a branded `apiError` thrown by the auth plugin (e.g. `503` while its backend is
+down). Browsers can't observe upgrade statuses — the client only sees a failed connection
+attempt. `4401` is the explicit stop signal; a client that ignores it reconnects into a `403`
+loop against your auth backend.
+
+`@y/websocket` reconnects after **every** close, regardless of code — apply the rule in the app:
+
+```js
+provider.on('connection-close', event => {
+  // event == null: closed without a close frame - transient, keep reconnecting
+  if (event != null && event.code >= 4400 && event.code < 4500) {
+    provider.disconnect() // permanent - stop; provider.connect() re-arms after e.g. re-auth
+  }
+})
+```
+
+Future yhub close codes follow the band rule: the band is normative, the trailing digits are an
+HTTP mnemonic only — a retryable rate-limit close would be `45xx`, never `4429`.
+
+#### REST status codes
+
+Error responses carry a lib0-any encoded `{ error: string, ...extra }` body (see
+[Return values](#return-values)).
+
+| Status | Sent when | Retry? |
+|---|---|---|
+| `400` `404` `409` `422` | caller mistake — invalid body or query, missing resource, conflict | no — fix the request |
+| `401` `403` | unauthenticated / no access | no — obtain fresh credentials, then send a new request |
+| `429` | rate limited — yhub itself never sends this; reserved for proxies and custom endpoints | yes — back off first |
+| `500`–`599` | server-side failure — `500` internal error, `503` a dependency (e.g. the auth backend) is temporarily down | yes |
+
 ### Ydoc
 
 Retrieve and update the Yjs document via REST API.
@@ -444,6 +499,12 @@ code and an any-encoded `{ error: message, ...extra }` body — use `extra` for 
 fields, conventionally `{ code: 'comment-not-found' }`. Any other exception is logged and produces
 a generic `500` without leaking internals.
 
+Pick the status by retry class (see [Errors](#errors)): `4xx` when the caller must change
+something first — the request (`400`/`422`), the target (`404`), the conflict (`409`) — `503`
+(or another `5xx`) when a dependency of your handler is temporarily down, and `429` when you
+rate-limit. Clients retry `5xx` and `429` and treat everything else as permanent — don't hide a
+transient failure behind a `4xx`.
+
 ```js
 import * as buffer from 'lib0/buffer'
 
@@ -642,8 +703,9 @@ connect. The directive is distributed via the Redis stream, so it reaches connec
 servers. Each matching connection re-evaluates `auth.getAccessType(authInfo, room)` and is
 disconnected with close code `4401` (`'permission revoked'`) when its access type changed —
 including an `rw` → `r` downgrade (the client reconnects, re-authenticates, and resyncs at its new
-access level; a still-revoked client is rejected with `401 Unauthorized` at upgrade). A failing
-auth plugin fails closed: the connection is disconnected.
+access level; a still-revoked client is rejected with `403 Forbidden` at upgrade). A failing auth
+plugin fails closed: the connection is disconnected, but with the transient close code `1013`
+(`'auth recheck failed'`) — clients keep reconnecting and recover once the auth backend does.
 
 ```ts
 yhub.recheckAuth(
@@ -671,15 +733,10 @@ milliseconds, so revoke in your auth backend first. Force-disconnecting every co
 room causes a reconnect thundering herd — all clients re-run the upgrade auth and initial sync at
 once.
 
-**Client handling.** `@y/websocket` reconnects indefinitely by default — a kicked, still-revoked
-client retries every ≤2.5s, hitting your auth backend with a 401 each time. Handle the close code
-in the app:
-
-```js
-provider.on('connection-close', event => {
-  if (event?.code === 4401) provider.disconnect() // permission revoked - stop reconnecting
-})
-```
+**Client handling.** `4401` is a permanent close code — stop auto-reconnecting and re-authenticate
+(rule and snippet under [Errors](#errors)). `@y/websocket` reconnects indefinitely by default:
+without that handler a kicked, still-revoked client retries every ≤2.5s, hitting your auth backend
+with a `403` each time.
 
 **Auth plugin contract.** The re-check reuses the `authInfo` captured at connect (`readAuthInfo`
 cannot be re-run — the original HTTP request is gone). `getAccessType` must consult a live

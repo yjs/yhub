@@ -282,3 +282,6 @@ ws://localhost:3000/api/ws/v1/{org}/{docid}?yauth={token}&branch={branch}
 - `docid` - Document identifier
 - `yauth` - Authentication token
 - `branch` - Optional, defaults to "main"
+
+On disconnect, reconnect with backoff — unless the close code is in `4400`–`4499` (permanent,
+e.g. `4401` permission revoked). See [API.md → Errors](API.md#errors).

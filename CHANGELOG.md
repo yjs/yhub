@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **Error codes now encode retry semantics on both APIs — new [Errors](API.md#errors) section in the API docs.** WebSocket close codes `4400`-`4499` are permanent — don't reconnect until the app acts; today only `4401` 'permission revoked', now also exported from `@y/hub` as `wsCloseAuthRevoked` — `4500`-`4599` are reserved for transient yhub errors, and standard codes are used where they fit (`1011` internal error, `1013` try again later), all transient: clients reconnect with backoff unless `code >= 4400 && code < 4500`. REST: retry `5xx` and `429`, treat any other `4xx` as permanent. Behavior changes:
+  - An auth plugin failure during a websocket re-check now disconnects with the transient code `1013` (`'auth recheck failed'`) instead of `4401` — a temporarily unreachable auth backend no longer looks like a revoke, so clients that stop on `4401` (per the documented guidance) recover automatically once the backend is back. Signal denial from `getAccessType` by returning `null`, not by throwing. ([`src/server.js`](src/server.js))
+  - The backpressure disconnect now sends close code `1013` — previously it sent `400`, which is not a legal websocket close code (RFC 6455 allows 1000-4999), so clients actually observed an abnormal `1006` close. ([`src/server.js`](src/server.js))
+  - A websocket upgrade with insufficient access is rejected with `403 Forbidden` instead of `401 Unauthorized`, matching the REST endpoints (`401` = unauthenticated, `403` = no access). ([`src/server.js`](src/server.js))
+
+### New Features
+
+- **Auth plugins can signal a temporary auth-backend outage: throw `apiError(503, ...)`.** A branded `apiError` thrown from `readAuthInfo`/`getAccessType` propagates its status and message on rest requests and the websocket upgrade instead of the fail-closed `401`, telling clients the failure is transient. Unbranded errors keep rejecting with `401`. `503 Service Unavailable` joined the known status lines. ([`src/api.js`](src/api.js), [`src/server.js`](src/server.js), [`src/types.js`](src/types.js))
+
 ## [0.4.0]
 
 ### Breaking Changes

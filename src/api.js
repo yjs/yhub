@@ -50,14 +50,15 @@ const statusLines = {
   409: '409 Conflict',
   422: '422 Unprocessable Entity',
   429: '429 Too Many Requests',
-  500: '500 Internal Server Error'
+  500: '500 Internal Server Error',
+  503: '503 Service Unavailable'
 }
 
 /**
  * @param {number} code
  * @param {string} [reason]
  */
-const statusLine = (code, reason = '') => statusLines[code] ?? `${code} ${reason}`
+export const statusLine = (code, reason = '') => statusLines[code] ?? `${code} ${reason}`
 
 const apiErrorBrand = Symbol('apiError')
 
@@ -65,13 +66,21 @@ const apiErrorBrand = Symbol('apiError')
  * Create an error that, when thrown from an api handler, produces a response with the given http
  * status code and an any-encoded `{ error: message, ...extra }` body. Only errors created by this
  * function expose their message to clients - any other exception results in a generic 500. Use
- * `extra` for machine-readable fields, conventionally `{ code: 'comment-not-found' }`.
+ * `extra` for machine-readable fields, conventionally `{ code: 'comment-not-found' }`. Clients
+ * treat `5xx` and `429` as transient (retry with backoff) and any other `4xx` as permanent - see
+ * the Errors section in API.md.
  *
  * @param {number} status
  * @param {string} message
  * @param {{ [key: string]: any }} [extra]
  */
 export const apiError = (status, message, extra = undefined) => Object.assign(new Error(message), { status, extra, [apiErrorBrand]: true })
+
+/**
+ * @param {any} err
+ * @return {err is Error & { status: number, extra?: { [key: string]: any } }}
+ */
+export const isApiError = err => err?.[apiErrorBrand] === true
 
 /**
  * @param {import('./index.js').YHub} yhub
@@ -98,7 +107,10 @@ const authenticate = async (yhub, req, requiredAccess, getAccess) => {
       return { error: 'Forbidden', status: '403 Forbidden' }
     }
     return { authInfo, accessType }
-  } catch (_err) {
+  } catch (err) {
+    // a branded apiError (e.g. apiError(503, ...)) lets the auth plugin signal a temporary
+    // auth-backend outage instead of the fail-closed 401
+    if (isApiError(err)) throw err
     return { error: 'Unauthorized', status: '401 Unauthorized' }
   }
 }

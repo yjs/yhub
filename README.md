@@ -294,6 +294,9 @@ const ytext = ydoc.getText('content')
 ytext.insert(0, 'Hello, world!')
 ```
 
+The provider reconnects automatically on any disconnect. Stop it when the server closes with a
+permanent code (`4400`–`4499`, e.g. `4401` permission revoked) — see [API.md → Errors](API.md#errors).
+
 ### 7. Start the Server
 
 ```bash

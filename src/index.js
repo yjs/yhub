@@ -14,6 +14,7 @@ import * as time from 'lib0/time'
 
 export { createAuthPlugin, createApiEndpoint } from './types.js'
 export { apiError } from './api.js'
+export { wsCloseAuthRevoked } from './server.js'
 export { logger } from './logger.js'
 
 const log = logger.child({ module: 'worker' })
@@ -210,10 +211,11 @@ export class YHub {
    * redis stream to all servers. Each matching connection re-evaluates
    * `auth.getAccessType(authInfo, room, null)` and is disconnected (close code 4401
    * 'permission revoked') when its access type changed — the client then reconnects,
-   * re-authenticates, and resyncs at its new access level. With `forceDisconnect: true`,
-   * matching connections are disconnected without re-checking. Note that a disconnect cannot
-   * keep users out: reconnects are re-authenticated at upgrade, so revoke access in the auth
-   * plugin's authority first.
+   * re-authenticates, and resyncs at its new access level. A failing auth plugin fails closed
+   * with the transient close code 1013 ('auth recheck failed'), so clients reconnect once the
+   * auth backend recovers. With `forceDisconnect: true`, matching connections are disconnected
+   * without re-checking. Note that a disconnect cannot keep users out: reconnects are
+   * re-authenticated at upgrade, so revoke access in the auth plugin's authority first.
    *
    * `users` is an array of matchers; `null` matches every connection in the room. A string
    * matcher matches connections with that `userid`. A plain-object matcher matches a

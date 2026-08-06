@@ -256,8 +256,8 @@ export const $authPlugin = /** @type {s.Schema<AuthPlugin<any>>} */ (s.$object({
  *
  * @template {UserAuthInfo} AuthInfo
  * @typedef {object} AuthPlugin
- * @property {(req:import('uws').HttpRequest) => Promise<AuthInfo|null>} AuthPlugin.readAuthInfo - return null (or throw) to reject the request with 401
- * @property {(authInfo: AuthInfo, room: Room, purpose: string|null) => Promise<AccessType>} AuthPlugin.getAccessType:
+ * @property {(req:import('uws').HttpRequest) => Promise<AuthInfo|null>} AuthPlugin.readAuthInfo - return null (or throw) to reject the request with 401. Throw an `apiError(503, ...)` (from `@y/hub`) to signal a temporary auth-backend outage - rest requests and the websocket upgrade respond with that status instead.
+ * @property {(authInfo: AuthInfo, room: Room, purpose: string|null) => Promise<AccessType>} AuthPlugin.getAccessType - signal denial by returning null, not by throwing: an error thrown during a websocket recheck disconnects with the transient close code 1013, not the revoke code 4401.
  * @property {(authInfo: AuthInfo, org: string, purpose: string|null) => Promise<AccessType>} [AuthPlugin.getOrgAccessType]
  * @property {(authInfo: AuthInfo, purpose: string|null) => Promise<AccessType>} [AuthPlugin.getGlobalAccessType]
  */

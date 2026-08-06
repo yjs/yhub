@@ -7,7 +7,9 @@ import * as utils from './utils.js'
 import * as f from 'lib0/function'
 import * as time from 'lib0/time'
 import * as promise from 'lib0/promise'
-import { matchesAuthInfo, wsCloseAuthRevoked } from '../src/server.js'
+import * as buffer from 'lib0/buffer'
+import { apiError, wsCloseAuthRevoked } from '../src/index.js'
+import { matchesAuthInfo } from '../src/server.js'
 
 const authPrivateKey = await ecdsa.importKeyJwk({ key_ops: ['sign'], ext: true, kty: 'EC', x: '96pShK8Z3iJ8UZpN4tuyv9CuPuzwWgC_I72N6ZUNWOSBDflVxwYPtL3PcCgCF2aE', y: 'Q39u2jtATgoBd9D8Tx744v6KljwE3iOZr30Rf8yuVT3UgGEi0bcKufUGVSeKls8s', crv: 'P-384', d: 'BS_hqq6UMpuqS10oIWzEyTUt7RRQrysUMUdlwUyVimV_CTTNEpxXFW9_D0NA9rHt' })
 const authPublicKey = await ecdsa.importKeyJwk({ key_ops: ['verify'], ext: true, kty: 'EC', x: '96pShK8Z3iJ8UZpN4tuyv9CuPuzwWgC_I72N6ZUNWOSBDflVxwYPtL3PcCgCF2aE', y: 'Q39u2jtATgoBd9D8Tx744v6KljwE3iOZr30Rf8yuVT3UgGEi0bcKufUGVSeKls8s', crv: 'P-384' })
@@ -47,14 +49,15 @@ const kickHubPort = 9013
 /**
  * Mutable permission table: userid -> accessType, so tests can revoke/downgrade access of
  * connected users. Unlisted users get 'rw'. `null` is a meaningful (revoked) entry, hence the
- * explicit `undefined` check. `'throw'` makes the plugin fail for that user.
+ * explicit `undefined` check. `'throw'` makes the plugin fail for that user; `'throw503'` makes
+ * it fail with a branded `apiError(503, ...)`.
  *
- * @type {{ [userid: string]: types.AccessType | 'throw' }}
+ * @type {{ [userid: string]: types.AccessType | 'throw' | 'throw503' }}
  */
 const kickAccess = {}
 // each recheckAuth test resets the table up front rather than cleaning up at its end - a thrown
 // assert would otherwise leak a revoked entry into the next test, whose client then never syncs
-// (endless 401 reconnect loop) and hangs the suite
+// (endless 403 reconnect loop) and hangs the suite
 const resetKickAccess = () => { for (const userid in kickAccess) delete kickAccess[userid] }
 let kickAccessChecks = 0
 await utils.createTestHub({
@@ -71,6 +74,7 @@ await utils.createTestHub({
         kickAccessChecks++
         const access = kickAccess[authInfo.userid]
         if (access === 'throw') throw new Error('auth backend down')
+        if (access === 'throw503') throw apiError(503, 'auth backend unavailable')
         return access === undefined ? 'rw' : access
       }
     })
@@ -255,7 +259,8 @@ export const testRecheckAuthPendingCheckOnConnect = async tc => {
 
 /**
  * An auth plugin failure during a recheck must fail closed: the connection whose access can no
- * longer be verified is disconnected.
+ * longer be verified is disconnected - but with the transient close code 1013, not the revoke
+ * code 4401, so the client keeps reconnecting and recovers once the auth backend does.
  *
  * @param {t.TestCase} tc
  */
@@ -269,5 +274,29 @@ export const testRecheckAuthFailsClosed = async tc => {
   recordCloseCodes(carol.provider, closeCodes)
   kickAccess.carol = 'throw'
   await yhub.recheckAuth(defaultRoom, { users: ['carol'] })
-  await promise.until(5000, () => closeCodes.includes(wsCloseAuthRevoked))
+  await promise.until(5000, () => closeCodes.includes(1013))
+  t.assert(!closeCodes.includes(wsCloseAuthRevoked), 'a transient auth failure must not look like a revoke')
+  // the auth backend recovers - the still-reconnecting client syncs again
+  delete kickAccess.carol
+  await promise.until(5000, () => carol.provider.wsconnected)
+}
+
+/**
+ * An auth plugin may signal a temporary auth-backend outage by throwing a branded
+ * `apiError(503, ...)` - rest requests respond with that status and message instead of the
+ * fail-closed 401.
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testAuthPluginTransientOutageRest = async _tc => {
+  resetKickAccess()
+  const url = `http://localhost:${kickHubPort}/api/ydoc/v1/testOrg/anyDoc?user=eve`
+  kickAccess.eve = 'throw503'
+  const res503 = await fetch(url)
+  t.assert(res503.status === 503, 'a branded apiError propagates its status')
+  t.compare(buffer.decodeAny(new Uint8Array(await res503.arrayBuffer())), { error: 'auth backend unavailable' })
+  kickAccess.eve = 'throw'
+  const res401 = await fetch(url)
+  t.assert(res401.status === 401, 'an unbranded auth plugin error stays fail-closed')
+  await res401.arrayBuffer()
 }

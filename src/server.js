@@ -11,7 +11,7 @@ import * as t from './types.js'
 import * as protocol from './protocol.js'
 import * as math from 'lib0/math'
 import { mergeUpdates } from './y-utils.js'
-import { registerApi, resolveApiPrefix } from './api.js'
+import { registerApi, resolveApiPrefix, isApiError, statusLine } from './api.js'
 import { parseCustomAttributionsParam } from './builtin-api.js'
 import { logger } from './logger.js'
 
@@ -44,6 +44,11 @@ const reqToRoom = req => {
 /**
  * Close code sent when a connection is disconnected because its permissions changed (see
  * `YHub.recheckAuth`). 4000-4999 is the websocket application range.
+ *
+ * Close codes encode retry semantics (see the Errors section in API.md): 4400-4499 are
+ * permanent yhub errors - don't reconnect until the app acts - and 4500-4599 are reserved for
+ * transient yhub errors. Where a standard code fits, it is preferred: 1011 internal error and
+ * 1013 try again later, both transient.
  */
 export const wsCloseAuthRevoked = 4401
 
@@ -239,7 +244,7 @@ class WSUser {
     const sendResult = this.ws.send(m, true, false)
     if (sendResult === 2) {
       this.log.error({ socketBackpressure: this.ws?.getBufferedAmount(), maxDocSize: this.yhub.conf.server?.maxDocSize }, 'message dropped because of backpressure limit')
-      this.closeWithError(400, 'closing because of backpressure limit')
+      this.closeWithError(1013, 'closing because of backpressure limit')
     }
   }
 
@@ -248,7 +253,9 @@ class WSUser {
    * Disconnects when the access type changed — the client reconnects, re-authenticates, and
    * resyncs at its new access level (updating `hasWriteAccess` in place would silently drop
    * a downgraded client's updates and diverge it from the server). Fails closed: an auth
-   * plugin error also disconnects.
+   * plugin error also disconnects, but with the transient code 1013 instead of 4401 — the
+   * client keeps reconnecting and is re-checked at upgrade, so it recovers once the auth
+   * backend does.
    */
   async recheckAuth () {
     try {
@@ -260,7 +267,7 @@ class WSUser {
       }
     } catch (err) {
       this.log.warn({ err }, 'auth recheck failed, disconnecting')
-      this.close(wsCloseAuthRevoked, 'permission revoked')
+      this.close(1013, 'auth recheck failed')
     }
   }
 
@@ -332,10 +339,10 @@ const registerWebsocketServer = (yhub, app, prefix) => {
         const authInfo = await yhub.conf.server?.auth.readAuthInfo(req)
         s.$string.expect(authInfo.userid)
         const accessType = authInfo && await yhub.conf.server?.auth.getAccessType(authInfo, room, null)
-        if (authInfo == null || !t.hasReadAccess(accessType)) {
+        if (!t.hasReadAccess(accessType)) {
           log.info({ url, userid: authInfo?.userid ?? null }, 'ws upgrade denied, insufficient access')
           res.cork(() => {
-            res.writeStatus('401 Unauthorized').end('Unauthorized')
+            res.writeStatus('403 Forbidden').end('Forbidden')
           })
           return
         }
@@ -353,7 +360,13 @@ const registerWebsocketServer = (yhub, app, prefix) => {
         log.warn({ url, err }, 'user failed to auth')
         if (aborted) return
         res.cork(() => {
-          res.writeStatus('401 Unauthorized').end('Unauthorized')
+          // a branded apiError (e.g. apiError(503, ...)) lets the auth plugin signal a
+          // temporary auth-backend outage instead of the fail-closed 401
+          if (isApiError(err)) {
+            res.writeStatus(statusLine(err.status)).end(err.message)
+          } else {
+            res.writeStatus('401 Unauthorized').end('Unauthorized')
+          }
         })
       }
     },

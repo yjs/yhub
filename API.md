@@ -612,7 +612,7 @@ const yhub = await createYHub(config)
 | `server.maxDocSize` | `number` | no | Maximum Ydoc size in bytes, used for WebSocket payload limits. Default: 500 MB |
 | `worker` | `object \| null` | no | Background compaction worker config. Set to `null` to disable. |
 | `worker.taskConcurrency` | `number` | yes* | Maximum number of compaction tasks to process in parallel |
-| `worker.events.docUpdate` | `function` | no | Called after each compaction with the merged `DocTable` |
+| `worker.events.docUpdate` | `function` | no | Called after each compaction with the merged `DocTable` plus the `room` it belongs to |
 
 **Example: full server setup**
 

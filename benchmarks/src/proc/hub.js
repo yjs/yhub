@@ -53,8 +53,8 @@ const yhub = await createYHub({
     ? {
         taskConcurrency: settings.hub.taskConcurrency,
         events: {
-          // DocTable carries no room, so sizes are reported as their own stream.
-          // Every benchmark that reads them compacts one room at a time.
+          // Sizes are reported as their own stream, without the room — every
+          // benchmark that reads them compacts one room at a time.
           docUpdate: d => compactions.push({
             gcBytes: d.gcDoc?.byteLength ?? 0,
             nongcBytes: d.nongcDoc?.byteLength ?? 0,

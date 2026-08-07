@@ -88,7 +88,7 @@ export class YHub {
               }
               // there is new content: fetch + merge the ydoc, reusing the stream we already pulled
               const d = await this.getDoc(task.room, { gc: true, nongc: true, contentmap: true, contentids: true, references: true }, { cachedMessages })
-              this.conf.worker?.events?.docUpdate?.(object.assign({}, d, { references: null }))
+              this.conf.worker?.events?.docUpdate?.(object.assign({}, d, { references: null, room: task.room }))
               await this.persistence.store(task.room, d)
               await promise.all([
                 this.persistence.deleteReferences(d.references),

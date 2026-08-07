@@ -3,6 +3,7 @@ import * as error from 'lib0/error'
 import * as number from 'lib0/number'
 import * as promise from 'lib0/promise'
 import * as s from 'lib0/schema'
+import * as string from 'lib0/string'
 import * as t from './types.js'
 import { builtinApi } from './builtin-api.js'
 import { logger } from './logger.js'
@@ -19,17 +20,36 @@ const setCorsHeaders = (res) => {
 }
 
 /**
+ * `JSON.stringify` replacer producing the json representation of any-encodable values: binary
+ * data as base64, `Date` as epoch millis, `undefined` as `null` (preserving the key). A
+ * `function`, not an arrow - `this` is the containing object, so `raw` sees values before their
+ * `toJSON` runs (`Buffer` and `Date` would otherwise already be converted).
+ *
+ * @this {any}
+ * @param {string} key
+ * @param {any} value
+ */
+const jsonReplacer = function (key, value) {
+  const raw = this[key]
+  if (raw instanceof Uint8Array) return buffer.toBase64(raw)
+  if (raw instanceof Date) return raw.getTime()
+  if (raw === undefined) return null // preserve the key
+  return value
+}
+
+/**
  * @param {import('uws').HttpResponse} res
  * @param {string} status
  * @param {{ [key: string]: any, error: string }} body
+ * @param {boolean} [acceptsJson]
  */
-const sendErrorResponse = (res, status, body) => {
-  const response = buffer.encodeAny(body)
+const sendErrorResponse = (res, status, body, acceptsJson = false) => {
+  const response = acceptsJson ? JSON.stringify(body, jsonReplacer) : buffer.encodeAny(body)
   res.cork(() => {
     // the status must be written before any header - otherwise uws locks the status to "200 OK"
     res.writeStatus(status)
     setCorsHeaders(res)
-    res.writeHeader('Content-Type', 'application/x-lib0any')
+    res.writeHeader('Content-Type', acceptsJson ? 'application/json' : 'application/x-lib0any')
     res.end(response)
   })
 }
@@ -82,6 +102,25 @@ export const apiError = (status, message, extra = undefined) => Object.assign(ne
  */
 export const isApiError = err => err?.[apiErrorBrand] === true
 
+export class EncodedAny {
+  /**
+   * @param {Uint8Array} bytes
+   */
+  constructor (bytes) {
+    this.bytes = bytes
+  }
+}
+
+/**
+ * Mark bytes returned from an api handler as already lib0-any-encoded (e.g. cached in redis).
+ * They are served as `application/x-lib0any` without re-encoding, and transcoded to json when the
+ * client sends `Accept: application/json` - unlike a plain `Uint8Array` return, which is always
+ * sent as opaque `application/octet-stream`.
+ *
+ * @param {Uint8Array} bytes
+ */
+export const encodedAny = bytes => new EncodedAny(bytes)
+
 /**
  * @param {import('./index.js').YHub} yhub
  * @param {import('uws').HttpRequest} req
@@ -130,6 +169,25 @@ export const resolveApiPrefix = yhub => {
     throw error.create(`invalid api prefix "${prefix}" - must be a single path segment`)
   }
   return prefix
+}
+
+/**
+ * Compile a `$query`/`$body` spec. `s.$` lifts a shape object to `s.$object` (values
+ * recursively: literals to $literal, arrays to $union) and passes prebuilt schemas through.
+ *
+ * @param {any} spec
+ * @param {string} name
+ * @param {string} method
+ * @param {'$query'|'$body'} kind
+ * @returns {{ $schema: s.Schema<any>, coerce: (o: any) => { err: string|null, result: any } }}
+ */
+const compileSpec = (spec, name, method, kind) => {
+  try {
+    const $schema = s.$(spec)
+    return { $schema, coerce: s.coerce($schema) }
+  } catch (_err) {
+    throw error.create(`api endpoint "${name}": invalid ${method}.${kind}`)
+  }
 }
 
 /**
@@ -189,25 +247,13 @@ export const registerApi = (yhub, app) => {
         throw error.create(`api endpoint "${name}": ${method}.handler must be a function`)
       }
       const querySpec = def.$query ?? null
-      /**
-       * @type {((o: any) => { err: string|null, result: any })|null}
-       */
-      let coerceQuery = null
-      let queryDeclaresBranch = false
-      if (querySpec != null) {
-        const isSchema = s.$$object.check(querySpec)
-        // prototype check, not `constructor === Object` - a shape may declare an attribute named "constructor"
-        if (!isSchema && Object.getPrototypeOf(querySpec) !== Object.prototype && Object.getPrototypeOf(querySpec) !== null) {
-          throw error.create(`api endpoint "${name}": ${method}.$query must be a shape object or s.$object(..) schema`)
-        }
-        queryDeclaresBranch = scope === 'doc' && Object.hasOwn(/** @type {object} */ (isSchema ? querySpec.shape : querySpec), 'branch')
-        try {
-          // s.$ lifts literals to $literal, arrays to $union, passes schemas through
-          coerceQuery = s.coerce(isSchema ? querySpec : s.$object(Object.fromEntries(Object.entries(querySpec).map(([key, v]) => [key, s.$(v)]))))
-        } catch (_err) {
-          throw error.create(`api endpoint "${name}": invalid ${method}.$query`)
-        }
+      const coerceQuery = querySpec == null ? null : compileSpec(querySpec, name, method, '$query').coerce
+      const queryDeclaresBranch = querySpec != null && scope === 'doc' && Object.hasOwn(/** @type {object} */ (s.$$object.check(querySpec) ? querySpec.shape : querySpec), 'branch')
+      // fetch clients can't send GET bodies - a get endpoint declaring $body would 400 every request
+      if (def.$body != null && method === 'get') {
+        throw error.create(`api endpoint "${name}": get cannot declare $body`)
       }
+      const bodySpec = def.$body == null ? null : compileSpec(def.$body, name, method, '$body')
       app[apiMethods[method]](pattern, createApiHandler(yhub, {
         method,
         handler: /** @type {(req: t.ApiRequest) => any} */ (def.handler),
@@ -217,6 +263,7 @@ export const registerApi = (yhub, app) => {
         pathParams,
         paramOffset,
         coerceQuery,
+        bodySpec,
         queryDeclaresBranch
       }))
     })
@@ -234,11 +281,14 @@ export const registerApi = (yhub, app) => {
  * @param {Array<string>} opts.pathParams
  * @param {number} opts.paramOffset
  * @param {((o: any) => { err: string|null, result: any })|null} opts.coerceQuery
+ * @param {{ $schema: s.Schema<any>, coerce: (o: any) => { err: string|null, result: any } }|null} opts.bodySpec
  * @param {boolean} opts.queryDeclaresBranch
  * @returns {(res: import('uws').HttpResponse, req: import('uws').HttpRequest) => void}
  */
-const createApiHandler = (yhub, { method, handler, requiredAccess, scope, accessPurpose, pathParams, paramOffset, coerceQuery, queryDeclaresBranch }) => (res, req) => {
+const createApiHandler = (yhub, { method, handler, requiredAccess, scope, accessPurpose, pathParams, paramOffset, coerceQuery, bodySpec, queryDeclaresBranch }) => (res, req) => {
   const ctx = { aborted: false }
+  // assigned once the headers are snapshotted - stays false when reading the request throws
+  let acceptsJson = false
   /**
    * @type {t.ApiRequest|null}
    */
@@ -295,6 +345,7 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
      */
     const headers = {}
     req.forEach((key, value) => { headers[key] = value })
+    acceptsJson = (headers.accept ?? '').includes('application/json')
     const room = scope === 'doc' ? /** @type {t.Room} */ ({ org, docid, branch }) : null
     log.debug({ endpoint: `${method.toUpperCase()} ${path}` }, 'api request')
     // auth starts synchronously - readAuthInfo reads the live uws request
@@ -321,6 +372,33 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
         if (err != null) throw apiError(400, `invalid query: ${err}`, { code: 'invalid-query' })
         query = result
       }
+      /**
+       * @type {any}
+       */
+      let body
+      if (bodySpec != null) {
+        const raw = await bodyPromise
+        const isJson = (headers['content-type'] ?? '').includes('application/json')
+        /**
+         * @type {any}
+         */
+        let decoded
+        try {
+          decoded = isJson ? JSON.parse(string.decodeUtf8(raw)) : buffer.decodeAny(raw)
+        } catch (_err) {
+          throw apiError(400, 'invalid body', { code: 'invalid-body' })
+        }
+        if (isJson) {
+          // json can't express all lib0-any types - coerce (e.g. base64 strings to $uint8Array fields)
+          const { err, result } = bodySpec.coerce(decoded)
+          if (err != null) throw apiError(400, `invalid body: ${err}`, { code: 'invalid-body' })
+          body = result
+        } else {
+          // lib0-any expresses exact types - validate only, never coerce
+          if (!bodySpec.$schema.check(decoded)) throw apiError(400, 'invalid body', { code: 'invalid-body' })
+          body = decoded
+        }
+      }
       apiReq = /** @type {t.ApiRequest} */ ({
         yhub,
         method,
@@ -335,6 +413,7 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
         accessType: /** @type {'r'|'rw'} */ (authResult.accessType),
         aborted: ctx.aborted,
         query,
+        body,
         bytes: () => bodyPromise,
         any: () => bodyPromise.then(buffer.decodeAny)
       })
@@ -362,11 +441,30 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
       } else {
         const isString = typeof result === 'string'
         const isRaw = result instanceof Uint8Array
-        const body = isString || isRaw ? result : buffer.encodeAny(result)
+        const isEncoded = result instanceof EncodedAny
+        /**
+         * @type {string|Uint8Array}
+         */
+        let body
+        let contentType
+        if (isString) {
+          body = result
+          contentType = 'text/plain; charset=utf-8'
+        } else if (isRaw) {
+          // plain bytes are opaque - only `encodedAny(..)` results participate in json negotiation
+          body = result
+          contentType = 'application/octet-stream'
+        } else if (acceptsJson) {
+          body = JSON.stringify(isEncoded ? buffer.decodeAny(result.bytes) : result, jsonReplacer)
+          contentType = 'application/json'
+        } else {
+          body = isEncoded ? result.bytes : buffer.encodeAny(result)
+          contentType = 'application/x-lib0any'
+        }
         res.cork(() => {
           res.writeStatus('200 OK')
           setCorsHeaders(res)
-          res.writeHeader('Content-Type', isString ? 'text/plain; charset=utf-8' : (isRaw ? 'application/octet-stream' : 'application/x-lib0any'))
+          res.writeHeader('Content-Type', contentType)
           res.end(body)
         })
       }
@@ -377,10 +475,10 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
       if (ctx.aborted) {
         log.debug({ err, path }, 'api request failed after abort')
       } else if (err?.[apiErrorBrand] === true) {
-        sendErrorResponse(res, statusLine(err.status), { error: err.message, ...err.extra })
+        sendErrorResponse(res, statusLine(err.status), { error: err.message, ...err.extra }, acceptsJson)
       } else {
         log.error({ err, path }, 'error handling api request')
-        sendErrorResponse(res, '500 Internal Server Error', { error: 'Internal server error' })
+        sendErrorResponse(res, '500 Internal Server Error', { error: 'Internal server error' }, acceptsJson)
       }
     })
   } catch (err) {
@@ -389,7 +487,7 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
       log.debug({ err }, 'api request could not be read')
     } else {
       log.error({ err }, 'error handling api request')
-      sendErrorResponse(res, '500 Internal Server Error', { error: 'Internal server error' })
+      sendErrorResponse(res, '500 Internal Server Error', { error: 'Internal server error' }, acceptsJson)
     }
   }
 }

@@ -11,7 +11,9 @@ CALLBACK.
 
 It is assumed that all documents can be identified by a unique `{org}/{docid}`
 combination. Furthermore, all "body" content is encoded via lib0/encoding's
-`encodeAny`. All binary data in parameters is encoded via base64.
+`encodeAny` by default. All binary data in parameters is encoded via base64.
+Clients without a lib0 decoder can opt into json per request — see
+[JSON encoding](#json-encoding).
 
 ### WebSocket
 
@@ -75,14 +77,52 @@ HTTP mnemonic only — a retryable rate-limit close would be `45xx`, never `4429
 #### REST status codes
 
 Error responses carry a lib0-any encoded `{ error: string, ...extra }` body (see
-[Return values](#return-values)).
+[Return values](#return-values)) — json instead when the request sent
+`Accept: application/json` (see [JSON encoding](#json-encoding)).
 
 | Status | Sent when | Retry? |
 |---|---|---|
-| `400` `404` `409` `422` | caller mistake — invalid body or query, missing resource, conflict | no — fix the request |
+| `400` `404` `409` `422` | caller mistake — invalid body or query (`code: 'invalid-body'` / `'invalid-query'`), missing resource, conflict | no — fix the request |
 | `401` `403` | unauthenticated / no access | no — obtain fresh credentials, then send a new request |
 | `429` | rate limited — yhub itself never sends this; reserved for proxies and custom endpoints | yes — back off first |
 | `500`–`599` | server-side failure — `500` internal error, `503` a dependency (e.g. the auth backend) is temporarily down | yes |
+
+### JSON encoding
+
+The lib0-any encoding is the default because it round-trips types json can't (binary data,
+`undefined`). Clients that prefer json opt in per request — the default never changes:
+
+* **Responses**: send `Accept: application/json` (the literal media type — a generic `*/*` does
+  *not* opt in). Object results — including error bodies and the pre-encoded changeset/activity
+  responses — are served as `application/json` instead of `application/x-lib0any`. String
+  (`text/plain`) and raw byte (`application/octet-stream`) responses are unaffected.
+* **Request bodies**: send `Content-Type: application/json` to an endpoint that declares a
+  [`$body` spec](#request-body-body) — all built-in body-accepting endpoints (`ydoc` PATCH,
+  `rollback`, `prune`) do. Fields declared as `s.$uint8Array` accept base64 strings and arrive in
+  the handler as real `Uint8Array`s. Without the json content type, the body is lib0-any-decoded
+  and validated against the spec without coercion.
+
+Values are mapped to json as follows:
+
+| Value | JSON |
+|---|---|
+| `Uint8Array` / `Buffer` (any nesting depth) | base64 string — decode with `buffer.fromBase64` (`lib0/buffer`) |
+| `undefined` | `null`, the key is preserved |
+| `Date` | epoch milliseconds number |
+
+In json request bodies, binary fields take canonical padded base64. Omit absent optional fields
+rather than sending `null`.
+
+```js
+// json client - no lib0 required
+const res = await fetch(`/api/ydoc/v1/${org}/${docid}`, { headers: { Accept: 'application/json' } })
+const { doc } = await res.json() // doc is a base64 string
+await fetch(`/api/ydoc/v1/${org}/${docid}`, {
+  method: 'PATCH',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ update: updateAsBase64 })
+})
+```
 
 ### Ydoc
 
@@ -111,6 +151,7 @@ Update the Yjs document with new changes. Requires write access.
   * At least one of `update` or `awareness` must be present; an empty body returns `400 Bad Request`.
   * Changes are distributed to connected WebSocket clients.
   * Returns `{ success: true, message: string }` on success.
+  * The body is lib0-any-encoded by default; with `Content-Type: application/json` it is json with `update`/`awareness` as base64 strings (see [JSON encoding](#json-encoding)).
 
 #### Example
 
@@ -179,7 +220,7 @@ before and after state of a Yjs doc. Optionally, include relevant attributions.
   * `ydoc=true`: include the encoded document **as it was at `to`** — a single partially garbage-collected Yjs update. Deleted content outside the attribution window is gc'd; in-range deletes are kept restorable.
   * `delta=true`: include the delta representation — the document at `to` with the in-range attributions highlighted.
   * `attributions=true`: include the attributions `ContentMap`.
-  * Returns `{ ydoc?: Uint8Array, attributions?: Y.ContentMap, delta?: Delta }`.
+  * Returns `{ ydoc?: Uint8Array, attributions?: Y.ContentMap, delta?: Delta }`, served as `application/x-lib0any` (json on `Accept: application/json`, binary fields as base64 — see [JSON encoding](#json-encoding)).
 
 The `ydoc` is the document at `to`; its alive content already *is* that point-in-time state, so you render its differences by applying it to a `gc: false` doc and overlaying the `attributions` with an `AttributionsRenderer` (see [Rendering with AttributionsRenderer](#rendering-with-attributionsrenderer)).
 
@@ -209,7 +250,7 @@ the activity API and the changeset API to reconstruct an editing trail.
   * `ydoc=boolean`: return a single shared partially-gc'd document for the whole list, plus per entry a `renderedContent` IdSet (= content alive at the entry's `to`). The response shape becomes `{ ydoc, activity }`. Render any entry client-side by applying `ydoc` to a `gc: false` doc and overlaying an `AttributionsRenderer` with that entry's `renderedContent` (and `attributions`) — see [Rendering with AttributionsRenderer](#rendering-with-attributionsrenderer).
   * `attributions=boolean`: include each entry's attribution `ContentMap` (as `attributions: Uint8Array`).
   * `customAttributions=true`: include the list of custom attributions associated with each activity entry. When enabled, each entry includes a `customAttributions` field containing deduplicated `{ k, v }` pairs collected from the underlying attribution attributes (e.g. `insert:<key>`). When grouping is enabled, custom attributions from merged entries are combined and deduplicated.
-  * Returns `{ activity: Array<{ from: number, to: number, by: string?, delta?: Delta, renderedContent?: Uint8Array, attributions?: Uint8Array, customAttributions?: Array<{ k: string, v: string }> }>, ydoc?: Uint8Array }`. The top-level shape is stable regardless of `ydoc`.
+  * Returns `{ activity: Array<{ from: number, to: number, by: string?, delta?: Delta, renderedContent?: Uint8Array, attributions?: Uint8Array, customAttributions?: Array<{ k: string, v: string }> }>, ydoc?: Uint8Array }`. The top-level shape is stable regardless of `ydoc`. Served as `application/x-lib0any` (json on `Accept: application/json`, binary fields as base64 — see [JSON encoding](#json-encoding)).
     * `ydoc` is present only when `ydoc=true`; `renderedContent` on each entry only when `ydoc=true`; `attributions` only when `attributions=true`; `customAttributions` only when `customAttributions=true`.
 
 ### Rendering with `AttributionsRenderer`
@@ -378,7 +419,7 @@ startup.
 | `scope` | `'doc' \| 'org' \| 'global'` | `'doc'` | route shape: `/api/{name}/{version}/{org}/{docid}`, `/api/{name}/{version}/{org}`, or `/api/{name}/{version}` |
 | `path` | `string` | `''` | extra named path segments appended to the route, e.g. `'/:commentId'` (named params only, available via `req.params`) |
 | `accessPurpose` | `string` | `null` | forwarded as `purpose` to the auth access callback (see below) |
-| `get`, `post`, `put`, `patch`, `delete` | `{ $query?, handler }` | — | method definitions; at least one is required. `handler` is the async request handler; `$query` optionally declares the supported query attributes (see below). `get` requires `'r'` access, all other methods require `'rw'`. The method object is also where future per-method options will live. |
+| `get`, `post`, `put`, `patch`, `delete` | `{ $query?, $body?, handler }` | — | method definitions; at least one is required. `handler` is the async request handler; `$query` optionally declares the supported query attributes and `$body` (not on `get`) the request body (see below). `get` requires `'r'` access, all other methods require `'rw'`. The method object is also where future per-method options will live. |
 
 Because the prefix, names, and versions are single segments, every request under the api namespace
 has the fixed shape `/{apiPrefix}/{apiname}/{version}/...` — easy for proxies to inspect
@@ -416,12 +457,37 @@ get: {
 }
 ```
 
+#### Request body (`$body`)
+
+A method's `$body` declares its request body the same way — a shape object or any prebuilt
+schema, e.g. `s.$array(..)` for an endpoint that takes a bare json array (`get` cannot declare
+one; the registration throws at startup). When
+declared, the framework awaits the body before invoking the handler, decodes it by the request's
+content type — `application/json` → json, anything else → lib0-any — and passes the result as
+`req.body`. Json bodies are **coerced** against the schema: json can't express all lib0-any
+types, so `s.$uint8Array` fields accept base64 strings and arrive as real `Uint8Array`s. Lib0-any
+bodies express exact types and are **validated only** — a string where `s.$uint8Array` is
+declared is rejected, never converted. A body that fails to parse or validate answers
+`400 { error, code: 'invalid-body' }` without invoking the handler.
+Methods without `$body` are unaffected: `req.body` is `undefined` and the raw accessors
+(`req.bytes()`, `req.any()`) remain the way to read the body.
+
+```js
+post: {
+  $body: {
+    text: s.$string, // required; missing or wrong type → 400
+    attachment: s.$uint8Array.optional // json clients send base64, lib0 clients send bytes
+  },
+  handler: async req => { await saveComment(req.room, req.authInfo.userid, req.body) }
+}
+```
+
 Handlers are typed by `scope`: doc-scoped handlers receive a non-null `req.room`, org-scoped
 handlers receive `req.org` only, global handlers neither. Plain object literals inside `api: [...]`
 get these typings automatically. For endpoints defined in separate modules (where contextual typing
 can't reach), use the `createApiEndpoint` helper — it also preserves the literal endpoint name for
-tooling, and types `req.query` by the method's `$query` spec (`{ [key: string]: any }` when there
-is none):
+tooling, and types `req.query` / `req.body` by the method's `$query` / `$body` specs
+(`{ [key: string]: any }` / `undefined` when there is none):
 
 ```js
 import * as s from 'lib0/schema'
@@ -481,6 +547,7 @@ any time, also after `await`s:
 | `authInfo` | | whatever `readAuthInfo` returned |
 | `accessType` | `'r' \| 'rw'` | the granted access |
 | `aborted` | `boolean` | becomes `true` when the client disconnects — check between expensive steps and return early |
+| `body` | | the decoded & validated request body when the method declares `$body`; `undefined` otherwise |
 | `bytes()` | `() => Promise<Uint8Array>` | the raw request body |
 | `any()` | `() => Promise<any>` | the request body, lib0-any-decoded |
 
@@ -491,13 +558,14 @@ any time, also after `await`s:
 | `Response` | status, headers, and body are taken from the `Response` — the full-control escape hatch. The default CORS headers are added unless the `Response` sets its own `Access-Control-Allow-Origin`; `content-length`/`transfer-encoding` are managed by the server. |
 | `undefined` / `null` | `204 No Content` |
 | `string` | `200`, `text/plain; charset=utf-8` |
-| `Uint8Array` / `Buffer` | `200`, `application/octet-stream`, as-is |
-| anything else | `200`, `application/x-lib0any`, lib0-any-encoded — the same encoding all built-in endpoints use. The dedicated content type keeps the wire self-describing: clients decode by content type (`x-lib0any` → `decodeAny`, `text/*` → text, else raw bytes). |
+| `Uint8Array` / `Buffer` | `200`, `application/octet-stream`, as-is — opaque bytes, never transcoded |
+| `encodedAny(bytes)` | `200`, `application/x-lib0any`, as-is — marks bytes that are *already* lib0-any-encoded (e.g. cached), so they transcode to json on request like an object result. The built-in changeset/activity endpoints respond this way. `encodedAny` is exported by `@y/hub`. |
+| anything else | `200`, `application/x-lib0any`, lib0-any-encoded — the same encoding all built-in endpoints use. The dedicated content type keeps the wire self-describing: clients decode by content type (`x-lib0any` → `decodeAny`, `text/*` → text, else raw bytes). Served as `application/json` instead when the request sent `Accept: application/json` (see [JSON encoding](#json-encoding)). |
 
 Throw `apiError(status, message, extra?)` (exported by `@y/hub`) to respond with a specific status
-code and an any-encoded `{ error: message, ...extra }` body — use `extra` for machine-readable
-fields, conventionally `{ code: 'comment-not-found' }`. Any other exception is logged and produces
-a generic `500` without leaking internals.
+code and an any-encoded `{ error: message, ...extra }` body (json on `Accept: application/json`) —
+use `extra` for machine-readable fields, conventionally `{ code: 'comment-not-found' }`. Any other
+exception is logged and produces a generic `500` without leaking internals.
 
 Pick the status by retry class (see [Errors](#errors)): `4xx` when the caller must change
 something first — the request (`400`/`422`), the target (`404`), the conflict (`409`) — `503`

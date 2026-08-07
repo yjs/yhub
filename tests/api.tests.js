@@ -844,7 +844,8 @@ export const testGetYdocEmptyAwarenessOmitsField = async tc => {
 }
 
 /**
- * Object-returning built-ins are served as x-lib0any; pre-encoded responses stay octet-stream.
+ * All built-ins are served as x-lib0any - the pre-encoded changeset/activity responses are marked
+ * via `encodedAny` and no longer read as opaque octet-stream.
  *
  * @param {t.TestCase} tc
  */
@@ -854,7 +855,56 @@ export const testBuiltinContentTypes = async tc => {
   t.assert(ydocRes.headers.get('content-type') === 'application/x-lib0any')
   t.assert(buffer.decodeAny(new Uint8Array(await ydocRes.arrayBuffer())).doc instanceof Uint8Array)
   const activityRes = await fetch(`http://${utils.yhubHost}/api/activity/v1/${org}/${defaultRoom.docid}?group=false`)
-  t.assert(activityRes.headers.get('content-type') === 'application/octet-stream')
+  t.assert(activityRes.headers.get('content-type') === 'application/x-lib0any')
+}
+
+/**
+ * The built-ins speak json on request: responses via `Accept: application/json` (binary fields as
+ * base64), the ydoc PATCH body via `Content-Type: application/json`.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testBuiltinJson = async tc => {
+  const { org, createWsClient } = await utils.createTestCase(tc)
+  const { ydoc } = await createWsClient({ waitForSync: true, syncAwareness: false })
+  const base = `http://${utils.yhubHost}/api`
+  const local = new Y.Doc({ guid: ydoc.guid })
+  local.get().applyDelta(delta.create().insert('hello json').done())
+  const patchRes = await fetch(`${base}/ydoc/v1/${org}/${ydoc.guid}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ update: buffer.toBase64(Y.encodeStateAsUpdate(local)) })
+  })
+  t.assert(patchRes.status === 200)
+  t.assert(patchRes.headers.get('content-type') === 'application/json')
+  t.assert((await patchRes.json()).success === true)
+  await promise.wait(500)
+  const ydocRes = await fetch(`${base}/ydoc/v1/${org}/${ydoc.guid}`, { headers: { Accept: 'application/json' } })
+  t.assert(ydocRes.headers.get('content-type') === 'application/json')
+  const ydocBody = await ydocRes.json()
+  t.assert(typeof ydocBody.doc === 'string')
+  const remote = new Y.Doc()
+  Y.applyUpdate(remote, buffer.fromBase64(ydocBody.doc))
+  t.assert(JSON.stringify(remote.get().toDelta().toJSON()).includes('hello json'))
+  // the pre-encoded activity/changeset responses transcode their nested binary fields to base64
+  const activityRes = await fetch(`${base}/activity/v1/${org}/${ydoc.guid}?group=false&ydoc=true&attributions=true`, { headers: { Accept: 'application/json' } })
+  t.assert(activityRes.headers.get('content-type') === 'application/json')
+  const activityBody = await activityRes.json()
+  t.assert(activityBody.activity.length >= 1)
+  const entry = activityBody.activity[0]
+  t.assert(entry.by === 'user1' && typeof entry.from === 'number' && typeof entry.to === 'number')
+  t.assert(typeof entry.attributions === 'string' && buffer.fromBase64(entry.attributions).byteLength > 0)
+  t.assert(typeof entry.renderedContent === 'string')
+  const activityDoc = new Y.Doc({ gc: false })
+  Y.applyUpdate(activityDoc, buffer.fromBase64(activityBody.ydoc))
+  t.assert(JSON.stringify(activityDoc.get().toDelta().toJSON()).includes('hello json'))
+  const changesetRes = await fetch(`${base}/changeset/v1/${org}/${ydoc.guid}?ydoc=true&delta=true`, { headers: { Accept: 'application/json' } })
+  t.assert(changesetRes.headers.get('content-type') === 'application/json')
+  const changesetBody = await changesetRes.json()
+  t.assert(changesetBody.delta != null)
+  const changesetDoc = new Y.Doc({ gc: false })
+  Y.applyUpdate(changesetDoc, buffer.fromBase64(changesetBody.ydoc))
+  t.assert(JSON.stringify(changesetDoc.get().toDelta().toJSON()).includes('hello json'))
 }
 
 /**

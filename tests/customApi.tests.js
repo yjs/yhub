@@ -296,6 +296,134 @@ export const testErrors = async tc => {
 /**
  * @param {t.TestCase} tc
  */
+export const testJsonResponses = async tc => {
+  const { org } = await utils.createTestCase(tc)
+  const base = `http://${utils.yhubHost}/api`
+  const doc = `${org}/${tc.testName}-doc`
+  const acceptJson = { headers: { Accept: 'application/json' } }
+  await t.groupAsync('object results serve json on Accept: application/json', async () => {
+    const res = await fetch(`${base}/echo/v1/${doc}?q=42`, acceptJson)
+    t.assert(res.status === 200)
+    t.assert(res.headers.get('content-type') === 'application/json')
+    const body = await res.json()
+    t.assert(body.q === '42' && body.docid === `${tc.testName}-doc`)
+  })
+  await t.groupAsync('Accept: */* keeps the lib0-any default', async () => {
+    const res = await fetch(`${base}/echo/v1/${doc}`, { headers: { Accept: '*/*' } })
+    t.assert(res.headers.get('content-type') === 'application/x-lib0any')
+  })
+  await t.groupAsync('binary → base64, Date → epoch millis, undefined → null with the key preserved', async () => {
+    const res = await fetch(`${base}/jsonshape/v1/${doc}`, acceptJson)
+    const body = await res.json()
+    t.compare(Array.from(buffer.fromBase64(body.bin)), [1, 2, 254])
+    t.compare(Array.from(buffer.fromBase64(body.buf)), [4, 5])
+    t.assert(body.when === 1700000000000)
+    t.assert('missing' in body && body.missing === null)
+    t.compare(Array.from(buffer.fromBase64(body.nested.deep)), [9])
+    t.compare(Array.from(buffer.fromBase64(body.list[0])), [7])
+  })
+  await t.groupAsync('encodedAny: x-lib0any by default, transcoded to json on request', async () => {
+    const res = await fetch(`${base}/preenc/v1/${doc}`)
+    t.assert(res.headers.get('content-type') === 'application/x-lib0any')
+    const body = await decodeResponse(res)
+    t.assert(body.a === 1)
+    t.compare(Array.from(body.bin), [1, 2])
+    const jsonRes = await fetch(`${base}/preenc/v1/${doc}`, acceptJson)
+    t.assert(jsonRes.headers.get('content-type') === 'application/json')
+    const jsonBody = await jsonRes.json()
+    t.assert(jsonBody.a === 1)
+    t.compare(Array.from(buffer.fromBase64(jsonBody.bin)), [1, 2])
+  })
+  await t.groupAsync('strings, raw bytes, Response, and 204 ignore the Accept preference', async () => {
+    const putRes = await fetch(`${base}/echo/v1/${doc}`, { method: 'PUT', ...acceptJson })
+    t.assert(putRes.headers.get('content-type') === 'text/plain; charset=utf-8')
+    const patchRes = await fetch(`${base}/echo/v1/${doc}`, { method: 'PATCH', ...acceptJson })
+    t.assert(patchRes.headers.get('content-type') === 'application/octet-stream')
+    const respRes = await fetch(`${base}/resp/v1/${doc}`, acceptJson)
+    t.assert(respRes.status === 201)
+    const delRes = await fetch(`${base}/echo/v1/${doc}`, { method: 'DELETE', ...acceptJson })
+    t.assert(delRes.status === 204)
+  })
+  await t.groupAsync('errors serve json on request', async () => {
+    const res = await fetch(`${base}/fail/v1/${doc}`, acceptJson)
+    t.assert(res.status === 404)
+    t.assert(res.headers.get('content-type') === 'application/json')
+    t.compare(await res.json(), { error: 'nope', code: 'not-found' })
+    const queryRes = await fetch(`${base}/typedq/v1/${doc}`, acceptJson)
+    t.assert(queryRes.status === 400)
+    t.assert(queryRes.headers.get('content-type') === 'application/json')
+    t.assert((await queryRes.json()).code === 'invalid-query')
+  })
+}
+
+/**
+ * @param {t.TestCase} tc
+ */
+export const testBodySchema = async tc => {
+  const { org } = await utils.createTestCase(tc)
+  const base = `http://${utils.yhubHost}/api/typedb/v1/${org}/${tc.testName}-doc`
+  const data = new Uint8Array([1, 2, 250])
+  await t.groupAsync('lib0-any bodies pass through', async () => {
+    const res = await fetch(base, { method: 'POST', body: /** @type {Uint8Array<ArrayBuffer>} */ (buffer.encodeAny({ data })) })
+    t.assert(res.status === 200)
+    const body = await decodeResponse(res)
+    t.assert(body.isU8 === true)
+    t.compare(Array.from(body.data), Array.from(data))
+    t.assert(body.note === null)
+  })
+  await t.groupAsync('json bodies: base64 strings coerce to Uint8Array', async () => {
+    const res = await fetch(base, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: buffer.toBase64(data), note: 'x' }) })
+    t.assert(res.status === 200)
+    const body = await decodeResponse(res)
+    t.assert(body.isU8 === true)
+    t.compare(Array.from(body.data), Array.from(data))
+    t.assert(body.note === 'x')
+  })
+  await t.groupAsync('full json round-trip', async () => {
+    const res = await fetch(base, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ data: buffer.toBase64(data) }) })
+    t.assert(res.headers.get('content-type') === 'application/json')
+    const body = await res.json()
+    t.assert(body.isU8 === true)
+    t.compare(Array.from(buffer.fromBase64(body.data)), Array.from(data))
+  })
+  await t.groupAsync('lib0 bodies are validated, never coerced', async () => {
+    // a base64 string for a $uint8Array field is a json affordance - in a lib0 body it is a type error
+    const res = await fetch(base, { method: 'POST', body: /** @type {Uint8Array<ArrayBuffer>} */ (buffer.encodeAny({ data: buffer.toBase64(data) })) })
+    t.assert(res.status === 400)
+    t.compare(await decodeResponse(res), { error: 'invalid body', code: 'invalid-body' })
+  })
+  await t.groupAsync('malformed bodies respond 400 invalid-body', async () => {
+    const malformedJson = await fetch(base, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{' })
+    t.assert(malformedJson.status === 400)
+    t.compare(await decodeResponse(malformedJson), { error: 'invalid body', code: 'invalid-body' })
+    // without the json content type the bytes must be lib0-any - json text is not
+    const wrongEncoding = await fetch(base, { method: 'POST', body: JSON.stringify({ data: buffer.toBase64(data) }) })
+    t.assert(wrongEncoding.status === 400)
+    t.assert((await decodeResponse(wrongEncoding)).code === 'invalid-body')
+    const badB64 = await fetch(base, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: 'not!base64' }) })
+    t.assert(badB64.status === 400)
+    const badB64Body = await decodeResponse(badB64)
+    t.assert(badB64Body.code === 'invalid-body')
+    t.assert(badB64Body.error.includes('[data]'))
+    const missing = await fetch(base, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+    t.assert(missing.status === 400)
+    // the error body is json when the request asked for json
+    const jsonErr = await fetch(base, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: '{' })
+    t.assert(jsonErr.headers.get('content-type') === 'application/json')
+    t.compare(await jsonErr.json(), { error: 'invalid body', code: 'invalid-body' })
+  })
+  await t.groupAsync('no $body: req.body is undefined, raw accessors remain', async () => {
+    const reqBody = { any: ['x'] }
+    const res = await fetch(base, { method: 'PATCH', body: /** @type {Uint8Array<ArrayBuffer>} */ (buffer.encodeAny(reqBody)) })
+    const body = await decodeResponse(res)
+    t.assert(body.bodyIsUndefined === true)
+    t.compare(body.received, reqBody)
+  })
+}
+
+/**
+ * @param {t.TestCase} tc
+ */
 export const testYhubAccess = async tc => {
   const { org, createWsClient } = await utils.createTestCase(tc)
   const { ydoc } = await createWsClient({ waitForSync: true })
@@ -429,14 +557,19 @@ export const testSpecValidation = _tc => {
   // methods must be { handler } objects - the bare-function form of the pre-0.4 api throws
   t.fails(() => registerApi(fakeYhub([{ name: 'a', get: handler }]), stubApp))
   t.fails(() => registerApi(fakeYhub([{ name: 'a', get: {} }]), stubApp))
-  // $query accepts a shape object (schemas, literals, arrays = unions) or an s.$object schema
+  // $query/$body specs go through s.$: a shape object (schemas, literals, arrays = unions) or a
+  // prebuilt schema
   registerApi(fakeYhub([{ name: 'a', get: { $query: { q: s.$string, m: ['x', 'y'], l: 'z' }, handler } }]), stubApp)
   registerApi(fakeYhub([{ name: 'a', get: { $query: s.$object({ q: s.$string }), handler } }]), stubApp)
-  // attribute names shadowing Object.prototype members are legitimate
-  registerApi(fakeYhub([{ name: 'a', get: { $query: { constructor: s.$string, toString: s.$string }, handler } }]), stubApp)
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { $query: s.$number, handler } }]), stubApp))
   // a shape value that is neither a schema nor a schema definition (s.$ throws)
   t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { $query: { q: new Date() }, handler } }]), stubApp))
+  // $body mirrors $query - non-object schemas are legal (a json body may be a bare value) - but
+  // is not allowed on get
+  registerApi(fakeYhub([{ name: 'a', post: { $body: { d: s.$uint8Array }, handler } }]), stubApp)
+  registerApi(fakeYhub([{ name: 'a', post: { $body: s.$object({ d: s.$uint8Array }), handler } }]), stubApp)
+  registerApi(fakeYhub([{ name: 'a', post: { $body: s.$array(s.$number), handler } }]), stubApp)
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { $body: { d: s.$uint8Array }, handler } }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'a', post: { $body: { d: new Date() }, handler } }]), stubApp))
   // path params: named only, unique, org/docid/branch reserved
   t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/static', get: { handler } }]), stubApp))
   t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/:org', get: { handler } }]), stubApp))

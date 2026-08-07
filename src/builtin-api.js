@@ -6,7 +6,7 @@ import * as s from 'lib0/schema'
 import { createApiEndpoint } from './types.js'
 // benign import cycle with api.js - apiError is only referenced at request time, never during
 // module evaluation
-import { apiError } from './api.js'
+import { apiError, encodedAny } from './api.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'api' })
@@ -21,8 +21,6 @@ const $kv = s.$object({ k: s.$string, v: s.$string })
  */
 export const parseCustomAttributionsParam = (param) =>
   param ? param.split(',').map(entry => { const [k, ...rest] = entry.split(':'); return { k, v: rest.join(':') } }) : []
-
-const $patchYdocBody = s.$object({ update: s.$uint8Array.optional, awareness: s.$uint8Array.optional, customAttributions: s.$array($kv).optional })
 
 const ydocEndpoint = createApiEndpoint('ydoc', {
   get: {
@@ -51,20 +49,12 @@ const ydocEndpoint = createApiEndpoint('ydoc', {
     }
   },
   patch: {
+    $body: { update: s.$uint8Array.optional, awareness: s.$uint8Array.optional, customAttributions: s.$array($kv).optional },
     handler: async req => {
-      /**
-       * @type {any}
-       */
-      let decodedBody
-      try {
-        decodedBody = await req.any()
-      } catch (_err) {
+      const { update, awareness, customAttributions = [] } = req.body
+      if (update == null && awareness == null) {
         throw apiError(400, 'Invalid request body')
       }
-      if (!$patchYdocBody.check(decodedBody) || (decodedBody.update == null && decodedBody.awareness == null)) {
-        throw apiError(400, 'Invalid request body')
-      }
-      const { update, awareness, customAttributions = [] } = decodedBody
       if (update != null) {
         // Get current document state to diff against
         const { gcDoc, nongcDoc } = await req.yhub.getDoc(req.room, { gc: true, nongc: false }, { gcOnMerge: false })
@@ -86,18 +76,9 @@ const $rollbackBody = s.$object({ from: s.$number.optional, to: s.$number.option
 
 const rollbackEndpoint = createApiEndpoint('rollback', {
   post: {
+    $body: $rollbackBody,
     handler: async req => {
-      /**
-       * @type {any}
-       */
-      let decodedBody
-      try {
-        decodedBody = await req.any()
-      } catch (_err) {
-        throw apiError(400, 'error consuming request')
-      }
-      if (!$rollbackBody.check(decodedBody)) throw apiError(400, 'error consuming request')
-      const { from, to, by, contentIds, customAttributions = [], withCustomAttributions = null } = decodedBody
+      const { from, to, by, contentIds, customAttributions = [], withCustomAttributions = null } = req.body
       if (!from && !to && !by && !contentIds && (withCustomAttributions ?? []).length === 0) {
         throw apiError(400, 'Rollback requires at least one filter (from, to, by, contentIds, or withCustomAttributions)')
       }
@@ -115,18 +96,9 @@ const $pruneBody = s.$object({ from: s.$number.optional, to: s.$number.optional,
 
 const pruneEndpoint = createApiEndpoint('prune', {
   post: {
+    $body: $pruneBody,
     handler: async req => {
-      /**
-       * @type {any}
-       */
-      let decodedBody
-      try {
-        decodedBody = await req.any()
-      } catch (_err) {
-        throw apiError(400, 'error consuming request')
-      }
-      if (!$pruneBody.check(decodedBody)) throw apiError(400, 'error consuming request')
-      const { from, to, by, contentIds, withCustomAttributions = null } = decodedBody
+      const { from, to, by, contentIds, withCustomAttributions = null } = req.body
       if (!from && !to && !by && !contentIds && (withCustomAttributions ?? []).length === 0) {
         throw apiError(400, 'Prune requires at least one filter (from, to, by, contentIds, or withCustomAttributions)')
       }
@@ -161,10 +133,10 @@ const changesetEndpoint = createApiEndpoint('changeset', {
       const withCustomAttributions = query.withCustomAttributions ? parseCustomAttributionsParam(query.withCustomAttributions) : null
       try {
         const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by, String(includeYdoc), String(includeDelta), String(includeAttributions), query.withCustomAttributions || '']
-        return await req.yhub.stream.cachedGet('changeset', cacheArgs, async () => {
+        return encodedAny(await req.yhub.stream.cachedGet('changeset', cacheArgs, async () => {
           const { nongcDoc, contentmap: contentmapBin } = await req.yhub.getDoc(room, { nongc: true, contentmap: true })
           return req.yhub.computePool.changeset({ nongcDoc, contentmapBin, from, to, by, withCustomAttributions, includeYdoc, includeDelta, includeAttributions }, { room })
-        })
+        }))
       } catch (err) {
         log.error({ err, room }, 'error handling changeset request')
         throw apiError(500, 'Failed to compute changeset')
@@ -211,10 +183,10 @@ const activityEndpoint = createApiEndpoint('activity', {
       const contentIds = query.contentIds ? buffer.fromBase64(query.contentIds) : undefined
       try {
         const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by, String(includeDelta), String(includeYdoc), String(includeAttributions), String(limit), reverse ? 'desc' : 'asc', String(group), String(groupMaxGap), String(groupMaxDuration), query.withCustomAttributions || '', String(includeCustomAttributions), query.contentIds || '']
-        return await req.yhub.stream.cachedGet('activity', cacheArgs, async () => {
+        return encodedAny(await req.yhub.stream.cachedGet('activity', cacheArgs, async () => {
           const { contentmap: contentmapBin, nongcDoc } = await req.yhub.getDoc(room, { nongc: true, contentmap: true })
           return req.yhub.computePool.activity({ nongcDoc, contentmapBin, from, to, by, contentIds, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupMaxGap, groupMaxDuration }, { room })
-        })
+        }))
       } catch (err) {
         log.error({ err, room }, 'error handling activity request')
         throw apiError(500, 'Failed to compute activity')

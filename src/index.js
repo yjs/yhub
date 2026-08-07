@@ -13,7 +13,7 @@ import { logger } from './logger.js'
 import * as time from 'lib0/time'
 
 export { createAuthPlugin, createApiEndpoint } from './types.js'
-export { apiError } from './api.js'
+export { apiError, encodedAny } from './api.js'
 export { wsCloseAuthRevoked } from './server.js'
 export { logger } from './logger.js'
 

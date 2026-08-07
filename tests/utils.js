@@ -5,7 +5,8 @@ import { WebsocketProvider } from '@y/websocket'
 import * as t from 'lib0/testing' // eslint-disable-line
 import * as promise from 'lib0/promise'
 import * as s from 'lib0/schema'
-import { createYHub, apiError, createApiEndpoint } from '@y/hub'
+import { createYHub, apiError, createApiEndpoint, encodedAny } from '@y/hub'
+import * as buffer from 'lib0/buffer'
 import * as number from 'lib0/number'
 import { S3PersistenceV1 } from '@y/hub/plugins/s3'
 import postgres from 'postgres'
@@ -104,6 +105,24 @@ const testApiSpecs = [
     // no $query: this method's req.query is the untyped raw-string object
     post: { handler: async req => ({ raw: req.query }) }
   }),
+  // per-method $body spec: the body is decoded by its content type (json or lib0-any),
+  // coerced+validated, req.body is typed by the shape
+  createApiEndpoint('typedb', {
+    post: {
+      $body: { data: s.$uint8Array, note: s.$string.optional },
+      handler: async req => {
+        // @ts-expect-error data is a coerced Uint8Array, not a string - regression guard for typed bodies
+        req.body.data.toUpperCase // eslint-disable-line no-unused-expressions
+        return { isU8: req.body.data instanceof Uint8Array, data: req.body.data, note: req.body.note ?? null }
+      }
+    },
+    // no $body: this method's req.body is undefined, the raw accessors remain
+    patch: { handler: async req => ({ bodyIsUndefined: req.body === undefined, received: await req.any() }) }
+  }),
+  // json response shaping: binary → base64, Date → epoch millis, undefined → null (key preserved)
+  { name: 'jsonshape', get: { handler: async () => ({ bin: new Uint8Array([1, 2, 254]), buf: Buffer.from([4, 5]), when: new Date(1700000000000), missing: undefined, nested: { deep: new Uint8Array([9]) }, list: [new Uint8Array([7])] }) } },
+  // pre-encoded lib0-any bytes: served as x-lib0any, transcoded to json on request
+  { name: 'preenc', get: { handler: async () => encodedAny(buffer.encodeAny({ a: 1, bin: new Uint8Array([1, 2]) })) } },
   // a declared `branch` attribute constrains the requested branch - the server default 'main' is
   // validated when ?branch is omitted
   createApiEndpoint('branched', {

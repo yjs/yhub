@@ -501,6 +501,14 @@ export const $config = s.$object({
    * cpus - 1)
    */
   computePoolSize: s.$number.optional,
+  /**
+   * Maximum time a single task may run. A compute task that exceeds it has its worker thread
+   * killed - it can't be cancelled cooperatively - which rejects the task so its caller can
+   * retry. A compaction task that exceeds it outside of compute is abandoned by the worker, so
+   * that its room is reclaimed by another worker instead of staying leased forever.
+   * (default: 30 minutes)
+   */
+  maxTaskDuration: s.$number.optional,
   events: s.$object({
     docUpdate: s.$lambda(s.$any, s.$instanceOf(Y.Doc), s.$object({ inserts: s.$instanceOf(Y.IdMap), deletes: s.$instanceOf(Y.IdMap) }), s.$undefined)
   }).optional,

@@ -8,11 +8,13 @@ import * as storage from './storage.tests.js'
 import * as computeWorker from './computeWorker.tests.js'
 import * as agents from './agents.tests.js'
 import * as deleteDoc from './delete.tests.js'
+import * as worker from './worker.tests.js'
 import { runTests } from 'lib0/testing'
 
 runTests({
   computeWorker,
   storage,
+  worker,
   api,
   customApi,
   auth,

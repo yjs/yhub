@@ -333,7 +333,10 @@ y/hub is designed for horizontal scaling:
    balancer. Redis pub/sub ensures all instances receive updates.
 
 2. **Multiple Workers**: Run multiple worker instances. Redis consumer groups
-   ensure each task is processed exactly once.
+   hand each task to one worker at a time, and a worker renews the lease of the
+   tasks it is running so that a long compaction is not picked up twice. A task
+   whose worker dies is reclaimed after `redis.taskDebounce`, so a task may run
+   more than once — compaction results are idempotent.
 
 3. **Database Scaling**: PostgreSQL and S3 can be scaled independently based on
    your needs.

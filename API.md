@@ -621,13 +621,14 @@ const yhub = await createYHub(config)
 |---|---|---|---|
 | `redis.url` | `string` | yes | Redis connection URL |
 | `redis.prefix` | `string` | yes | Key prefix for all Redis entries (use a unique value per environment) |
-| `redis.taskDebounce` | `number` | no | Milliseconds before a worker picks up a compaction task. Default: 120 000 |
+| `redis.taskDebounce` | `number` | no | Milliseconds before a worker picks up a compaction task. Also the lease timeout after which a task held by a crashed worker is reclaimed — a worker renews the lease of the tasks it is running, so this does not have to exceed the compaction time. Default: 120 000 |
 | `redis.minMessageLifetime` | `number` | no | Minimum time in ms that update messages are kept in Redis streams before compaction. Default: 60 000 |
 | `redis.cacheTtl` | `number` | no | TTL in seconds for cached API responses. Default: 10 |
 | `redis.clientOptions` | `object` | no | Additional options passed to the node-redis client, e.g. `{ pingInterval: 10000 }`. YHub still controls `url`; `redis.socket` is merged into the final socket config; `clientOptions.scripts` are merged with YHub's Lua scripts. |
 | `redis.socket` | `object` | no | Custom socket options merged into the Redis client socket config. See [node-redis socket options](https://github.com/redis/node-redis/blob/master/docs/client-configuration.md#socket-options) for available options. |
 | `postgres` | `string` | yes | PostgreSQL connection string |
 | `persistence` | `PersistencePlugin[]` | yes | One or more storage plugins (e.g. `S3PersistenceV1`). At least one is required. |
+| `maxTaskDuration` | `number` | no | Milliseconds a single task may run. A compute task that exceeds it has its worker thread killed (compute can't be cancelled cooperatively), which rejects the task so its caller can retry. A compaction task that exceeds it outside of compute — a wedged S3 or PostgreSQL socket — is abandoned by the worker so its room is reclaimed by another worker instead of staying leased forever. Default: 1 800 000 (30 minutes) |
 | `computePoolSize` | `number` | no | Worker threads in the compute pool for CPU-intensive Yjs work (merging, state vectors, changesets). Default: number of cpus - 1. Set this explicitly when the process is restricted to a subset of cores — `os.cpus().length` does not reflect `taskset` or cgroup limits. |
 | `server` | `object \| null` | no | HTTP/WebSocket server config. Set to `null` to run without a server (worker/script mode). |
 | `server.port` | `number` | yes* | Port to listen on |

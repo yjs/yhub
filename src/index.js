@@ -4,6 +4,8 @@ import * as p from './persistence.js'
 import * as t from './types.js'
 import * as Y from '@y/y'
 import * as object from 'lib0/object'
+import * as array from 'lib0/array'
+import * as math from 'lib0/math'
 import * as protocol from './protocol.js'
 import * as server from './server.js'
 import { createComputePool } from './compute.js'
@@ -69,90 +71,161 @@ export class YHub {
      * @type {Conf['server'] extends null ? null : server.YHubServer}
      */
     this.server = /** @type {any} */ (null)
-    this.computePool = createComputePool({ poolSize: conf.computePoolSize })
+    this.computePool = createComputePool({ poolSize: conf.computePoolSize, taskTimeout: conf.maxTaskDuration })
     this._workerCtx = {
       shouldRun: false
     }
   }
 
-  // @todo continiously claim tasks while compute is running without issues. skip and kill worker if
-  // there is an issue (e.g. oom). create a test case that ensures task is reclaimed even if compute
-  // task takes 5 minutes and no other worker is started.
   async startWorker () {
     if (this._workerCtx.shouldRun || this.conf.worker == null) return
     // create new worker context
     const ctx = (this._workerCtx = {
       shouldRun: true
     })
+    /**
+     * The tasks we are currently computing. Their lease is renewed until they are done, so they
+     * are neither reclaimed by another worker nor handed back to us by `claimTasks`.
+     *
+     * @type {Map<string, { started: number, room: t.Room }>}
+     */
+    const inflight = new Map()
+    // taskDebounce is the granularity at which work becomes claimable - a task enqueued now (the
+    // successor a completing compaction leaves behind) can only be claimed that much later. Poll
+    // a few times per debounce so that just missing the window costs a fraction of it, not a
+    // whole poll interval.
+    const pollInterval = math.min(1000, math.floor(this.stream.taskDebounce / 3))
+    this._renewLeases(ctx, inflight).catch(err => log.error({ err }, 'lease renewal failed'))
     while (ctx.shouldRun) {
       try {
-        const tasks = await this.stream.claimTasks(this.conf.worker.taskConcurrency)
+        const free = this.conf.worker.taskConcurrency - inflight.size
+        // `claimTasks` hands us back our own in-flight tasks once they idled for longer than
+        // taskDebounce (a renewal that came too late). Don't run them a second time.
+        const tasks = (free > 0 ? await this.stream.claimTasks(free) : []).filter(task => !inflight.has(task.redisClock))
         tasks.length && log.info({ taskCount: tasks.length }, 'picked up tasks')
-        await promise.all(tasks.map(async task => {
-          const taskLog = log.child({ taskType: task.type, room: task.room })
-          if (task.type === 'compact') {
-            /**
-             * @type {Error | null}
-             */
-            let taskErr = null
-            const taskTs = time.getUnixTime()
-            try {
-              this.conf.worker?.events?.taskStart?.({ room: task.room, timestamp: taskTs })
-              taskLog.info('task started')
-              // cheap pre-check: pull the stream and the persisted clock (no ydoc blobs, no S3) so
-              // we can skip the expensive fetch+merge when there is nothing new to persist. only
-              // update/prune messages change the document and advance lastUpdateClock.
-              const [cachedMessages, persisted] = await promise.all([
-                this.stream.getMessages([{ room: task.room, clock: '0' }]).then(ms => ms[0] || { messages: [], lastClock: '0' }),
-                this.persistence.retrieveDoc(task.room, {})
-              ])
-              const lastUpdateClock = cachedMessages.messages.reduce(
-                (clk, m) => (m.type === 'ydoc:update:v1' || m.type === 'prune:v1') ? strm.maxRedisClock(clk, m.redisClock) : clk,
-                persisted.lastClock
-              )
-              // a hard-deleted room is never persisted again - its content is thrown away and its
-              // stream trimmed down to nothing. `store` refuses it regardless (that guard is what
-              // closes the race against a merge that is already running); skipping here only
-              // avoids doing the work. A soft-deleted room compacts normally, so whatever is on
-              // the stream is persisted before it is trimmed away.
-              if (persisted.tombstone?.hard || !strm.isSmallerRedisClock(persisted.lastClock, lastUpdateClock)) {
-                taskLog.debug('nothing to compact, trimming only')
-                // a hard-deleted room drains in this one pass: with maxAgeMs 0 the lua trims
-                // everything, finds the stream empty, DELs the key and the task is already acked.
-                // Safe because a task is only claimed after taskDebounce, long after every
-                // subscriber has seen the kick that was added when the document was deleted.
-                await this.stream.trimMessages(task.room, strm.maxRedisClock(persisted.lastClock, cachedMessages.lastClock), persisted.tombstone?.hard ? 0 : this.stream.minMessageLifetime, task.redisClock)
-                taskLog.info('task completed (trim only)')
-                return null
-              }
-              // there is new content: fetch + merge the ydoc, reusing the stream we already pulled
-              const d = await this.getDoc(task.room, { gc: true, nongc: true, contentmap: true, contentids: true, references: true }, { cachedMessages })
-              this.conf.worker?.events?.docUpdate?.(object.assign({}, d, { references: null, room: task.room }))
-              await this.persistence.store(task.room, d)
-              await promise.all([
-                this.persistence.deleteReferences(d.references),
-                this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
-              ])
-              taskLog.info({ gcDocSize: d.gcDoc?.byteLength, nongcDocSize: d.nongcDoc?.byteLength, refsDeleted: d.references?.length ?? 0 }, 'task completed')
-            } catch (e) {
-              taskErr = /** @type {Error} */ (e)
-              throw e
-            } finally {
-              this.conf.worker?.events?.taskComplete?.({ room: task.room, duration: time.getUnixTime() - taskTs, error: taskErr })
-            }
-          }
-        }))
-        tasks.length && log.info({ taskCount: tasks.length }, 'completed tasks')
+        tasks.forEach(task => {
+          const run = { started: time.getUnixTime(), room: task.room }
+          inflight.set(task.redisClock, run)
+          this._runTask(task)
+            .catch(err => log.error({ err, room: task.room }, 'error processing task'))
+            // an abandoned run must not delete the entry of the run that replaced it
+            .finally(() => inflight.get(task.redisClock) === run && inflight.delete(task.redisClock))
+        })
         if (tasks.length === 0) {
-          await promise.wait(1000)
+          await promise.wait(pollInterval)
         }
       } catch (err) {
-        log.error({ err }, 'error processing task')
+        log.error({ err }, 'error claiming tasks')
         await promise.wait(3000)
       }
     }
   }
 
+  /**
+   * Keep the lease on the tasks we are computing alive. Runs next to the claim loop so that a
+   * slow `claimTasks` or its error backoff can't starve renewals.
+   *
+   * @param {{ shouldRun: boolean }} ctx
+   * @param {Map<string, { started: number, room: t.Room }>} inflight
+   */
+  async _renewLeases (ctx, inflight) {
+    const interval = math.min(1000, math.floor(this.stream.taskDebounce / 3))
+    while (ctx.shouldRun) {
+      await promise.wait(interval)
+      if (inflight.size === 0) continue
+      const now = time.getUnixTime()
+      // the compute pool kills a compute task that overruns, which rejects it. Getting here means
+      // the task is stuck where we can't kill it - waiting for a wedged s3 or postgres socket, or
+      // queued behind other compute tasks - so all we can do is let go: stop renewing, and the
+      // room is reclaimed by another worker after redis.taskDebounce.
+      array.from(inflight.entries()).forEach(([taskId, run]) => {
+        if (now - run.started > this.computePool.taskTimeout) {
+          log.error({ room: run.room, taskDurationMs: now - run.started }, 'task exceeded maxTaskDuration outside of compute, abandoning it')
+          inflight.delete(taskId)
+        }
+      })
+      const taskIds = array.from(inflight.keys())
+      if (taskIds.length === 0) continue
+      try {
+        // the reply lists the ids we still hold, but it can't tell a lost lease from a task that
+        // completed during the round trip - so there is nothing useful to report from it
+        await this.stream.renewTasks(taskIds)
+      } catch (err) {
+        log.error({ err }, 'error renewing task leases')
+      }
+    }
+  }
+
+  /**
+   * @param {t.Task & { redisClock: string }} task
+   */
+  async _runTask (task) {
+    if (task.type !== 'compact') return
+    const taskLog = log.child({ taskType: task.type, room: task.room })
+    /**
+     * @type {Error | null}
+     */
+    let taskErr = null
+    const taskTs = time.getUnixTime()
+    try {
+      this.conf.worker?.events?.taskStart?.({ room: task.room, timestamp: taskTs })
+      taskLog.info('task started')
+      // cheap pre-check: pull the stream and the persisted clock (no ydoc blobs, no S3) so
+      // we can skip the expensive fetch+merge when there is nothing new to persist. only
+      // update/prune messages change the document and advance lastUpdateClock.
+      const [cachedMessages, persisted] = await promise.all([
+        this.stream.getMessages([{ room: task.room, clock: '0' }]).then(ms => ms[0] || { messages: [], lastClock: '0' }),
+        this.persistence.retrieveDoc(task.room, {})
+      ])
+      const lastUpdateClock = cachedMessages.messages.reduce(
+        (clk, m) => (m.type === 'ydoc:update:v1' || m.type === 'prune:v1') ? strm.maxRedisClock(clk, m.redisClock) : clk,
+        persisted.lastClock
+      )
+      // a hard-deleted room is never persisted again - its content is thrown away and its
+      // stream trimmed down to nothing. `store` refuses it regardless (that guard is what
+      // closes the race against a merge that is already running); skipping here only
+      // avoids doing the work. A soft-deleted room compacts normally, so whatever is on
+      // the stream is persisted before it is trimmed away.
+      if (persisted.tombstone?.hard || !strm.isSmallerRedisClock(persisted.lastClock, lastUpdateClock)) {
+        taskLog.debug('nothing to compact, trimming only')
+        // a hard-deleted room drains in this one pass: with maxAgeMs 0 the lua trims
+        // everything, finds the stream empty, DELs the key and the task is already acked.
+        // Safe because a task is only claimed after taskDebounce, long after every
+        // subscriber has seen the kick that was added when the document was deleted.
+        await this.stream.trimMessages(task.room, strm.maxRedisClock(persisted.lastClock, cachedMessages.lastClock), persisted.tombstone?.hard ? 0 : this.stream.minMessageLifetime, task.redisClock)
+        taskLog.info('task completed (trim only)')
+        return
+      }
+      // there is new content: fetch + merge the ydoc, reusing the stream we already pulled
+      const d = await this.getDoc(task.room, { gc: true, nongc: true, contentmap: true, contentids: true, references: true }, { cachedMessages })
+      // re-check what the pre-check established, now that the slow merge is done: another worker
+      // may have persisted this exact clock while we were computing. `store` would then be
+      // skipped by ON CONFLICT while `deleteReferences` still deletes that row - the only copy of
+      // the document. There is nothing new to write in that case, so only trim.
+      if (!strm.isSmallerRedisClock(d.lastPersistedClock, d.lastClock)) {
+        taskLog.warn('another worker persisted this room while we were computing, trimming only')
+        await this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
+        return
+      }
+      this.conf.worker?.events?.docUpdate?.(object.assign({}, d, { references: null, room: task.room }))
+      await this.persistence.store(task.room, d)
+      await promise.all([
+        this.persistence.deleteReferences(d.references),
+        this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
+      ])
+      taskLog.info({ gcDocSize: d.gcDoc?.byteLength, nongcDocSize: d.nongcDoc?.byteLength, refsDeleted: d.references?.length ?? 0 }, 'task completed')
+    } catch (e) {
+      taskErr = /** @type {Error} */ (e)
+      throw e
+    } finally {
+      this.conf.worker?.events?.taskComplete?.({ room: task.room, duration: time.getUnixTime() - taskTs, error: taskErr })
+    }
+  }
+
+  /**
+   * Stop claiming tasks and stop renewing the leases of the tasks that are still running - they
+   * go stale and are reclaimed by another worker after `redis.taskDebounce`.
+   */
   stopWorker () {
     this._workerCtx.shouldRun = false
   }

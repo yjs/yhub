@@ -230,3 +230,34 @@ export const testComputePruneSet = async _tc => {
   doc.destroy()
   await pool.destroy()
 }
+
+/**
+ * A compute task can't be cancelled cooperatively, so a task that doesn't come back on its own is
+ * stopped by killing its worker thread. The pool arms a timer per task, terminates the thread when
+ * it fires, and rejects the task so the caller can retry. `taskTimeout: 1` makes every offloaded
+ * task overrun - spawning the thread alone takes longer than a millisecond.
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testTaskTimeoutKillsWorkerThread = async _tc => {
+  const doc1 = new Y.Doc()
+  doc1.get('test').insert(0, 'a'.repeat(10000))
+  const update1 = Y.encodeStateAsUpdate(doc1)
+  const doc2 = new Y.Doc()
+  Y.applyUpdate(doc2, update1)
+  doc2.get('test').insert(0, 'b'.repeat(10000))
+  const update2 = Y.encodeStateAsUpdate(doc2)
+  const pool = createComputePool({ poolSize: 1, taskTimeout: 1 })
+  await t.failsAsync(() => pool.mergeUpdates(true, [update1, update2]))
+  t.assert(pool.workers.every(w => w.isDead), 'the worker thread was terminated')
+  // the pool replaces the dead thread and keeps working
+  pool.taskTimeout = 60000
+  const merged = await pool.mergeUpdates(true, [update1, update2])
+  const resultDoc = new Y.Doc()
+  Y.applyUpdate(resultDoc, merged)
+  t.assert(resultDoc.get('test').toString().length === 20000, 'the pool recovered and merged the updates')
+  resultDoc.destroy()
+  doc1.destroy()
+  doc2.destroy()
+  await pool.destroy()
+}

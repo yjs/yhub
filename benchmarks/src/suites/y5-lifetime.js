@@ -112,7 +112,7 @@ export default {
           })
           reader.close()
         }
-        report.note('The central trade-off. Compacting less often means less rewriting, but longer Redis streams, more uncompacted Postgres rows, more S3 GETs per sync, and a slower sync. Read `write amplification` against `syncTime after growth` to pick a setting for your growth rate.\n\n**There is a floor on this parameter that is not about the trade-off at all.** `taskDebounce` is the `XAUTOCLAIM` min-idle-time and a worker re-claims with its own consumer name, so any value below the actual compaction time makes the worker run the same task twice and one copy dies on a duplicate key (see Y6.2). Values here that sit under the compaction times in Y5.1 are therefore measuring a broken configuration, not a faster one — watch for the compaction-failure warning.')
+        report.note('The central trade-off. Compacting less often means less rewriting, but longer Redis streams, more uncompacted Postgres rows, more S3 GETs per sync, and a slower sync. Read `write amplification` against `syncTime after growth` to pick a setting for your growth rate.\n\n**This parameter used to have a floor that was not about the trade-off at all**: `taskDebounce` is the `XAUTOCLAIM` min-idle-time, and a worker re-claimed with its own consumer name, so any value below the actual compaction time made it run the same task twice (see Y6.2). The worker now renews the lease of a running task, so values under the compaction times in Y5.1 measure the trade-off rather than a broken configuration.')
       }
     },
     {

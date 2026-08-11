@@ -50,19 +50,17 @@ export const config = {
     /**
      * ms before a worker claims a compaction task. Production default: 120000.
      *
-     * This is the `XAUTOCLAIM` min-idle-time, and `claimTasks` reclaims with the
-     * worker's **own** consumer name and no in-flight guard (`src/stream.js`).
-     * So once a compaction runs longer than `taskDebounce`, the very next claim
-     * hands the same task back to the same worker, which processes it a second
-     * time concurrently — and the loser dies on a duplicate-key violation. One
-     * worker is enough to hit this; `src/index.js:46` has a `@todo` for it.
+     * This is the `XAUTOCLAIM` min-idle-time. It used to double as a hard limit
+     * on compaction time — a compaction that outlived it was handed straight
+     * back to its own worker and ran twice (measured: a 4 MB room under 500
+     * clients produced 6 task starts and 2 duplicate-key errors at
+     * `taskDebounce: 10000`). Workers now renew the lease of the tasks they are
+     * running (`Stream.renewTasks`), so the value no longer has to exceed
+     * worst-case compaction time; it only bounds how long a *crashed* worker's
+     * task stays parked.
      *
-     * Measured here: a 4 MB room under 500 connected clients produced 6 task
-     * starts and 2 duplicate-key errors at `taskDebounce: 10000`.
-     *
-     * So this must exceed worst-case compaction time *under load*, not the
-     * unloaded time. 30s clears the ~7s p95 seen at 20 MB with headroom, while
-     * staying short enough that benchmarks still observe compaction happening.
+     * 30s is kept as the baseline: short enough that benchmarks still observe
+     * compaction happening.
      */
     taskDebounce: 30000,
     /** ms an update stays in the Redis stream before it may be trimmed. Production default: 60000 */

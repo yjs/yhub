@@ -656,6 +656,23 @@ export class Stream {
   }
 
   /**
+   * Reset the idle time of the tasks we are still working on, so that neither another worker nor
+   * our own `claimTasks` reclaims them. `JUSTID` keeps the delivery counter intact.
+   *
+   * A min-idle-time of `0` claims regardless of the current owner - so this also steals back a
+   * task that another worker took over while we were computing. That is intentional: compaction
+   * results are idempotent (both workers write the same assets and the row insert is
+   * `ON CONFLICT DO NOTHING`), and whichever `trimMessages` loses the ack is a no-op anyway.
+   *
+   * @param {Array<string>} taskIds
+   * @return {Promise<Array<string>>} the ids that are still pending - a missing id was already
+   * completed or was cancelled by `disableCompaction`.
+   */
+  renewTasks (taskIds) {
+    return this.redis.xClaimJustId(this.workerStreamName, this.workerGroupName, this.consumername, 0, taskIds)
+  }
+
+  /**
    * Trim messages with minId. Also ensure that we only trim messages that are older than maxAgeMs.
    *
    * @param {t.Room} room

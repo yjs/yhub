@@ -1,6 +1,5 @@
 import { Worker } from 'node:worker_threads'
 import { cpus } from 'node:os'
-import * as time from 'lib0/time'
 import * as s from 'lib0/schema'
 import * as promise from 'lib0/promise'
 import * as Y from '@y/y'
@@ -93,10 +92,10 @@ const $computeTask = s.$union(
  */
 const finishWorker = (cw) => {
   cw.isComputing = false
-  cw.taskEnd = time.getUnixTime()
-  cw.lastUsed = cw.taskEnd
   cw._cbResolve = null
   cw._cbReject = null
+  cw._taskTimeout != null && clearTimeout(cw._taskTimeout)
+  cw._taskTimeout = null
 }
 
 class ComputeWorker {
@@ -109,18 +108,6 @@ class ComputeWorker {
     this.isComputing = false
     this.isDead = false
     /**
-     * Unix time in ms when the current task started.
-     */
-    this.taskStart = 0
-    /**
-     * Unix time in ms when the current task ended.
-     */
-    this.taskEnd = 0
-    /**
-     * Unix time in ms when the worker was last used.
-     */
-    this.lastUsed = 0
-    /**
      * @type {((value: any) => void) | null}
      */
     this._cbResolve = null
@@ -132,12 +119,16 @@ class ComputeWorker {
      * @type {Object<string, any>?}
      */
     this._logContext = null
+    /**
+     * @type {NodeJS.Timeout?}
+     */
+    this._taskTimeout = null
     this.worker.on('message', (result) => {
       const resolve = this._cbResolve
       finishWorker(this)
       resolve?.(result)
-      drain(pool)
       this._logContext = null
+      drain(pool)
     })
     this.worker.on('error', (err) => {
       log.error({ err, ...this._logContext }, 'worker failed')
@@ -145,12 +136,19 @@ class ComputeWorker {
       this.isDead = true
       finishWorker(this)
       reject?.(err)
-      drain(pool)
       this._logContext = null
+      drain(pool)
     })
     this.worker.on('exit', () => {
+      // a thread that exits without emitting 'error' would otherwise leave its task promise
+      // unsettled until the taskTimeout above fires - settle it now instead, so the caller can
+      // retry immediately. 'error' runs first when it fires and clears _cbReject.
+      const reject = this._cbReject
       this.isDead = true
+      finishWorker(this)
+      reject?.(new Error('Worker exited'))
       this._logContext = null
+      drain(pool)
     })
   }
 
@@ -163,11 +161,17 @@ class ComputeWorker {
    */
   run (task, transferList, logContext, resolve, reject) {
     this.isComputing = true
-    this.taskStart = time.getUnixTime()
-    this.lastUsed = this.taskStart
     this._cbResolve = resolve
     this._cbReject = reject
     this._logContext = logContext
+    // a compute task can't be cancelled cooperatively - a merge that doesn't come back (a
+    // pathological document, a thread thrashing itself to death on gc) is only stoppable by
+    // killing the thread. `terminate` interrupts synchronous code too, and rejects the task, so
+    // the caller retries instead of waiting forever.
+    this._taskTimeout = setTimeout(() => {
+      log.error({ taskType: task.type, taskTimeout: this.pool.taskTimeout, ...logContext }, 'compute task exceeded taskTimeout, terminating worker thread')
+      this.terminate()
+    }, this.pool.taskTimeout)
     this.worker.postMessage(task, transferList)
   }
 
@@ -180,20 +184,13 @@ class ComputeWorker {
   }
 }
 
-const maxTaskDurationMs = 30 * 60 * 1000 // 30 minutes
-
 /**
  * @param {ComputePool} pool
  * @returns {ComputeWorker | undefined}
  */
 const getFreeWorker = (pool) => {
-  const now = time.getUnixTime()
   for (let i = 0; i < pool.workers.length; i++) {
     const w = pool.workers[i]
-    if (w.isComputing && now - w.taskStart > maxTaskDurationMs) {
-      log.warn({ workerIndex: i, taskDurationMs: now - w.taskStart }, 'terminating worker that exceeded max task duration')
-      w.terminate()
-    }
     if (w.isDead) {
       log.info({ workerIndex: i }, 'replacing dead worker')
       pool.workers[i] = new ComputeWorker(pool)
@@ -221,19 +218,21 @@ const drain = (pool) => {
 }
 
 /**
- * @param {{ poolSize?: number }} [opts]
+ * @param {{ poolSize?: number, taskTimeout?: number }} [opts]
  */
 export const createComputePool = (opts = {}) => {
   const poolSize = opts.poolSize ?? math.max(1, cpus().length - 1)
-  return new ComputePool(poolSize)
+  return new ComputePool(poolSize, opts.taskTimeout ?? 30 * 60 * 1000)
 }
 
 class ComputePool {
   /**
    * @param {number} maxPoolSize
+   * @param {number} taskTimeout ms after which a running task's worker thread is killed
    */
-  constructor (maxPoolSize) {
+  constructor (maxPoolSize, taskTimeout) {
     this.maxPoolSize = maxPoolSize
+    this.taskTimeout = taskTimeout
     /**
      * @type {Array<ComputeWorker>}
      */

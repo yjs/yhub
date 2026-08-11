@@ -9,3 +9,4 @@ compose.override.yaml
 .DS_Store
 .vscode
 *.test.ydoc
+next.md

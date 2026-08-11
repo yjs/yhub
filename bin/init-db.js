@@ -9,6 +9,64 @@ import { logger } from '../src/logger.js'
 const log = logger.child({ module: 'init-db' })
 
 /**
+ * Create the tables y/hub needs, unless they already exist.
+ *
+ * This script is the only thing in y/hub that runs DDL. Servers and workers never do, so they
+ * need no permission to, and a schema change happens when an operator runs this rather than
+ * implicitly during a rolling deploy. Re-run it when upgrading to a release that adds a table -
+ * every such release says so in the changelog.
+ *
+ * @param {import('postgres').Sql} sql
+ */
+const initTables = async sql => {
+  await sql`
+    CREATE TABLE IF NOT EXISTS yhub_ydoc_v1 (
+        org             text,
+        docid           text,
+        branch          text,
+        t               text,
+        created         INT8,
+        gcDoc           bytea,
+        nongcDoc        bytea,
+        contentmap      bytea,
+        contentids      bytea,
+        gcDoc_is_reference      boolean NOT NULL DEFAULT true,
+        nongcDoc_is_reference   boolean NOT NULL DEFAULT true,
+        contentmap_is_reference boolean NOT NULL DEFAULT true,
+        contentids_is_reference boolean NOT NULL DEFAULT true,
+        PRIMARY KEY     (org,docid,branch,t)
+    )
+  `
+  // `CREATE TABLE IF NOT EXISTS` above leaves an existing table untouched, so columns added in a
+  // later release need their own ALTER. `DEFAULT true` is the whole migration: a pre-existing row
+  // reads as "this may be a reference", which makes readers fetch the column and check - exactly
+  // what they did before the markers existed. No backfill, and no state that means "unknown".
+  // Postgres stores the default in the catalog, so this does not rewrite the table.
+  await sql`ALTER TABLE yhub_ydoc_v1 ADD COLUMN IF NOT EXISTS gcDoc_is_reference boolean NOT NULL DEFAULT true`
+  await sql`ALTER TABLE yhub_ydoc_v1 ADD COLUMN IF NOT EXISTS nongcDoc_is_reference boolean NOT NULL DEFAULT true`
+  await sql`ALTER TABLE yhub_ydoc_v1 ADD COLUMN IF NOT EXISTS contentmap_is_reference boolean NOT NULL DEFAULT true`
+  await sql`ALTER TABLE yhub_ydoc_v1 ADD COLUMN IF NOT EXISTS contentids_is_reference boolean NOT NULL DEFAULT true`
+  await sql`
+    CREATE TABLE IF NOT EXISTS yhub_ydoc_tombstones_v1 (
+        org             text,
+        docid           text,
+        branch          text,
+        deleted_at      INT8 NOT NULL,
+        hard            boolean NOT NULL,
+        purged_at       INT8,
+        by              text,
+        PRIMARY KEY     (org,docid,branch)
+    )
+  `
+  // partial: the only non-key query shape is "what still needs purging", so the index stays
+  // proportional to pending deletions rather than to every deletion ever
+  await sql`
+    CREATE INDEX IF NOT EXISTS yhub_ydoc_tombstones_v1_pending
+    ON yhub_ydoc_tombstones_v1 (deleted_at) WHERE purged_at IS NULL
+  `
+}
+
+/**
  * Initialize the database and tables for y/hub
  * @param {string} postgresUrl - postgres://username:password@host:port/database
  */
@@ -47,34 +105,7 @@ async function init (postgresUrl) {
   log.info('creating tables')
   const sql = postgres(postgresUrl, { max: 1 })
   try {
-    // Create updates table
-    const updatesTableExists = await sql`
-      SELECT EXISTS (
-        SELECT FROM pg_tables
-        WHERE tablename = 'yhub_ydoc_v1'
-      );
-    `
-    if (!updatesTableExists || updatesTableExists.length === 0 || !updatesTableExists[0].exists) {
-      log.info('creating yhub_ydoc_v1 table')
-      // @todo move contentmap and sv to another table!
-      await sql`
-        CREATE TABLE IF NOT EXISTS yhub_ydoc_v1 (
-            org             text,
-            docid           text,
-            branch          text,
-            t               text,
-            created         INT8,
-            gcDoc           bytea,
-            nongcDoc        bytea,
-            contentmap      bytea,
-            contentids      bytea,
-            PRIMARY KEY     (org,docid,branch,t)
-        );
-      `
-      log.info('yhub_ydoc_v1 table created')
-    } else {
-      log.info('yhub_ydoc_v1 table already exists')
-    }
+    await initTables(sql)
   } finally {
     await sql.end({ timeout: 5 })
   }

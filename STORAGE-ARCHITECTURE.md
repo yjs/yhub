@@ -49,6 +49,7 @@ All binary data in YHub has an explicit schema with version information. This ap
 | `asset:contentids:v1` | v1 | Content IDs binary data |
 | `asset:retrievable:v1` | v1 | Reference to external storage (plugin) |
 | `ydoc:update:v1` | v1 | Y.js update message (Redis) |
+| `ydoc:tombstone:v1` | v1 | Document deletion notice (Redis) |
 | `awareness:v1` | v1 | Awareness protocol message (Redis) |
 | `compact` | current | Document compaction task |
 
@@ -69,9 +70,25 @@ CREATE TABLE yhub_ydoc_v1 (
     nongcDoc        bytea,      -- Non-garbage-collected Y.js update
     contentmap      bytea,      -- Content map binary
     contentids      bytea,      -- Content IDs binary
+    -- whether the column above holds an `asset:retrievable:v1` pointer or the bytes themselves
+    gcDoc_is_reference      boolean NOT NULL DEFAULT true,
+    nongcDoc_is_reference   boolean NOT NULL DEFAULT true,
+    contentmap_is_reference boolean NOT NULL DEFAULT true,
+    contentids_is_reference boolean NOT NULL DEFAULT true,
     PRIMARY KEY     (org, docid, branch, t)
 );
 ```
+
+The `_is_reference` markers let a reader that only wants the references — the purge — leave inline
+blobs in the database instead of reading them out to discard them. Decided **per asset**, since
+`PersistencePlugin.store` is called once per asset and may offload some and not others;
+`S3PersistenceV1` happens to decide by branch, offloading only `main`, which is why the saving lands
+on branches rather than on main.
+
+`DEFAULT true` is what makes adding them a one-statement migration. A row written before the columns
+existed reads as "this may be a reference", so it is fetched and checked exactly as it was before —
+no backfill, and no third state meaning "unknown". Postgres stores the default in the catalog, so
+the `ALTER TABLE ... ADD COLUMN` does not rewrite the table.
 
 ### Design Rationale
 
@@ -87,6 +104,49 @@ This simplified table layout provides several advantages:
    - Audit trails
 
 4. **Selective Column Loading**: Queries can request only the columns needed (gc, nongc, contentmap, contentids), avoiding unnecessary data transfer.
+
+### Table: `yhub_ydoc_tombstones_v1`
+
+One record per deleted room — the durable answer to "is this document gone?". Redis cannot hold
+that fact: the `ydoc:tombstone:v1` entry that notifies connected clients is trimmed away with the rest
+of the stream within `minMessageLifetime`.
+
+```sql
+CREATE TABLE yhub_ydoc_tombstones_v1 (
+    org         text,
+    docid       text,
+    branch      text,
+    deleted_at  INT8    NOT NULL, -- unix ms (redis TIME), same clock domain as yhub_ydoc_v1.created
+    hard        boolean NOT NULL, -- content erased immediately and irreversibly
+    purged_at   INT8,             -- unix ms the content was actually erased; NULL while it still exists
+    by          text,             -- authInfo.userid, NULL for internal deletions
+    PRIMARY KEY (org, docid, branch)
+);
+CREATE INDEX yhub_ydoc_tombstones_v1_pending
+    ON yhub_ydoc_tombstones_v1 (deleted_at) WHERE purged_at IS NULL;
+```
+
+Keyed by room, like everything else — deletion is per branch. The partial index serves the only
+non-key query shape there is, a retention task asking what still needs purging, and so stays
+proportional to pending deletions rather than to every deletion ever.
+
+`hard` is what the compact worker branches on. The barrier lives in `Persistence.store`'s `INSERT`
+itself (`WHERE NOT EXISTS (.. AND d.hard)`), not in a check ahead of it: a compact task spends
+seconds to minutes merging between reading a room's state and storing it, and `ON CONFLICT` cannot
+catch a late write either, because `t` is a fresh clock on every compaction. Guarding inside the
+statement also covers `unsafePersistDoc`, which reaches storage directly. Soft deletions are
+deliberately unguarded, so compaction keeps persisting what is already on the stream.
+
+`purged_at` is set only once the erase actually succeeded, which is what makes a crashed purge
+resumable and the purge safe to re-run.
+
+### Schema creation
+
+Both tables are created by `bin/init-db.js` (`npm run start:init`), which is the only thing in
+y/hub that runs DDL. This is a **manual step**, at setup and again when upgrading to a release that
+introduces a table — servers and workers never create tables, so they need no permission to, and a
+schema change happens at a moment the operator picked rather than implicitly during a rolling
+deploy. Any release that adds a table says so in the changelog.
 
 ---
 
@@ -259,6 +319,27 @@ Messages distributed via Redis Streams follow versioned schemas:
 }
 ```
 
+### Tombstone Message (`ydoc:tombstone:v1`)
+
+```javascript
+{
+  type: 'ydoc:tombstone:v1'   // no payload
+}
+```
+
+Notifies connected clients that the room was deleted; they are disconnected with close code `4404`.
+Payload-free on purpose: clients are kicked identically for hard and soft deletions, and anything
+that needs the distinction reads `yhub_ydoc_tombstones_v1`. That also makes it replay-idempotent, so
+unlike `auth:check:v1` it survives `unquarantine` re-injection without a special case.
+
+This is a *notification*, never the record — it is trimmed away like any other entry. A hard
+deletion clears the stream with `XTRIM MAXLEN 0` rather than `DEL` before adding it: `DEL` would
+reset the stream's `last_id`, so the notice could be assigned an id sorting *below* the clock a
+subscriber already passed within the same millisecond, and the clients that were writing just now
+— the ones that most need to hear it — would never see it. `DEL` would also flip `EXISTS` to 0 and
+let the next write enqueue a second compact task beside the pending one, the same invariant the
+[quarantine](#quarantine) NOP protects.
+
 ### Stream Storage Format
 
 - **Room Streams**: `{prefix}:room:{org}:{docid}:{branch}` (URL-encoded components)
@@ -301,7 +382,10 @@ interface PersistencePlugin {
   // Retrieve asset from external storage
   retrieve?(assetId: AssetId, assetInfo: Asset): Promise<Asset | null>;
 
-  // Delete asset from external storage
+  // Delete an asset that is no longer referenced - a superseded version during compaction, or
+  // every version of a document during `purgeDoc`. Both reach it through
+  // `Persistence.deleteReferences`, which drops the referencing row first, so a deletion that is
+  // deferred or lost leaks an orphaned object rather than leaving a row pointing at nothing.
   delete?(assetId: AssetId, assetInfo: Asset): Promise<boolean>;
 }
 ```

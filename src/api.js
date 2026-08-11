@@ -246,6 +246,13 @@ export const registerApi = (yhub, app) => {
       if (typeof def?.handler !== 'function') {
         throw error.create(`api endpoint "${name}": ${method}.handler must be a function`)
       }
+      // a method may override the endpoint's purpose - a destructive method usually wants a
+      // stronger gate than its reads, and setting it on the endpoint would silently change the
+      // purpose every existing caller of the other methods is authorized against
+      const methodPurpose = def.accessPurpose ?? accessPurpose
+      if (methodPurpose !== null && typeof methodPurpose !== 'string') {
+        throw error.create(`api endpoint "${name}": invalid ${method}.accessPurpose`)
+      }
       const querySpec = def.$query ?? null
       const coerceQuery = querySpec == null ? null : compileSpec(querySpec, name, method, '$query').coerce
       const queryDeclaresBranch = querySpec != null && scope === 'doc' && Object.hasOwn(/** @type {object} */ (s.$$object.check(querySpec) ? querySpec.shape : querySpec), 'branch')
@@ -259,7 +266,7 @@ export const registerApi = (yhub, app) => {
         handler: /** @type {(req: t.ApiRequest) => any} */ (def.handler),
         requiredAccess: method === 'get' ? 'r' : 'rw',
         scope,
-        accessPurpose,
+        accessPurpose: methodPurpose,
         pathParams,
         paramOffset,
         coerceQuery,
@@ -474,7 +481,12 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
       await bodyPromise.catch(() => {})
       if (ctx.aborted) {
         log.debug({ err, path }, 'api request failed after abort')
-      } else if (err?.[apiErrorBrand] === true) {
+      } else if (err instanceof t.DocDeletedError) {
+        // raised by `getDoc`, so every endpoint that reads the document - built-in or custom -
+        // reports a deleted one as absent rather than as a server error. `code` matters because
+        // a docid that was never written answers 200 with an empty document.
+        sendErrorResponse(res, statusLine(404), { error: 'Not Found', code: 'doc-deleted' }, acceptsJson)
+      } else if (isApiError(err)) {
         sendErrorResponse(res, statusLine(err.status), { error: err.message, ...err.extra }, acceptsJson)
       } else {
         log.error({ err, path }, 'error handling api request')

@@ -3,7 +3,7 @@ import * as buffer from 'lib0/buffer'
 import * as decoding from 'lib0/decoding'
 import * as number from 'lib0/number'
 import * as s from 'lib0/schema'
-import { createApiEndpoint } from './types.js'
+import { createApiEndpoint, DocDeletedError } from './types.js'
 // benign import cycle with api.js - apiError is only referenced at request time, never during
 // module evaluation
 import { apiError, encodedAny } from './api.js'
@@ -28,7 +28,8 @@ const ydocEndpoint = createApiEndpoint('ydoc', {
     handler: async req => {
       const gc = req.query.gc ?? true
       try {
-        const { gcDoc, nongcDoc, awareness } = await req.yhub.getDoc(req.room, { gc, nongc: !gc, awareness: req.query.awareness ?? false }, { gcOnMerge: false })
+        const { gcDoc, nongcDoc, awareness, tombstone } = await req.yhub.getDoc(req.room, { gc, nongc: !gc, awareness: req.query.awareness ?? false }, { gcOnMerge: false })
+        if (tombstone != null) throw new DocDeletedError(req.room, tombstone)
         /**
          * @type {{ doc: Uint8Array, awareness?: Uint8Array }}
          */
@@ -43,9 +44,23 @@ const ydocEndpoint = createApiEndpoint('ydoc', {
         }
         return body
       } catch (err) {
+        // a deleted document is not a server error - registerApi turns this into a 404
+        if (err instanceof DocDeletedError) throw err
         log.error({ err, room: req.room }, 'error handling ydoc request')
         throw apiError(500, 'Failed to retrieve document')
       }
+    }
+  },
+  delete: {
+    // deletion is gated separately from writing: an endpoint-level purpose would also change the
+    // purpose that existing GET and PATCH callers are authorized against
+    accessPurpose: 'delete',
+    handler: async req => {
+      // soft only over REST. `purpose` is advisory - an auth plugin that ignores it grants every
+      // writer whatever the endpoint allows - so irreversible erasure stays programmatic
+      // (`YHub.deleteDoc(room, { hard: true })`), like `recheckAuth`.
+      const { deletedAt, hard, by } = await req.yhub.deleteDoc(req.room, { by: req.authInfo.userid })
+      return { deletedAt, hard, by }
     }
   },
   patch: {
@@ -57,12 +72,19 @@ const ydocEndpoint = createApiEndpoint('ydoc', {
       }
       if (update != null) {
         // Get current document state to diff against
-        const { gcDoc, nongcDoc } = await req.yhub.getDoc(req.room, { gc: true, nongc: false }, { gcOnMerge: false })
+        const { gcDoc, nongcDoc, tombstone } = await req.yhub.getDoc(req.room, { gc: true, nongc: false }, { gcOnMerge: false })
+        if (tombstone != null) throw new DocDeletedError(req.room, tombstone)
         const currentDoc = gcDoc || nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
         const result = await req.yhub.computePool.patchYdoc({ update, currentDoc, userid: req.authInfo.userid, customAttributions }, { room: req.room })
         if (result != null) {
           await req.yhub.stream.addMessage(req.room, { type: 'ydoc:update:v1', contentmap: result.contentmap, update: result.update })
         }
+      } else {
+        // an awareness-only body never reads the document, so this is the only gate it passes -
+        // writing awareness to a hard-deleted room would re-create the stream key the deletion
+        // just cleared
+        const tombstone = await req.yhub.persistence.retrieveTombstone(req.room)
+        if (tombstone != null) throw new DocDeletedError(req.room, tombstone)
       }
       if (awareness != null) {
         await req.yhub.stream.addMessage(req.room, { type: 'awareness:v1', update: awareness })
@@ -82,7 +104,8 @@ const rollbackEndpoint = createApiEndpoint('rollback', {
       if (!from && !to && !by && !contentIds && (withCustomAttributions ?? []).length === 0) {
         throw apiError(400, 'Rollback requires at least one filter (from, to, by, contentIds, or withCustomAttributions)')
       }
-      const { contentmap: contentmapBin, nongcDoc } = await req.yhub.getDoc(req.room, { nongc: true, contentmap: true })
+      const { contentmap: contentmapBin, nongcDoc, tombstone } = await req.yhub.getDoc(req.room, { nongc: true, contentmap: true })
+      if (tombstone != null) throw new DocDeletedError(req.room, tombstone)
       const { update, contentmap } = await req.yhub.computePool.rollback({ nongcDoc, contentmapBin, from, to, by, contentIds, withCustomAttributions, userid: req.authInfo.userid, customAttributions }, { room: req.room })
       if (update) {
         await req.yhub.stream.addMessage(req.room, { type: 'ydoc:update:v1', update, contentmap })
@@ -132,12 +155,16 @@ const changesetEndpoint = createApiEndpoint('changeset', {
       const includeAttributions = query.attributions ?? false
       const withCustomAttributions = query.withCustomAttributions ? parseCustomAttributionsParam(query.withCustomAttributions) : null
       try {
-        const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by, String(includeYdoc), String(includeDelta), String(includeAttributions), query.withCustomAttributions || '']
-        return encodedAny(await req.yhub.stream.cachedGet('changeset', cacheArgs, async () => {
-          const { nongcDoc, contentmap: contentmapBin } = await req.yhub.getDoc(room, { nongc: true, contentmap: true })
+        const cacheArgs = [String(from), String(to), by, String(includeYdoc), String(includeDelta), String(includeAttributions), query.withCustomAttributions || '']
+        return encodedAny(await req.yhub.stream.cachedGet(room, 'changeset', cacheArgs, async () => {
+          const { nongcDoc, contentmap: contentmapBin, tombstone } = await req.yhub.getDoc(room, { nongc: true, contentmap: true })
+          if (tombstone != null) throw new DocDeletedError(room, tombstone)
           return req.yhub.computePool.changeset({ nongcDoc, contentmapBin, from, to, by, withCustomAttributions, includeYdoc, includeDelta, includeAttributions }, { room })
         }))
       } catch (err) {
+        // before the log: a deleted document is not a server error, and polling one should not
+        // fill the error log. registerApi turns this into a 404.
+        if (err instanceof DocDeletedError) throw err
         log.error({ err, room }, 'error handling changeset request')
         throw apiError(500, 'Failed to compute changeset')
       }
@@ -182,12 +209,15 @@ const activityEndpoint = createApiEndpoint('activity', {
       const includeCustomAttributions = query.customAttributions ?? false
       const contentIds = query.contentIds ? buffer.fromBase64(query.contentIds) : undefined
       try {
-        const cacheArgs = [room.org, room.docid, room.branch, String(from), String(to), by, String(includeDelta), String(includeYdoc), String(includeAttributions), String(limit), reverse ? 'desc' : 'asc', String(group), String(groupMaxGap), String(groupMaxDuration), query.withCustomAttributions || '', String(includeCustomAttributions), query.contentIds || '']
-        return encodedAny(await req.yhub.stream.cachedGet('activity', cacheArgs, async () => {
-          const { contentmap: contentmapBin, nongcDoc } = await req.yhub.getDoc(room, { nongc: true, contentmap: true })
+        const cacheArgs = [String(from), String(to), by, String(includeDelta), String(includeYdoc), String(includeAttributions), String(limit), reverse ? 'desc' : 'asc', String(group), String(groupMaxGap), String(groupMaxDuration), query.withCustomAttributions || '', String(includeCustomAttributions), query.contentIds || '']
+        return encodedAny(await req.yhub.stream.cachedGet(room, 'activity', cacheArgs, async () => {
+          const { contentmap: contentmapBin, nongcDoc, tombstone } = await req.yhub.getDoc(room, { nongc: true, contentmap: true })
+          if (tombstone != null) throw new DocDeletedError(room, tombstone)
           return req.yhub.computePool.activity({ nongcDoc, contentmapBin, from, to, by, contentIds, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupMaxGap, groupMaxDuration }, { room })
         }))
       } catch (err) {
+        // see the changeset endpoint
+        if (err instanceof DocDeletedError) throw err
         log.error({ err, room }, 'error handling activity request')
         throw apiError(500, 'Failed to compute activity')
       }

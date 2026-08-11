@@ -27,10 +27,35 @@ const log = logger.child({ module: 'stream' })
  */
 
 /**
+ * Percent-encode a room component for use inside a redis key.
+ *
+ * `encodeURIComponent` leaves `!'()*` unescaped, and `*` is a redis glob metacharacter - a docid
+ * like `draft*` would otherwise widen any `KEYS`/`SCAN` pattern built from it to match foreign
+ * rooms. The rest of redis' glob syntax (`?`, `[`, `]`, `\`, `^`) is already escaped;  `-` is
+ * only special inside `[..]`, which cannot occur once `[` is escaped. `:` is escaped too, so the
+ * key's own separator stays unambiguous.
+ *
+ * @param {string} str
+ */
+export const uriEncode = str => encodeURIComponent(str).replace(
+  /[!'()*]/g,
+  c => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')
+)
+
+/**
+ * Inverse of `uriEncode`. It is exactly `decodeURIComponent`: the extra characters `uriEncode`
+ * escapes are ordinary `%XX` sequences, which `decodeURIComponent` already understands. Named
+ * for symmetry, so call sites pair visibly and nobody has to re-derive that.
+ *
+ * @param {string} str
+ */
+export const uriDecode = str => decodeURIComponent(str)
+
+/**
  * @param {t.Room} room
  * @param {string} prefix
  */
-export const encodeRoomName = (room, prefix) => `${prefix}:room:${encodeURIComponent(room.org)}:${encodeURIComponent(room.docid)}:${encodeURIComponent(room.branch)}`
+export const encodeRoomName = (room, prefix) => `${prefix}:room:${uriEncode(room.org)}:${uriEncode(room.docid)}:${uriEncode(room.branch)}`
 
 /**
  * @param {string} rediskey
@@ -41,7 +66,7 @@ export const decodeRoomName = (rediskey, expectedPrefix) => {
   if (match == null || match[1] !== expectedPrefix) {
     throw new Error(`Malformed stream name! prefix="${match?.[1]}" expectedPrefix="${expectedPrefix}", rediskey="${rediskey}"`)
   }
-  return { org: decodeURIComponent(match[2]), docid: decodeURIComponent(match[3]), branch: decodeURIComponent(match[4]) }
+  return { org: uriDecode(match[2]), docid: uriDecode(match[3]), branch: uriDecode(match[4]) }
 }
 
 /**
@@ -49,7 +74,7 @@ export const decodeRoomName = (rediskey, expectedPrefix) => {
  * @param {string} prefix
  * @param {string} qid
  */
-export const encodeQuarantineName = (room, prefix, qid) => `${prefix}:quarantine_room:${encodeURIComponent(room.org)}:${encodeURIComponent(room.docid)}:${encodeURIComponent(room.branch)}:${qid}`
+export const encodeQuarantineName = (room, prefix, qid) => `${prefix}:quarantine_room:${uriEncode(room.org)}:${uriEncode(room.docid)}:${uriEncode(room.branch)}:${qid}`
 
 /**
  * @param {string} a
@@ -260,6 +285,18 @@ export class Stream {
     this._subRunning = false
   }
 
+  /**
+   * The current unix time in milliseconds, read from redis so that timestamps minted on
+   * different servers are comparable regardless of their local clock skew. Same clock domain as
+   * the stream ids, and therefore as `yhub_ydoc_v1.created`.
+   *
+   * @return {Promise<number>}
+   */
+  async getTime () {
+    const [seconds, microseconds] = await this.redis.time()
+    return number.parseInt(seconds) * 1000 + math.floor(number.parseInt(microseconds) / 1000)
+  }
+
   async getPendingTasksSize () {
     return this.redis.xLen(this.workerStreamName)
   }
@@ -358,7 +395,9 @@ export class Stream {
         })
       })
     })
-    log.debug({ messages: res.map(r => ({ stream: r.streamName, ms: r.messages.map(m => ({ type: m.type, size: (m.type === 'prune:v1' ? m.prune : m.type === 'auth:check:v1' ? null : m.update)?.byteLength, rclock: m.redisClock })) })) }, 'retrieved messages')
+    // allowlist, not a chain of exclusions - a new payload-free message type must not turn the
+    // fallback into a type error
+    log.debug({ messages: res.map(r => ({ stream: r.streamName, ms: r.messages.map(m => ({ type: m.type, size: (m.type === 'ydoc:update:v1' || m.type === 'awareness:v1' ? m.update : m.type === 'prune:v1' ? m.prune : null)?.byteLength, rclock: m.redisClock })) })) }, 'retrieved messages')
     return res
   }
 
@@ -414,9 +453,17 @@ export class Stream {
    * @returns {Promise<string[]>}
    */
   async getQuarantineStreams (room) {
-    const pattern = `${this.prefix}:quarantine_room:${encodeURIComponent(room.org)}:${encodeURIComponent(room.docid)}:${encodeURIComponent(room.branch)}:*`
-    const keys = await this.redis.keys(pattern)
-    return keys.map(k => k.slice(k.lastIndexOf(':') + 1))
+    // safe to match on directly: `uriEncode` escapes every redis glob metacharacter, so no
+    // org/docid/branch can widen this pattern beyond its own room
+    const pattern = `${encodeQuarantineName(room, this.prefix, '')}*`
+    /**
+     * @type {Array<string>}
+     */
+    const qids = []
+    for await (const keys of this.redis.scanIterator({ MATCH: pattern, COUNT: 1000 })) {
+      keys.forEach(k => qids.push(k.slice(k.lastIndexOf(':') + 1)))
+    }
+    return qids
   }
 
   /**
@@ -425,15 +472,22 @@ export class Stream {
    * @returns {Promise<Array<{ room: t.Room, qid: string }>>}
    */
   async getAllQuarantineStreams () {
-    const keys = await this.redis.keys(`${this.prefix}:quarantine_room:*`)
-    return keys.map(k => {
-      const m = k.match(/^.*:quarantine_room:([^:]+):([^:]+):([^:]+):([^:]+)$/)
-      if (m == null) throw new Error(`Malformed quarantine key: ${k}`)
-      return {
-        room: { org: decodeURIComponent(m[1]), docid: decodeURIComponent(m[2]), branch: decodeURIComponent(m[3]) },
-        qid: m[4]
-      }
-    })
+    /**
+     * @type {Array<{ room: t.Room, qid: string }>}
+     */
+    const res = []
+    // SCAN rather than KEYS - this is on the delete path, and KEYS walks the whole keyspace
+    for await (const keys of this.redis.scanIterator({ MATCH: `${this.prefix}:quarantine_room:*`, COUNT: 1000 })) {
+      keys.forEach(k => {
+        const m = k.match(/^.*:quarantine_room:([^:]+):([^:]+):([^:]+):([^:]+)$/)
+        if (m == null) throw new Error(`Malformed quarantine key: ${k}`)
+        res.push({
+          room: { org: uriDecode(m[1]), docid: uriDecode(m[2]), branch: uriDecode(m[3]) },
+          qid: m[4]
+        })
+      })
+    }
+    return res
   }
 
   /**
@@ -467,6 +521,41 @@ export class Stream {
     await multi.exec()
     log.info({ room, qid, count: entries.length }, 'unquarantined stream')
     return entries.length
+  }
+
+  /**
+   * Drop every message from `room`'s stream, without removing the key.
+   *
+   * XTRIM, not DEL. DEL resets the stream's `last_id`, so the next entry can be assigned an id
+   * that sorts *below* the clock a subscriber already advanced past within the same millisecond
+   * - the connections a deletion most needs to reach are exactly the ones that were writing
+   * just now, and they would silently never see it. DEL would also flip `EXISTS` to 0, letting
+   * the next write enqueue a second compact task alongside the one already pending, which is
+   * the same invariant `quarantine` protects with its NOP entry. Redis keeps a stream key alive
+   * with zero entries, which is why `trimMessages` has to DEL explicitly.
+   *
+   * @param {t.Room} room
+   */
+  async clearMessages (room) {
+    await this.redis.xTrim(encodeRoomName(room, this.prefix), 'MAXLEN', 0)
+    log.info({ room }, 'cleared stream')
+  }
+
+  /**
+   * Delete every quarantined backlog of `room`. Nothing else ever removes these keys - they are
+   * not trimmed and not listed by `getActiveStreams` - so a purge that skipped them would leave
+   * the document's content sitting in redis indefinitely.
+   *
+   * @param {t.Room} room
+   * @return {Promise<number>} the number of deleted quarantine streams
+   */
+  async deleteQuarantineStreams (room) {
+    const qids = await this.getQuarantineStreams(room)
+    if (qids.length > 0) {
+      await this.redis.del(qids.map(qid => encodeQuarantineName(room, this.prefix, qid)))
+      log.info({ room, count: qids.length }, 'deleted quarantine streams')
+    }
+    return qids.length
   }
 
   /**
@@ -579,15 +668,52 @@ export class Stream {
   }
 
   /**
+   * Key prefix of every cached response of `room`, terminated by its separator so that it cannot
+   * also match a room whose docid merely starts with these characters.
+   *
+   * @param {t.Room} room
+   */
+  _cachePrefix (room) {
+    return `${this.prefix}:cache:${uriEncode(room.org)}:${uriEncode(room.docid)}:${uriEncode(room.branch)}:`
+  }
+
+  /**
+   * Drop every cached response of `room`. A cache hit never reaches `getDoc`, so without this a
+   * response cached just before a deletion would keep being served until it expired.
+   *
+   * @param {t.Room} room
+   * @return {Promise<number>} the number of dropped entries
+   */
+  async deleteCachedResponses (room) {
+    /**
+     * @type {Array<string>}
+     */
+    const keys = []
+    for await (const batch of this.redis.scanIterator({ MATCH: `${this._cachePrefix(room)}*`, COUNT: 1000 })) {
+      keys.push(...batch)
+    }
+    if (keys.length > 0) {
+      await this.redis.del(keys)
+      log.info({ room, count: keys.length }, 'dropped cached responses')
+    }
+    return keys.length
+  }
+
+  /**
    * Cache results for `cacheTtl + computeTime * 2`.
    *
+   * The room leads the key so that `deleteCachedResponses` can drop everything cached for a room
+   * with an exact prefix match. Every component is `uriEncode`d: they are user-controlled, and a
+   * raw join would let org='a:b',docid='c' collide with org='a',docid='b:c'.
+   *
+   * @param {t.Room} room
    * @param {string} endpoint
    * @param {Array<string>} args
    * @param {() => Promise<Uint8Array>} computeResult
    * @return {Promise<Uint8Array | Buffer>}
    */
-  async cachedGet (endpoint, args, computeResult) {
-    const key = `${this.prefix}:cache:${endpoint}:${args.join(':')}`
+  async cachedGet (room, endpoint, args, computeResult) {
+    const key = `${this._cachePrefix(room)}${uriEncode(endpoint)}:${args.map(uriEncode).join(':')}`
     const cached = await /** @type {Promise<Buffer | null>} */ (this.redis.withTypeMapping({
       [redis.RESP_TYPES.BLOB_STRING]: Buffer
     }).get(key))

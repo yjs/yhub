@@ -6,18 +6,48 @@ import * as Y from '@y/y'
 import * as object from 'lib0/object'
 import * as protocol from './protocol.js'
 import * as server from './server.js'
-import * as math from 'lib0/math'
 import { createComputePool } from './compute.js'
 import { agentTask } from './agents.js'
 import { logger } from './logger.js'
 import * as time from 'lib0/time'
 
-export { createAuthPlugin, createApiEndpoint } from './types.js'
+export { createAuthPlugin, createApiEndpoint, DocDeletedError } from './types.js'
 export { apiError, encodedAny } from './api.js'
-export { wsCloseAuthRevoked } from './server.js'
+export { wsCloseAuthRevoked, wsCloseDocDeleted } from './server.js'
 export { logger } from './logger.js'
 
 const log = logger.child({ module: 'worker' })
+
+/**
+ * Erase the content of a deleted `room`: its rows in `yhub_ydoc_v1` together with the assets they
+ * reference, and any quarantined backlog in redis. Goes through the same `deleteReferences` path
+ * compaction uses, so a row is always dropped before the asset it points at - the reverse would
+ * leave references dangling, which read back as silently missing content.
+ *
+ * Deliberately not part of the public api. Erasing content is only safe once `hard` is set, which
+ * is what arms the barrier in `Persistence.store` against a compaction that is still in flight;
+ * reachable on its own it would invite purging a merely soft-deleted room, whose rows a straggler
+ * compaction could then write straight back. `deleteDoc(room, { hard: true })` is the way in, and
+ * it is also how a retention task erases what it swept up with `getTombstones`.
+ *
+ * The returned tombstone carries the `purgedAt` this stamped. That records that the rows are gone
+ * and the assets are handed to the plugins for deletion, not that every byte has already left the
+ * store: a plugin may defer (`S3PersistenceV1` does, to let concurrent readers finish). What an
+ * interrupted purge leaves behind is an orphaned object, never a reference to a missing one.
+ *
+ * @param {YHub} yhub
+ * @param {t.Room} room
+ * @returns {Promise<t.Tombstone>}
+ */
+const purgeDoc = async (yhub, room) => {
+  // different stores, no ordering between them
+  const [, , purgedAt] = await promise.all([
+    yhub.persistence.purgeDoc(room),
+    yhub.stream.deleteQuarantineStreams(room),
+    yhub.stream.getTime()
+  ])
+  return yhub.persistence.storeTombstonePurged(room, purgedAt)
+}
 
 /**
  * @template {t.YHubConfig} [Conf=t.YHubConfig]
@@ -51,7 +81,7 @@ export class YHub {
   async startWorker () {
     if (this._workerCtx.shouldRun || this.conf.worker == null) return
     // create new worker context
-    const ctx = (this._ctx = {
+    const ctx = (this._workerCtx = {
       shouldRun: true
     })
     while (ctx.shouldRun) {
@@ -80,9 +110,18 @@ export class YHub {
                 (clk, m) => (m.type === 'ydoc:update:v1' || m.type === 'prune:v1') ? strm.maxRedisClock(clk, m.redisClock) : clk,
                 persisted.lastClock
               )
-              if (!strm.isSmallerRedisClock(persisted.lastClock, lastUpdateClock)) {
+              // a hard-deleted room is never persisted again - its content is thrown away and its
+              // stream trimmed down to nothing. `store` refuses it regardless (that guard is what
+              // closes the race against a merge that is already running); skipping here only
+              // avoids doing the work. A soft-deleted room compacts normally, so whatever is on
+              // the stream is persisted before it is trimmed away.
+              if (persisted.tombstone?.hard || !strm.isSmallerRedisClock(persisted.lastClock, lastUpdateClock)) {
                 taskLog.debug('nothing to compact, trimming only')
-                await this.stream.trimMessages(task.room, strm.maxRedisClock(persisted.lastClock, cachedMessages.lastClock), this.stream.minMessageLifetime, task.redisClock)
+                // a hard-deleted room drains in this one pass: with maxAgeMs 0 the lua trims
+                // everything, finds the stream empty, DELs the key and the task is already acked.
+                // Safe because a task is only claimed after taskDebounce, long after every
+                // subscriber has seen the kick that was added when the document was deleted.
+                await this.stream.trimMessages(task.room, strm.maxRedisClock(persisted.lastClock, cachedMessages.lastClock), persisted.tombstone?.hard ? 0 : this.stream.minMessageLifetime, task.redisClock)
                 taskLog.info('task completed (trim only)')
                 return null
               }
@@ -176,6 +215,7 @@ export class YHub {
       contentids: /** @type {Include['contentids'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.contentids === true ? Y.encodeContentIds(mergedCids) : null),
       lastClock,
       lastPersistedClock: persistedDoc.lastClock,
+      tombstone: persistedDoc.tombstone,
       references,
       awareness,
       authChecks: cachedMessages.messages.filter(m => t.$authCheckMessage.check(m))
@@ -198,7 +238,8 @@ export class YHub {
    * @returns {Promise<void>}
    */
   async pruneDoc (room, filters) {
-    const { contentmap } = await this.getDoc(room, { contentmap: true })
+    const { contentmap, tombstone } = await this.getDoc(room, { contentmap: true })
+    if (tombstone != null) throw new t.DocDeletedError(room, tombstone)
     if (contentmap == null) return
     const prune = await this.computePool.computePruneSet({ contentmapBin: contentmap, ...filters }, { room })
     if (prune != null) {
@@ -234,6 +275,83 @@ export class YHub {
   }
 
   /**
+   * Delete `room`.
+   *
+   * A soft deletion (the default) only records that the document is gone: reads report it as
+   * deleted and every endpoint answers 404, connected clients are disconnected, but its rows and
+   * assets are left alone and compaction keeps running - so nothing that was already on the
+   * stream is lost before it is trimmed, and `restoreDoc` brings the document back intact.
+   * Erasing the content later is a retention task's job: sweep `getTombstones` and hard-delete
+   * what is due.
+   *
+   * A hard deletion additionally clears the stream and erases every row and asset right away,
+   * and cannot be undone. Compaction never persists a hard-deleted room again.
+   *
+   * Tombstone is per branch - deleting a document with all of its branches means deleting each of
+   * them.
+   *
+   * Idempotent: a repeated deletion keeps the original `deletedAt` (a retry must not
+   * extend a retention window), and a soft deletion can be upgraded to a hard one, never the
+   * reverse. Re-running a hard deletion re-runs the purge, which is how a compaction that was
+   * still in flight the first time gets cleaned up.
+   *
+   * @param {t.Room} room
+   * @param {object} [opts]
+   * @param {boolean} [opts.hard] erase the content immediately and irreversibly. (default: false)
+   * @param {string|null} [opts.by] userid recorded as the deleting user
+   * @returns {Promise<t.Tombstone>}
+   */
+  async deleteDoc (room, { hard = false, by = null } = {}) {
+    // postgres first: it is the durable record, and every step after it is idempotent and
+    // re-derivable from it. The other order would let a crash leave a kick that is trimmed away
+    // minutes later, silently undeleting the document with nothing left to heal from.
+    const tombstone = await this.persistence.storeTombstone(room, { deletedAt: await this.stream.getTime(), hard, by })
+    // both only have to happen after the tombstone commits - clearing the stream so a hard
+    // deletion keeps nothing, and dropping cached responses because a cache hit never reaches
+    // `getDoc` and would otherwise keep serving what was computed moments ago
+    await promise.all([
+      // add a tombstone message to the stream after trying to trim
+      (tombstone.hard ? this.stream.clearMessages(room) : promise.resolve()).finally(() => this.stream.addMessage(room, { type: 'ydoc:tombstone:v1' })),
+      this.stream.deleteCachedResponses(room)
+    ])
+    return tombstone.hard ? purgeDoc(this, room) : tombstone
+  }
+
+  /**
+   * Undo a soft deletion, making the document readable again. Its content was never touched, so
+   * it comes back with its full history.
+   *
+   * Refuses a hard deletion, and a soft one whose content was already purged: in both cases
+   * dropping the record would resurrect the document as a partial one, since `retrieveDoc`
+   * merges every row it finds and a straggling compaction may have left some behind.
+   *
+   * @param {t.Room} room
+   * @returns {Promise<void>}
+   */
+  async restoreDoc (room) {
+    const tombstone = await this.persistence.retrieveTombstone(room)
+    if (tombstone == null) return
+    if (tombstone.hard || tombstone.purgedAt != null) {
+      throw new Error(`cannot restore ${room.org}/${room.docid}/${room.branch}: its content was erased`)
+    }
+    await this.persistence.deleteTombstone(room)
+  }
+
+  /**
+   * The deletions recorded for `org` - what a retention task iterates to find the documents
+   * whose content is due to be erased, hard-deleting each one it sweeps up.
+   *
+   * @param {string} org
+   * @param {object} [filters]
+   * @param {boolean} [filters.purged] `false` selects deletions whose content still exists
+   * @param {number} [filters.before] only deletions whose `deletedAt` precedes this unix-ms timestamp
+   * @returns {Promise<Array<t.Tombstone>>}
+   */
+  getTombstones (org, filters) {
+    return this.persistence.retrieveTombstones(org, filters)
+  }
+
+  /**
    * Attribute and persist a document directly to the database, without distributing it via redis.
    *
    * Changes won't be synced to users connected via websocket until they reconnect.
@@ -243,8 +361,7 @@ export class YHub {
    * @param {{ by?: string }} attributions
    */
   async unsafePersistDoc (room, ydoc, { by }) {
-    const [seconds, microseconds] = await this.stream.redis.time()
-    const ms = parseInt(seconds) * 1000 + math.floor(parseInt(microseconds) / 1000)
+    const ms = await this.stream.getTime()
     const lastClock = `${ms}-I`
     const contentids = Y.createContentIdsFromUpdate(ydoc)
     /**

@@ -14,16 +14,13 @@ import * as object from 'lib0/object'
 import * as types from '../src/types.js'
 import { encodeRoomName } from '../src/stream.js'
 
-// Clean up test data - only delete if table exists
+// Clean up test data. Nothing here creates the schema - the databases are expected to be
+// initialized with `npm run start:init`, exactly like a deployment. The tombstone table matters
+// as much as the document table: room ids are deterministic per test, so a tombstone left behind
+// by one run would 404 that docid on every later run, restarts included.
 const sql = postgres(env.ensureConf('postgres'))
-const tableExists = await sql`
-  SELECT EXISTS (
-    SELECT FROM pg_tables
-    WHERE tablename = 'yhub_ydoc_v1'
-  );
-`
-if (tableExists?.[0]?.exists) {
-  await sql`DELETE from yhub_ydoc_v1`
+for (const table of ['yhub_ydoc_v1', 'yhub_ydoc_tombstones_v1']) {
+  await sql`DELETE from ${sql(table)}`
 }
 
 const yhubPort = number.parseInt(env.getConf('port') || '9999')

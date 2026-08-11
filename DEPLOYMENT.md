@@ -61,29 +61,14 @@ discard updates that the worker has not yet persisted.
 
 ## 2. Set Up PostgreSQL
 
-Create a PostgreSQL database and the required tables:
+Create a PostgreSQL database, then create the tables with `npm run start:init`
+(`bin/init-db.js`) — it is idempotent, so re-running it is safe. See
+[STORAGE-ARCHITECTURE.md](./STORAGE-ARCHITECTURE.md#postgresql-table-layout) for the schema.
 
-```sql
-CREATE TABLE IF NOT EXISTS yhub_updates_v1 (
-    org             text,
-    docid           text,
-    branch          text DEFAULT 'main',
-    gc              boolean DEFAULT true,
-    r               SERIAL,
-    update          bytea,
-    sv              bytea,
-    contentmap      bytea,
-    PRIMARY KEY     (org, docid, branch, gc, r)
-);
-
-CREATE TABLE IF NOT EXISTS yhub_attributions_v1 (
-    org         text,
-    docid       text,
-    branch      text DEFAULT 'main',
-    contentmap  bytea,
-    PRIMARY KEY (org, docid, branch)
-);
-```
+Servers and workers never run DDL themselves, so the credentials they run with need no DDL rights
+— but it also means **`npm run start:init` has to be re-run when upgrading to a release that adds
+a table**, before the new version starts. Releases that add one say so in the changelog; a missing
+table surfaces as `relation "..." does not exist` on the first request that needs it.
 
 **Environment variable:**
 

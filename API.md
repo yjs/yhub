@@ -44,7 +44,7 @@ when codes are added:
 
 | Close code | Meaning | Reconnect? |
 |---|---|---|
-| `4400`–`4499` | permanent yhub errors — `4401` permission revoked (see [`yhub.recheckAuth`](#yhubrecheckauthroom-opts); exported as `wsCloseAuthRevoked`) | no — act first (e.g. re-authenticate), then reconnect deliberately |
+| `4400`–`4499` | permanent yhub errors — `4401` permission revoked (see [`yhub.recheckAuth`](#yhubrecheckauthroom-opts); exported as `wsCloseAuthRevoked`), `4404` document deleted (see [`yhub.deleteDoc`](#yhubdeletedocroom-opts); exported as `wsCloseDocDeleted`) | no — act first (e.g. re-authenticate, or drop the local copy), then reconnect deliberately |
 | `4500`–`4599` | reserved for transient yhub errors (none sent today) | yes |
 | `1011` | internal error — initial sync, message handling, or stream relay failed | yes |
 | `1013` | try again later — backpressure limit exceeded, or the auth backend was unavailable during a re-check | yes |
@@ -138,6 +138,19 @@ Retrieve the current state of the Yjs document.
   * `branch="main"` (default): the branch to retrieve
   * `awareness=true`: also include the room's merged awareness state in the response (default: omitted)
   * Returns `{ doc: Uint8Array, awareness?: Uint8Array }`. `doc` is the encoded Yjs document update. `awareness`, when requested and non-empty, contains the bare awareness update bytes (same format as `encodeAwarenessUpdate(...)` and as the `awareness` field accepted by `PATCH /api/ydoc/v1`) — directly consumable by `applyAwarenessUpdate`. Omitted when the room has no awareness state.
+  * A deleted document answers `404 Not Found` with `{ error: 'Not Found', code: 'doc-deleted' }`. The `code` matters: a docid that was never written answers `200` with an empty document, so it is the only way to tell "deleted" from "never existed".
+
+#### DELETE /api/ydoc/v1/{org}/{docid}
+
+Delete a document. Requires write access, and is authorized with the `purpose` `'delete'` (see [Authorization and `purpose`](#authorization-and-purpose)) so it can be gated more tightly than `PATCH`.
+
+* `DELETE /api/ydoc/v1/{org}/{docid}` parameters: `{ branch?: string }`
+  * `branch="main"` (default): the branch to delete. **Deletion is per branch** — deleting a document with all of its branches means deleting each of them.
+  * Performs a *soft* deletion: the document stops being readable, connected WebSocket clients are disconnected, but its content is left untouched and can be brought back with [`yhub.restoreDoc`](#yhubrestoredocroom). Irreversible erasure stays out of REST — see [`yhub.deleteDoc`](#yhubdeletedocroom-opts).
+  * Returns `{ deletedAt: number, hard: boolean, by: string|null }`. `deletedAt` is the unix-ms timestamp of the deletion.
+  * Idempotent: deleting an already-deleted document answers `200` with the record that is already there, and the original `deletedAt` is never moved by a retry.
+
+After a deletion every endpoint that reads the document answers `404` — `GET`/`PATCH /api/ydoc/v1`, `rollback`, `prune`, `changeset`, `activity`, and any custom endpoint that calls `yhub.getDoc`. Responses cached before the deletion are dropped as part of it, so the `404` is immediate rather than delayed by `cacheTtl`.
 
 #### PATCH /api/ydoc/v1/{org}/{docid}
 
@@ -419,7 +432,7 @@ startup.
 | `scope` | `'doc' \| 'org' \| 'global'` | `'doc'` | route shape: `/api/{name}/{version}/{org}/{docid}`, `/api/{name}/{version}/{org}`, or `/api/{name}/{version}` |
 | `path` | `string` | `''` | extra named path segments appended to the route, e.g. `'/:commentId'` (named params only, available via `req.params`) |
 | `accessPurpose` | `string` | `null` | forwarded as `purpose` to the auth access callback (see below) |
-| `get`, `post`, `put`, `patch`, `delete` | `{ $query?, $body?, handler }` | — | method definitions; at least one is required. `handler` is the async request handler; `$query` optionally declares the supported query attributes and `$body` (not on `get`) the request body (see below). `get` requires `'r'` access, all other methods require `'rw'`. The method object is also where future per-method options will live. |
+| `get`, `post`, `put`, `patch`, `delete` | `{ $query?, $body?, accessPurpose?, handler }` | — | method definitions; at least one is required. `handler` is the async request handler; `$query` optionally declares the supported query attributes and `$body` (not on `get`) the request body (see below); `accessPurpose` overrides the endpoint's for this method alone. `get` requires `'r'` access, all other methods require `'rw'`. |
 
 Because the prefix, names, and versions are single segments, every request under the api namespace
 has the fixed shape `/{apiPrefix}/{apiname}/{version}/...` — easy for proxies to inspect
@@ -528,6 +541,18 @@ createAuthPlugin({
 Note that `purpose` is advisory: a `getAccessType` implementation that ignores it simply applies
 the user's plain doc access to every doc-scoped endpoint. An endpoint's `accessPurpose` broadens or
 narrows access only when the auth plugin acts on it.
+
+A single method can override it, which is how a destructive method is gated more tightly than the
+reads next to it — setting it on the endpoint instead would silently change the purpose that every
+existing caller of the other methods is authorized against. The built-in `ydoc` endpoint does
+exactly this, declaring `accessPurpose: 'delete'` on its `delete` method only:
+
+```js
+createApiEndpoint('report', {
+  get: { handler: async req => renderReport(req.room) },
+  delete: { accessPurpose: 'admin', handler: async req => dropReport(req.room) }
+})
+```
 
 #### The request object
 
@@ -686,6 +711,15 @@ yhub.getDoc(
 
 Only fields listed in `include` with a truthy value are populated; the rest are `null`. Set `gcOnMerge: false` to keep full history in the returned `gcDoc`.
 
+`tombstone` is always returned — `null` for a document that was never deleted — and is read in the same statement as the document, so it costs no extra round trip.
+
+**`getDoc` does not refuse a deleted document; it reports one.** Deciding what that means belongs to the caller: the built-in endpoints throw `DocDeletedError` (exported from `@y/hub`), which `registerApi` answers with `404 { code: 'doc-deleted' }`; the WebSocket path closes with `4404`; the compact worker carries on, because it still has to trim the stream. A custom endpoint that reads a document is in the same position and should do the same:
+
+```js
+const { gcDoc, tombstone } = await req.yhub.getDoc(req.room, { gc: true })
+if (tombstone != null) throw new DocDeletedError(req.room, tombstone)
+```
+
 **Example**
 
 ```js
@@ -825,6 +859,109 @@ createApiEndpoint('recheck-auth', {
 > **Rolling upgrades:** servers and workers running a version older than this feature fail reading
 > a room stream that contains an `auth:check:v1` entry (for up to `minMessageLifetime`). Deploy the
 > new version to all processes before the first `recheckAuth` call.
+
+#### `yhub.deleteDoc(room, opts?)`
+
+Delete a document. **Deletion is per branch** — deleting a document with all of its branches means
+deleting each of them. Deleting a whole document or a whole organization at once is not supported yet.
+
+```ts
+yhub.deleteDoc(
+  room: { org: string, docid: string, branch: string },
+  opts?: { hard?: boolean, by?: string | null }  // default: { hard: false, by: null }
+): Promise<{ org, docid, branch, deletedAt: number, hard: boolean, purgedAt: number|null, by: string|null }>
+```
+
+A **soft** deletion (the default) only records that the document is gone. Reads report it as deleted,
+connected clients are disconnected, but its rows and S3 objects are left alone and **compaction
+keeps running** — so updates that were still on the Redis stream are persisted rather than trimmed
+away unpersisted, and [`restoreDoc`](#yhubrestoredocroom) brings the document back with its full
+history. Erasing the content later is left to a retention task built on
+[`getTombstones`](#yhubgettombstonesorg-filters) — see [Retention](#retention).
+
+A **hard** deletion additionally clears the stream and erases every row and asset immediately, and
+cannot be undone. Compaction never persists a hard-deleted room again — the barrier lives inside
+the `INSERT` itself, so it also catches a compaction that was already merging when the deletion
+landed, and `unsafePersistDoc`, which bypasses both stream and API.
+
+Idempotent: a repeated deletion keeps the original `deletedAt` (a retry must not extend a
+retention window), and a soft deletion can be upgraded to a hard one, never the reverse. Re-running
+a hard deletion re-runs the purge, which is how a compaction that was still in flight the first
+time gets cleaned up.
+
+`hard` is deliberately not reachable over REST. `purpose` is advisory — an auth plugin that ignores
+it grants deletion to everyone who can write — so irreversible erasure stays programmatic, like
+`recheckAuth`.
+
+**What "hard delete" guarantees.** The document becomes unrecoverable *through the API*, and objects
+referenced by persistence plugins are handed to them for deletion. It is not a guarantee that every byte
+has already left the store — plugins may defer (`S3PersistenceV1` does, to let concurrent readers
+finish) — nor that every byte is reachable to begin with: `S3PersistenceV1`
+only offloads the `main` branch, so other branches' blobs live inline in `yhub_ydoc_v1` — a deleted
+row survives until autovacuum and lives on in WAL, replicas, and any earlier base backup.
+
+**Writes after a deletion** are not rejected at the Redis layer: a client that has not noticed yet can
+still push updates onto the stream. They are never persisted for a hard-deleted room, and are trimmed
+away with the rest of the stream.
+
+**Client handling.** Connected clients are disconnected with close code `4404`
+(`'document deleted'`, exported as `wsCloseDocDeleted`) — permanent, so the band rule under
+[Errors](#errors) already stops the reconnect loop. A deleted document additionally warrants
+dropping the local copy, which no generic handler can do for you:
+
+```js
+provider.on('connection-close', event => {
+  if (event?.code === 4404) indexeddbProvider.clearData()
+})
+```
+
+Without that, a local copy in IndexedDB outlives the deletion and re-syncs into any document later
+created under the same docid.
+
+#### `yhub.restoreDoc(room)`
+
+Undo a soft deletion, making the document readable again. Its content was never touched, so it comes
+back with its full history. Refuses a hard deletion, and a soft one whose content was already purged
+— in both cases dropping the record would resurrect a partial document, since `getDoc` merges every
+row it finds and a straggling compaction may have left some behind. Restoring a document that was
+never deleted is a no-op.
+
+#### `yhub.getTombstones(org, filters?)`
+
+```ts
+yhub.getTombstones(
+  org: string,
+  filters?: { purged?: boolean, before?: number }
+): Promise<Array<{ org, docid, branch, deletedAt: number, hard: boolean, purgedAt: number|null, by: string|null }>>
+```
+
+The deletions recorded for `org`. `purged: false` selects the documents whose content still exists,
+and `before` bounds `deletedAt` (unix ms).
+
+#### Retention
+
+y/hub ships no retention sweeper; deciding when a soft-deleted document is due is up to the
+integrator. A daily task is the whole of it:
+
+```js
+const RETENTION = 30 * 24 * 60 * 60 * 1000
+const due = await yhub.getTombstones(org, { purged: false, before: Date.now() - RETENTION })
+for (const doc of due) {
+  await yhub.deleteDoc(doc, { hard: true })   // upgrades the deletion and erases the content
+}
+```
+
+Erasing content is deliberately not a verb of its own. It is only safe once `hard` is set — that is
+what arms the barrier in `Persistence.store` against a compaction still in flight — so purging a
+merely soft-deleted document would let a straggler write its rows straight back. Hard-deleting an
+already-soft-deleted document keeps the original `deletedAt`, so a sweep does not restart anyone's
+retention window, and re-running it over a document it already handled is a no-op.
+
+`purgedAt` records that the document's rows are gone and its assets have been handed to the
+persistence plugins for deletion — not that every byte has already left the store, since a plugin
+may defer (`S3PersistenceV1` does, to let concurrent readers finish). Rows are always dropped before
+the assets they point at, so an interrupted purge leaves an orphaned object, never a reference to a
+missing one.
 
 #### `yhub.agentTask(room, opts, handler)`
 

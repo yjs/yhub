@@ -107,18 +107,35 @@ The worker periodically:
 
 ### Database Schema
 
+Tables are created by `npm run start:init` — see
+[STORAGE-ARCHITECTURE.md](./STORAGE-ARCHITECTURE.md#schema-creation) for the full layout and when
+to re-run it.
+
 ```sql
--- Main updates table
+-- Document versions. One row per compaction; rows are additive and merged on retrieval.
 CREATE TABLE yhub_ydoc_v1 (
-    org         text,           -- Organization/namespace (the "room")
+    org         text,           -- Organization/namespace
     docid       text,           -- Document identifier
-    branch      text DEFAULT 'main',
-    gc          boolean DEFAULT true,  -- Garbage collection enabled
-    r           SERIAL,         -- Reference number
-    update      bytea,          -- Encoded update reference (points to S3)
-    sv          bytea,          -- State vector
+    branch      text,
+    t           text,           -- Redis stream clock of this version
+    created     INT8,           -- Unix ms, derived from `t`
+    gcDoc       bytea,          -- Garbage-collected update (or an S3 reference)
+    nongcDoc    bytea,          -- Full-history update (or an S3 reference)
     contentmap  bytea,          -- Attribution content map
-    PRIMARY KEY (org, docid, branch, gc, r)
+    contentids  bytea,          -- Attributed content ids
+    PRIMARY KEY (org, docid, branch, t)
+);
+
+-- One row per deleted room. See `yhub.deleteDoc`.
+CREATE TABLE yhub_ydoc_tombstones_v1 (
+    org         text,
+    docid       text,
+    branch      text,
+    deleted_at  INT8    NOT NULL, -- Unix ms
+    hard        boolean NOT NULL, -- content erased immediately and irreversibly
+    purged_at   INT8,             -- Unix ms the content was erased; NULL while it still exists
+    by          text,
+    PRIMARY KEY (org, docid, branch)
 );
 ```
 

@@ -53,6 +53,13 @@ const reqToRoom = req => {
 export const wsCloseAuthRevoked = 4401
 
 /**
+ * Close code sent when the document was deleted (see `YHub.deleteDoc`). Permanent (4400-4499):
+ * the document is not coming back and a reconnect is refused at sync time anyway, so a client
+ * should stop reconnecting and drop its local copy.
+ */
+export const wsCloseDocDeleted = 4404
+
+/**
  * Matcher semantics of `YHub.recheckAuth`: a string matcher matches connections with that
  * `userid`; a plain-object matcher matches when each of its top-level properties deep-equals
  * the corresponding authInfo property (the authInfo may have additional properties).
@@ -206,6 +213,11 @@ class WSUser {
             // history-pruning directive: affects persisted history only, nothing to relay to clients
             break
           }
+          case 'ydoc:tombstone:v1': {
+            this.log.info('document deleted, disconnecting')
+            this.closeDocDeleted()
+            break
+          }
           case 'auth:check:v1': {
             if (message.users == null || message.users.some(u => matchesAuthInfo(u, this.authInfo))) {
               if (message.forceDisconnect) {
@@ -281,6 +293,16 @@ class WSUser {
       this.isClosed = true
     }
     this.destroy()
+  }
+
+  /**
+   * Disconnect because the document was deleted. Drops `awarenessId` first: `destroy` would
+   * otherwise announce this client's awareness departure, and that write would re-create the
+   * stream key the deletion just cleared and enqueue another compact task for a dead room.
+   */
+  closeDocDeleted () {
+    this.awarenessId = null
+    this.close(wsCloseDocDeleted, 'document deleted')
   }
 
   /**
@@ -376,6 +398,14 @@ const registerWebsocketServer = (yhub, app, prefix) => {
       user.log.info({ ip: Buffer.from(ws.getRemoteAddressAsText()).toString() }, 'client connected')
       try {
         const doctable = await yhub.getDoc(user.room, { gc: user.gc, nongc: !user.gc, awareness: true }, { gcOnMerge: false })
+        // also the upgrade-time check: a reconnecting client is refused here, and so is one whose
+        // document was deleted between the upgrade and this initial sync - a window the stream
+        // cannot cover, because `lastReceivedClock` is only set below
+        if (doctable.tombstone != null) {
+          user.log.info('document deleted, refusing to sync')
+          user.closeDocDeleted()
+          return
+        }
         const ydoc = doctable.gcDoc || doctable.nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
         const sv = await yhub.computePool.computeStateVector(ydoc, { room: user.room })
         // the initial `lastReceivedClock` (below) is past any pending auth:check entry, so a

@@ -122,6 +122,7 @@ export const assetIdFromString = assetIdString => {
         t: decodeURIComponent(parts[5])
       }
     case 'id:contentmap:v1':
+    case 'id:contentids:v1':
       return {
         type,
         org: decodeURIComponent(parts[1]),
@@ -166,10 +167,20 @@ export const $authCheckMessage = s.$({
 })
 
 /**
+ * Directive that a document was deleted (see `YHub.deleteDoc`). Payload-free: connections are
+ * kicked identically for hard and soft deletions, and anything that needs the distinction reads
+ * the deletion record from postgres. That also makes it replay-idempotent, so - unlike
+ * `auth:check:v1` - it survives `unquarantine` re-injection without a special case.
+ */
+export const $tombstoneMessage = s.$({
+  type: s.$literal('ydoc:tombstone:v1')
+})
+
+/**
  * A Message contains information w want to distribute to clients. They are usually put on the
  * distribution stream.
  */
-export const $message = s.$union($updateMessage, $awarenessMessage, $pruneMessage, $authCheckMessage)
+export const $message = s.$union($updateMessage, $awarenessMessage, $pruneMessage, $authCheckMessage, $tombstoneMessage)
 
 /**
  * @typedef {s.Unwrap<typeof $message>} Message
@@ -180,6 +191,33 @@ export const $room = s.$object({ org: s.$string, docid: s.$string, branch: s.$st
 /**
  * @typedef {s.Unwrap<typeof $room>} Room
  */
+
+/**
+ * The record of a deleted room (table `yhub_ydoc_tombstones_v1`), keyed by room. `deletedAt` and
+ * `purgedAt` are unix milliseconds read from redis `TIME`, so they are free of server clock skew
+ * and share the clock domain of `yhub_ydoc_v1.created`. `purgedAt` is null until the content has
+ * actually been erased - immediately for a hard deletion, whenever the retention task runs for a
+ * soft one.
+ *
+ * @typedef {{ org: string, docid: string, branch: string, deletedAt: number, hard: boolean, purgedAt: number|null, by: string|null }} Tombstone
+ */
+
+/**
+ * Thrown at a callsite that read a deleted room (see `YHub.deleteDoc`). `getDoc` itself never
+ * throws it - it reports the deletion as `tombstone` and each caller decides. Most refuse; the
+ * compact worker is the one that carries on, because it still has to trim the stream.
+ */
+export class DocDeletedError extends Error {
+  /**
+   * @param {Room} room
+   * @param {Tombstone} tombstone
+   */
+  constructor (room, tombstone) {
+    super(`document was deleted: ${room.org}/${room.docid}/${room.branch}`)
+    this.room = room
+    this.tombstone = tombstone
+  }
+}
 
 export const $compactTask = s.$({
   type: s.$literal('compact'),
@@ -209,10 +247,11 @@ export const $task = $compactTask
  * @typedef {import('lib0/ts').Prettify<{
  *   lastClock: string,
  *   lastPersistedClock: string,
+ *   tombstone: Tombstone|null,
  *   gcDoc: IfHasConf<Include, 'gc', Uint8Array<ArrayBuffer>>,
  *   nongcDoc: IfHasConf<Include, 'nongc', Uint8Array<ArrayBuffer>>,
  *   contentmap: IfHasConf<Include, 'contentmap', Uint8Array<ArrayBuffer>>,
- *   references: IfHasConf<Include, 'references', Array<{ assetId: AssetId, asset: Asset }>>,
+ *   references: IfHasConf<Include, 'references', Array<{ assetId: AssetId, asset: Asset|null }>>,
  *   contentids: IfHasConf<Include, 'contentids', Uint8Array<ArrayBuffer>>,
  *   awareness: IfHasConf<Include, 'awareness', Uint8Array<ArrayBuffer>>,
  *   authChecks: Array<s.Unwrap<typeof $authCheckMessage>>
@@ -220,6 +259,12 @@ export const $task = $compactTask
  */
 
 /**
+ * `delete` removes a single asset that is no longer referenced - a superseded version during
+ * compaction, or every version of a document during `YHub.purgeDoc`. Both reach it through
+ * `Persistence.deleteReferences`, which drops the referencing row first, so an asset deletion
+ * that is delayed or lost leaks an orphaned object rather than leaving a row pointing at
+ * nothing.
+ *
  * @typedef {object} PersistencePlugin
  * @property {null|((api: import('./index.js').YHub)=>Promise<any>?)} [PersistPlugin.init]
  * @property {null|((assetId: AssetId, asset: Asset)=>Promise<RetrievableAsset?>)} [PersistPlugin.store]
@@ -327,8 +372,11 @@ export const createAuthPlugin = authDef => authDef
  * (binary fields arrive as base64 strings), lib0-any bodies express exact types and are validated
  * as-is - failing requests are answered 400 with `code: 'invalid-body'`.
  *
+ * `accessPurpose` overrides the endpoint's `accessPurpose` for this method alone - a destructive
+ * method usually deserves a stronger gate than its reads.
+ *
  * @template Req
- * @typedef {{ $query?: { [key: string]: any }, $body?: { [key: string]: any }, handler: (req: Req) => any }} ApiMethodDef
+ * @typedef {{ $query?: { [key: string]: any }, $body?: { [key: string]: any }, accessPurpose?: string, handler: (req: Req) => any }} ApiMethodDef
  */
 
 /**
@@ -411,7 +459,7 @@ export const createAuthPlugin = authDef => authDef
  * @template [BPatch=undefined]
  * @template [BDelete=undefined]
  * @param {Name} name
- * @param {{ version?: string, scope?: Scope, path?: string, accessPurpose?: string, get?: { $query?: QGet, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QGet>>) => any }, post?: { $query?: QPost, $body?: BPost, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPost>, ApiBodyType<BPost>>) => any }, put?: { $query?: QPut, $body?: BPut, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPut>, ApiBodyType<BPut>>) => any }, patch?: { $query?: QPatch, $body?: BPatch, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPatch>, ApiBodyType<BPatch>>) => any }, delete?: { $query?: QDelete, $body?: BDelete, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QDelete>, ApiBodyType<BDelete>>) => any } }} opts
+ * @param {{ version?: string, scope?: Scope, path?: string, accessPurpose?: string, get?: { $query?: QGet, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QGet>>) => any }, post?: { $query?: QPost, $body?: BPost, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPost>, ApiBodyType<BPost>>) => any }, put?: { $query?: QPut, $body?: BPut, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPut>, ApiBodyType<BPut>>) => any }, patch?: { $query?: QPatch, $body?: BPatch, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPatch>, ApiBodyType<BPatch>>) => any }, delete?: { $query?: QDelete, $body?: BDelete, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QDelete>, ApiBodyType<BDelete>>) => any } }} opts
  * @return {ApiEndpoint & { name: Name }}
  */
 export const createApiEndpoint = (name, opts) => /** @type {any} */ ({ name, ...opts })
@@ -429,7 +477,7 @@ export const $config = s.$object({
      */
     minMessageLifetime: s.$number.optional,
     /**
-     * TTL for cached API responses in seconds. (default: 10 seconds)
+     * TTL for cached API responses in seconds. (default: 5 seconds)
      */
     cacheTtl: s.$number.optional,
     /**

@@ -955,3 +955,29 @@ export const testOldRoutesRemoved = async tc => {
 //   console.log('activity result', JSON.stringify(activity))
 //   t.assert(Array.isArray(activity))
 // }
+
+/**
+ * Redis key components are percent-encoded so that no org/docid/branch can widen a glob built
+ * from them - `encodeURIComponent` alone leaves `*` intact.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testRoomNameEncoding = async tc => {
+  const { yhub, org } = await utils.createTestCase(tc)
+  const s = yhub.stream
+  const hostile = { org, docid: tc.testName + '-*', branch: 'main' }
+  const sibling = { org, docid: tc.testName + '-x', branch: 'main' }
+  t.assert(!stream.encodeRoomName(hostile, s.prefix).includes('*'), 'no glob metacharacter survives encoding')
+  for (const str of ['a*b', "!'()*", 'a:b/c%d', 'é ü', '']) {
+    t.compare(stream.uriDecode(stream.uriEncode(str)), str, 'uriEncode/uriDecode roundtrip')
+  }
+  t.compare(stream.decodeRoomName(stream.encodeRoomName(hostile, s.prefix), s.prefix), hostile, 'room name roundtrip')
+  // the payoff: a "*" docid must not reach its sibling's quarantine
+  await s.addMessage(sibling, { type: 'awareness:v1', update: new Uint8Array([0]) })
+  const qid = await s.quarantine(sibling)
+  t.assert(qid != null)
+  t.compare(await s.getQuarantineStreams(hostile), [], 'the hostile docid matches nothing')
+  t.compare(await s.getQuarantineStreams(sibling), [(qid)], 'its owner still finds it')
+  await s.deleteQuarantineStreams(sibling)
+  await s.redis.del(stream.encodeRoomName(sibling, s.prefix))
+}

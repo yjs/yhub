@@ -3,6 +3,7 @@ import * as awarenessProtocol from '@y/protocols/awareness'
 import * as time from 'lib0/time'
 import * as promise from 'lib0/promise'
 import * as protocol from './protocol.js'
+import { DocDeletedError } from './types.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'agents' })
@@ -60,6 +61,7 @@ export const agentTask = async (
   handler
 ) => {
   const doctable = await yhub.getDoc(room, { gc: true })
+  if (doctable.tombstone != null) throw new DocDeletedError(room, doctable.tombstone)
   const ydoc = new Y.Doc()
   if (doctable.gcDoc) Y.applyUpdate(ydoc, doctable.gcDoc)
   const awareness = new awarenessProtocol.Awareness(ydoc)

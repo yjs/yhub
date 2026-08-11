@@ -27,7 +27,7 @@ node --env-file .env ./bin/worker.js
 ```
 
 ### Testing
-Requires running databases (Redis, PostgreSQL, MinIO) and a `.env` file with connection details. Optional `.env.testing` overrides are loaded automatically if present.
+Requires running databases (Redis, PostgreSQL, MinIO) and a `.env` file with connection details. Optional `.env.testing` overrides are loaded automatically if present. The tables must already exist - run `npm run start:init` once, and again after pulling a release that adds one. Nothing creates them implicitly: not the test harness, not the server, not the worker.
 
 ```bash
 npm test               # Run all tests

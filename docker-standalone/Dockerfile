@@ -18,9 +18,9 @@ COPY docker-standalone/entrypoint.sh ./entrypoint.sh
 ENV REDIS=redis://localhost:6379 \
     REDIS_PREFIX=yhub \
     POSTGRES=postgres://yhub:yhub@localhost:5432/yhub \
-    PORT=3002
+    PORT=4400
 
 VOLUME /data
-EXPOSE 3002
+EXPOSE 4400
 
 ENTRYPOINT ["./entrypoint.sh"]

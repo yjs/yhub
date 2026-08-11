@@ -20,7 +20,7 @@ const yhub = await createYHub({
   postgres: env.getConf('POSTGRES'),      // e.g. 'postgres://user:pass@localhost:5432/db'
   persistence: [],
   server: {
-    port: 3000,
+    port: 4400,
     auth: createAuthPlugin({
       async readAuthInfo(req) {
         return { userid: 'anonymous' }
@@ -50,7 +50,7 @@ const publicKey = await ecdsa.importKeyJwk(JSON.parse(env.getConf('AUTH_PUBLIC_K
 const yhub = await createYHub({
   // ... redis, postgres, persistence config
   server: {
-    port: 3000,
+    port: 4400,
     auth: createAuthPlugin({
       async readAuthInfo(req) {
         const token = req.getQuery('yauth')
@@ -109,7 +109,7 @@ await createYHub({
   redis: { url: env.getConf('REDIS'), prefix: 'yhub' },
   postgres: env.getConf('POSTGRES'),
   persistence: [],
-  server: { port: 3000, auth: createAuthPlugin({ /* ... */ }) },
+  server: { port: 4400, auth: createAuthPlugin({ /* ... */ }) },
   worker: null  // No worker in this process
 })
 ```
@@ -148,16 +148,16 @@ const yhub = await createYHub({
   postgres: env.getConf('POSTGRES'),  // Still required for metadata
   persistence: [
     new S3PersistenceV1({
-      bucket: env.getConf('S3_BUCKET'),
+      bucket: env.getConf('S3_YHUB_BUCKET'),
       endPoint: env.getConf('S3_ENDPOINT'),      // e.g. 's3.amazonaws.com' or 'localhost'
-      port: parseInt(env.getConf('S3_PORT')),    // e.g. 443 for AWS, 9010 for local MinIO
+      port: parseInt(env.getConf('S3_PORT')),    // e.g. 443 for AWS, 4419 for the local dev MinIO
       useSSL: env.getConf('S3_SSL') === 'true',
       accessKey: env.getConf('S3_ACCESS_KEY'),
       secretKey: env.getConf('S3_SECRET_KEY')
     })
   ],
   server: {
-    port: 3000,
+    port: 4400,
     auth: createAuthPlugin({ /* ... */ })
   },
   worker: {
@@ -175,7 +175,7 @@ S3_PORT=9010               # 443 for AWS S3
 S3_SSL=false               # true for AWS S3
 S3_ACCESS_KEY=your-access-key
 S3_SECRET_KEY=your-secret-key
-S3_BUCKET=yhub
+S3_YHUB_BUCKET=yhub
 ```
 
 ### How It Works
@@ -215,7 +215,7 @@ S3_PORT=9010
 S3_SSL=false
 S3_ACCESS_KEY=minioadmin
 S3_SECRET_KEY=minioadmin
-S3_BUCKET=yhub
+S3_YHUB_BUCKET=yhub
 ```
 
 ## Docker
@@ -254,7 +254,7 @@ services:
       REDIS: redis://redis:6379
       POSTGRES: postgres://yhub:yhub@postgres:5432/yhub
       AUTH_PUBLIC_KEY: ${AUTH_PUBLIC_KEY}
-    ports: ["3000:3000"]
+    ports: ["4400:4400"]
     depends_on: [redis, postgres]
     deploy:
       replicas: 2  # Scale servers horizontally
@@ -275,7 +275,7 @@ services:
 Clients connect via WebSocket with auth token as query parameter:
 
 ```
-ws://localhost:3000/api/ws/v1/{org}/{docid}?yauth={token}&branch={branch}
+ws://localhost:4400/api/ws/v1/{org}/{docid}?yauth={token}&branch={branch}
 ```
 
 - `org` - Organization/namespace

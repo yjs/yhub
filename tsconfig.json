@@ -25,6 +25,7 @@
     "tests/**/*.js",
     "src/**/*.js",
     "bin/**/*.js",
+    "scripts/**/*.js",
     "benchmarks/src/**/*.js"
   ],
   "exclude": [

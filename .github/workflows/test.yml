@@ -74,7 +74,7 @@ jobs:
           S3_YHUB_TEST_BUCKET=yhub-testing
           POSTGRES=postgres://yhub:yhub@localhost:5432/yhub
           POSTGRES_TESTING=postgres://yhub:yhub@localhost:5432/yhub-testing
-          LOG=*
+          LOG_LEVEL=info
           EOF
 
       - name: Initialize databases

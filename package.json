@@ -5,21 +5,27 @@
   "sideEffects": false,
   "type": "module",
   "funding": {
-    "type": "GitHub Sponsors ❤",
+    "type": "GitHub Sponsors \u2764",
     "url": "https://github.com/sponsors/dmonad"
   },
   "scripts": {
-    "start": "docker build -f docker-standalone/Dockerfile -t yhub-standalone . && docker run --rm -p 3002:3002 yhub-standalone 2>&1 | pino-pretty -S",
-    "start:dbs": "docker compose --profile db up",
-    "start:minio": "docker compose --profile db up minio",
-    "start:server": "node --env-file .env ./bin/yhub.js | pino-pretty -S",
-    "docker:rebuild": "docker compose --profile all build --no-cache",
-    "start:init": "node --env-file .env $(test -f .env.testing && echo '--env-file .env.testing') ./bin/init-db.js | pino-pretty -S",
+    "start": "npm run dev:up && node --env-file .env ./bin/yhub.js | pino-pretty -S",
+    "start:server": "npm run dev:up && node --env-file .env ./bin/server.js | pino-pretty -S",
+    "start:worker": "npm run dev:up && node --env-file .env ./bin/worker.js | pino-pretty -S",
+    "start:dbs": "npm run dev:up",
+    "start:init": "node --env-file .env ./bin/init-db.js | pino-pretty -S",
+    "start:standalone": "docker build -f docker-standalone/Dockerfile -t yhub-standalone . && docker run --rm -p 4400:4400 yhub-standalone 2>&1 | pino-pretty -S",
+    "dev:env": "node scripts/dev-env.js",
+    "dev:up": "node scripts/dev-env.js --up",
+    "dev:down": "node scripts/dev-env.js --down",
+    "dev:release": "node scripts/dev-env.js --release",
+    "docker:rebuild": "docker compose --profile app build --no-cache",
     "dist": "npm run types",
     "types": "tsc --skipLibCheck",
     "lint": "standard && tsc --skipLibCheck",
-    "test": "sh -c 'FORCE_COLOR=true node --expose-gc --max-old-space-size=8192 --env-file .env $(test -f .env.testing && echo --env-file .env.testing) tests/index.js \"$@\" | pino-pretty -S -L debug' --",
-    "debug:test": "sh -c 'FORCE_COLOR=true node --expose-gc --max-old-space-size=8192 --env-file .env $(test -f .env.testing && echo --env-file .env.testing) --inspect-brk tests/index.js \"$@\" | pino-pretty -S' --",
+    "pretest": "node scripts/dev-env.js --up",
+    "test": "sh -c 'FORCE_COLOR=true node --expose-gc --max-old-space-size=8192 --env-file .env --env-file-if-exists .env.testing tests/index.js \"$@\" | pino-pretty -S -L debug' --",
+    "debug:test": "sh -c 'FORCE_COLOR=true node --expose-gc --max-old-space-size=8192 --env-file .env --env-file-if-exists .env.testing --inspect-brk tests/index.js \"$@\" | pino-pretty -S' --",
     "preversion": "npm run lint && npm run dist",
     "clean": "rm -rf **/dist "
   },
@@ -76,7 +82,7 @@
   },
   "engines": {
     "npm": ">=8.0.0",
-    "node": ">=22.0.0"
+    "node": ">=22.9.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.6",

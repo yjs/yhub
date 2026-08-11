@@ -13,8 +13,7 @@ import { registerApi } from '../src/api.js'
  */
 const decodeResponse = async response => buffer.decodeAny(new Uint8Array(await response.arrayBuffer()))
 
-// not 9010/9011 - those host ports belong to MinIO (see compose.yaml)
-const purposeHubPort = 9012
+const purposeHubPort = utils.testHubPort(3)
 const purposeHost = `localhost:${purposeHubPort}`
 
 /**
@@ -55,7 +54,7 @@ await utils.createTestHub({
 
 // a hub with a renamed custom-api prefix: endpoints are served under /collaboration/...
 // instead of /api/...
-const prefixHubPort = 9014
+const prefixHubPort = utils.testHubPort(4)
 const prefixHost = `localhost:${prefixHubPort}`
 
 await utils.createTestHub({

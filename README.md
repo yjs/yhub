@@ -153,20 +153,21 @@ Updates stored in PostgreSQL reference S3 objects:
 
 ## Configuration
 
-All features are configurable using environment variables. For local development
-it makes sense to setup a `.env` file, that stores project-specific secrets. Use
-`.env.template` as a template to setup environment variables.
+All features are configurable using environment variables. For local development,
+run `npm run dev:env` - it creates a `.env` from `.env.template` and fills in the
+connection details for a dev environment that is unique to your checkout (see
+[Local Development](#local-development)).
 
 ### Required Settings
 
 ```bash
 # Redis connection
 REDIS=redis://localhost:6379
-REDIS_PREFIX=y                    # Prefix for all Redis keys
+REDIS_PREFIX=yhub                 # Prefix for all Redis keys
 
 # S3 storage (MinIO compatible)
 S3_ENDPOINT=localhost
-S3_PORT=9010
+S3_PORT=9000                      # locally: allocated by `npm run dev:env`
 S3_SSL=false
 S3_ACCESS_KEY=minioadmin
 S3_SECRET_KEY=minioadmin
@@ -184,15 +185,15 @@ AUTH_PRIVATE_KEY={"kty":"EC",...}
 
 ```bash
 # Server port
-PORT=3002
+PORT=4400
 
-# Testing database (for running tests)
+# Testing database and websocket port (for running tests)
 POSTGRES_TESTING=postgres://user:pass@localhost:5432/yhub-testing
 S3_YHUB_TEST_BUCKET=yhub-testing
+TEST_PORT=4424
 
-# Logging (regex pattern)
-LOG=*                             # Log everything
-# LOG=@y/hub                      # Log only y/hub messages
+# Logging: trace | debug | info | warn | error | fatal | silent
+LOG_LEVEL=info
 
 # Expert settings
 REDIS_MIN_MESSAGE_LIFETIME=60000  # Minimum message lifetime in Redis (ms)
@@ -203,29 +204,15 @@ REDIS_TASK_DEBOUNCE=10000         # Worker task debounce time (ms)
 
 ### 1. Set Up Infrastructure
 
-Start the required services:
-
 ```bash
-# Using Docker (or podman)
-docker run -p 6379:6379 redis
-docker run -p 5432:5432 -e POSTGRES_USER=yhub -e POSTGRES_PASSWORD=yhub postgres:16-alpine
-docker run -p 9010:9000 -p 9011:9001 quay.io/minio/minio server /data --console-address ":9001"
-
-# Or use the npm scripts
-npm run redis
-npm run postgres
-npm run minio
+npm run dev:up
 ```
 
-### 2. Initialize the Database
+This starts Valkey, PostgreSQL and MinIO in containers, creates the PostgreSQL
+tables and the S3 buckets, and writes the connection details to `.env`. Ports are
+allocated per checkout - see [Local Development](#local-development).
 
-```bash
-npm run init
-```
-
-This creates the required PostgreSQL tables and S3 buckets.
-
-### 3. Generate Authentication Keys
+### 2. Generate Authentication Keys
 
 ```bash
 npx 0ecdsa-generate-keypair --name auth
@@ -234,7 +221,7 @@ npx 0ecdsa-generate-keypair --name auth
 Add the generated keys to your `.env` file as `AUTH_PUBLIC_KEY` and
 `AUTH_PRIVATE_KEY`.
 
-### 4. Implement the Permission Callback
+### 3. Implement the Permission Callback
 
 y/hub calls your backend to check if a user has access to a document. Implement
 this endpoint in your existing backend:
@@ -255,7 +242,7 @@ app.get('/auth/perm/:room/:userid', async (req, res) => {
 })
 ```
 
-### 5. Implement Token Generation
+### 4. Implement Token Generation
 
 Clients need a JWT token to connect. Create an endpoint that generates tokens:
 
@@ -280,7 +267,7 @@ app.get('/auth/token', async (req, res) => {
 })
 ```
 
-### 6. Connect from the Client
+### 5. Connect from the Client
 
 ```javascript
 import * as Y from 'yjs'
@@ -291,7 +278,7 @@ const authToken = await fetch('/auth/token').then(r => r.text())
 
 const ydoc = new Y.Doc()
 const provider = new WebsocketProvider(
-  'ws://localhost:3002/api/ws/v1',
+  'ws://localhost:4400/api/ws/v1',
   'my-document-room',
   ydoc,
   {
@@ -314,7 +301,7 @@ ytext.insert(0, 'Hello, world!')
 The provider reconnects automatically on any disconnect. Stop it when the server closes with a
 permanent code (`4400`–`4499`, e.g. `4401` permission revoked) — see [API.md → Errors](API.md#errors).
 
-### 7. Start the Server
+### 6. Start the Server
 
 ```bash
 # Start both server and worker
@@ -407,107 +394,79 @@ The fastest way to try y/hub. A single container runs PostgreSQL, Valkey
 (Redis), and y/hub together — no external services required.
 
 ```bash
-docker run -p 3002:3002 ghcr.io/yjs/yhub/standalone:latest
+docker run -p 4400:4400 ghcr.io/yjs/yhub/standalone:latest
 ```
 
 Data is stored inside the container and lost when it stops. To persist data
 across restarts, mount a volume:
 
 ```bash
-docker run -p 3002:3002 -v yhub-data:/data ghcr.io/yjs/yhub/standalone:latest
+docker run -p 4400:4400 -v yhub-data:/data ghcr.io/yjs/yhub/standalone:latest
 ```
 
-Connect a Yjs client to `ws://localhost:3002/api/ws/v1/my-org/my-doc` and start
+Connect a Yjs client to `ws://localhost:4400/api/ws/v1/my-org/my-doc` and start
 collaborating.
 
 > **Note:** The standalone container uses open authentication (any client can
 > read/write any document). It is intended for development and evaluation. For
 > production, use the full setup below with a proper auth callback.
 
-# Quick Start (docker-compose)
-
-You can get everything running quickly using
-[docker-compose](https://docs.docker.com/compose/). The compose file runs the
-following components:
-
-- redis
-- minio as a s3 endpoint
-- a single y/hub server
-- a single y/hub worker
-
-This can be a good starting point for your application. If your cloud provider
-has a managed s3 service, you should probably use that instead of minio. If you
-want to use minio, you need to setup proper volumes and backups.
-
-The full setup gives insight into more specialized configuration options.
+# Local Development
 
 ```sh
 git clone https://github.com/yjs/yhub.git
 cd yhub
 npm i
+npm start
 ```
 
-# Full setup
+`npm start` provisions the dev environment and then runs a server and a worker in
+one process. Provisioning is handled by `scripts/dev-env.js`, which
 
-Components are configured via environment variables. It makes sense to start by
-cloning y/hub and getting one of the demos to work.
+- allocates a block of 16 free host ports for this checkout (range `4416`-`4927`,
+  claimed in `~/.cache/yhub/dev-ports/`, derived from a hash of the checkout path),
+- writes them into the managed section at the bottom of `.env`, creating that file
+  from `.env.template` if it does not exist yet,
+- starts Valkey, PostgreSQL and MinIO in a compose project named after the checkout, and
+- creates the databases, tables and S3 buckets.
 
-Note: If you want to use any of the docker commands, feel free to use podman (a
+Because every checkout gets its own ports, its own containers and its own volumes,
+several git worktrees can run their servers and test suites simultaneously without
+sharing any state. Everything you write *above* the managed marker in `.env` -
+credentials, `REDIS_PREFIX`, `LOG_LEVEL` - is preserved when the ports are
+regenerated.
+
+```sh
+npm run dev:up       # only provision (this is what npm start / npm test call)
+npm run dev:down     # stop the containers, keep the data volumes
+npm run dev:release  # stop, drop the volumes, release the port block
+npm run dev:env -- --force  # re-derive the allocation
+```
+
+Note: if you want to use any of the docker commands, feel free to use podman (a
 more modern alternative) instead.
 
-#### Start a redis instance
-
-Setup redis on your computer. Follow the [official
-documentation](https://redis.io/docs/install/install-redis/). This is
-recommended if you want to debug the redis stream.
-
-Alternatively, simply run redis via docker:
-
-```sh
-npm run redis
-```
-
-### Start Postgres instance
-
-```sh
-npm run postgres
-```
-
-### Start MinIO (S3) instance
-
-```sh
-npm run minio
-```
-
-#### Clone demo
-
-```sh
-git clone https://github.com/yjs/yhub.git
-cd yhub
-npm i
-```
-
-Setup environment variables:
-
-```sh
-cp .env.template .env
-nano .env
-```
-
-Then you can run the different components in separate terminals:
+The server and the worker can also be run as separate processes, in separate
+terminals:
 
 ```sh
 # run the server
 npm run start:server
 # run a single worker in a separate terminal
 npm run start:worker
-# start the express server in a separater terminal
+# start the express server in a separate terminal
 cd demos/attributions
 npm i
 npm start
 ```
 
 Open [`http://localhost:5173`](http://localhost:5173) in a browser.
+
+To run y/hub itself in containers as well, use the `app` compose profile:
+
+```sh
+docker compose --profile app up
+```
 
 ## Plugins
 
@@ -526,13 +485,13 @@ import { createYHub } from '@y/hub'
 import { S3PersistenceV1 } from '@y/hub/plugins/s3'
 
 const yhub = await createYHub({
-  redis:    { url: 'redis://localhost:6379', prefix: 'y' },
+  redis:    { url: 'redis://localhost:6379', prefix: 'yhub' },
   postgres: 'postgres://user:pass@localhost:5432/yhub',
   persistence: [
     new S3PersistenceV1({
       bucket:    'yhub',
       endPoint:  'localhost',
-      port:      9010,
+      port:      9000,
       useSSL:    false,
       accessKey: 'minioadmin',
       secretKey: 'minioadmin',

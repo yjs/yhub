@@ -118,7 +118,7 @@ export const createYHubServer = async (yhub, conf) => {
   registerApi(yhub, app)
 
   await promise.create((resolve, reject) => {
-    const port = conf.server?.port || 4000
+    const port = conf.server?.port || 4400
     app.listen(port, (token) => {
       if (token) {
         log.info({ port }, 'listening')

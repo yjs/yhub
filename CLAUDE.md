@@ -15,23 +15,41 @@ npm run lint           # standard + tsc --skipLibCheck
 
 ### Running Locally
 ```bash
-npm run start:dbs      # Start Redis (Valkey), PostgreSQL, MinIO via Docker Compose
-npm run start:init     # Initialize DB tables and S3 buckets
-npm run start          # Start all services (server + worker + DBs) via Docker Compose
+npm run start          # Provision the dev environment, then run server + worker
+npm run dev:up         # Only provision: allocate ports, write .env, start the dbs, init them
+npm run dev:down       # Stop the dev containers (keeps the data volumes)
+npm run dev:release    # Stop, drop the volumes, and release the port block
 ```
 
 Server and worker can also be run individually:
 ```bash
-node --env-file .env ./bin/server.js
-node --env-file .env ./bin/worker.js
+npm run start:server
+npm run start:worker
 ```
 
+**Every worktree gets its own dev environment.** `scripts/dev-env.js` derives a block of 16
+host ports from a hash of the worktree path (range 4416-4927, claimed in
+`~/.cache/yhub/dev-ports/`), writes them into the managed section at the bottom of `.env`, and
+starts a compose project named after the worktree. Several worktrees can therefore run their
+databases and test suites at the same time without sharing anything. Anything you write
+*above* the managed marker in `.env` is preserved.
+
 ### Testing
-Requires running databases (Redis, PostgreSQL, MinIO) and a `.env` file with connection details. Optional `.env.testing` overrides are loaded automatically if present. The tables must already exist - run `npm run start:init` once, and again after pulling a release that adds one. Nothing creates them implicitly: not the test harness, not the server, not the worker.
+`npm test` provisions the dev environment first (via the `pretest` hook), so no manual setup is
+needed. Tests run against `POSTGRES_TESTING` and `S3_YHUB_TEST_BUCKET` on ports derived from
+`TEST_PORT`, so they never touch your dev data.
+
+The tables must already exist. `npm run dev:up` (which `pretest` calls) runs `bin/init-db.js`,
+so a release that adds a table is picked up automatically on the next run. Nothing creates them
+implicitly: not the test harness, not the server, not the worker.
 
 ```bash
 npm test               # Run all tests
+npm test -- --filter "\[12/"   # Re-run a single test
 ```
+
+Two test runs *within the same worktree* still share a redis prefix and postgres table and must
+stay serial. Across worktrees they are fully independent.
 
 Tests use `lib0/testing` (not Jest/Mocha). The test runner is `tests/index.js` which imports all test modules. There is no built-in way to run a single test file — all suites run together. To debug:
 

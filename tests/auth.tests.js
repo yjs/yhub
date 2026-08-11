@@ -14,7 +14,7 @@ import { matchesAuthInfo } from '../src/server.js'
 const authPrivateKey = await ecdsa.importKeyJwk({ key_ops: ['sign'], ext: true, kty: 'EC', x: '96pShK8Z3iJ8UZpN4tuyv9CuPuzwWgC_I72N6ZUNWOSBDflVxwYPtL3PcCgCF2aE', y: 'Q39u2jtATgoBd9D8Tx744v6KljwE3iOZr30Rf8yuVT3UgGEi0bcKufUGVSeKls8s', crv: 'P-384', d: 'BS_hqq6UMpuqS10oIWzEyTUt7RRQrysUMUdlwUyVimV_CTTNEpxXFW9_D0NA9rHt' })
 const authPublicKey = await ecdsa.importKeyJwk({ key_ops: ['verify'], ext: true, kty: 'EC', x: '96pShK8Z3iJ8UZpN4tuyv9CuPuzwWgC_I72N6ZUNWOSBDflVxwYPtL3PcCgCF2aE', y: 'Q39u2jtATgoBd9D8Tx744v6KljwE3iOZr30Rf8yuVT3UgGEi0bcKufUGVSeKls8s', crv: 'P-384' })
 
-const authHubPort = 9009
+const authHubPort = utils.testHubPort(1)
 
 /**
  * This is an example of how you could add auth support via jwt.
@@ -45,7 +45,7 @@ await utils.createTestHub({
   }
 })
 
-const kickHubPort = 9013
+const kickHubPort = utils.testHubPort(2)
 /**
  * Mutable permission table: userid -> accessType, so tests can revoke/downgrade access of
  * connected users. Unlisted users get 'rw'. `null` is a meaningful (revoked) entry, hence the

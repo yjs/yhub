@@ -1,78 +1,65 @@
+# Dev infrastructure. All host ports and the project name come from `.env`, which is generated
+# per git worktree by `scripts/dev-env.js`. Start it with `npm run dev:up` (or `npm start`),
+# never with a bare `docker compose up` - the defaults below are only a fallback.
+#
+# The `app` profile additionally runs yhub itself in containers:
+#   docker compose --profile app up
 services:
+  valkey:
+    image: valkey/valkey:alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - valkey:/data
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: yhub
+      POSTGRES_PASSWORD: yhub
+      POSTGRES_DB: yhub
+    volumes:
+      - postgres:/var/lib/postgresql/data
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "${S3_PORT:-9010}:9000"
+      - "${S3_CONSOLE_PORT:-9011}:9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio:/data
   server:
     build: .
-    profiles: ["all"]
-    ports:
-      - "3002:3002"
+    profiles: ["app"]
     command: node ./bin/server.js --no-colors
+    ports:
+      - "${DOCKER_PORT:-4400}:${DOCKER_PORT:-4400}"
+    environment:
+      PORT: ${DOCKER_PORT:-4400}
     env_file:
       - .env
       - .env.docker
     depends_on:
-      init:
-        condition: service_completed_successfully
+      - valkey
+      - postgres
+      - minio
   worker:
     build: .
-    profiles: ["all"]
+    profiles: ["app"]
     command: node ./bin/worker.js --no-colors
     env_file:
       - .env
       - .env.docker
     depends_on:
-      init:
-        condition: service_completed_successfully
+      - valkey
+      - postgres
+      - minio
+
+volumes:
   valkey:
-    image: valkey/valkey:alpine
-    profiles: ["all", "db"]
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
   postgres:
-    image: postgres:16-alpine
-    profiles: ["all", "db"]
-    ports:
-      - "5432:5432"
-    environment:
-      POSTGRES_USER: yhub
-      POSTGRES_PASSWORD: yhub
-      POSTGRES_DB: yhub
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U yhub"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
   minio:
-    image: minio/minio:latest
-    profiles: ["all", "db"]
-    ports:
-      # host ports 9000/9001 are commonly taken by other MinIO instances - yhub uses 9010/9011
-      - "9010:9000"
-      - "9011:9001"
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
-  init:
-    build: .
-    profiles: ["all", "db"]
-    command: sh -c "sleep 5 && node ./bin/init-db.js ; echo done"
-    env_file:
-      - .env
-      - .env.docker
-    depends_on:
-      postgres:
-        condition: service_healthy
-      valkey:
-        condition: service_healthy
-      minio:
-        condition: service_healthy

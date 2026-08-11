@@ -15,15 +15,23 @@ import * as types from '../src/types.js'
 import { encodeRoomName } from '../src/stream.js'
 
 // Clean up test data. Nothing here creates the schema - the databases are expected to be
-// initialized with `npm run start:init`, exactly like a deployment. The tombstone table matters
+// initialized with `npm run dev:up`, exactly like a deployment. The tombstone table matters
 // as much as the document table: room ids are deterministic per test, so a tombstone left behind
 // by one run would 404 that docid on every later run, restarts included.
-const sql = postgres(env.ensureConf('postgres'))
+const sql = postgres(env.ensureConf('postgres-testing'))
 for (const table of ['yhub_ydoc_v1', 'yhub_ydoc_tombstones_v1']) {
   await sql`DELETE from ${sql(table)}`
 }
 
-const yhubPort = number.parseInt(env.getConf('port') || '9999')
+const yhubPort = number.parseInt(env.getConf('test-port') || '4424')
+
+/**
+ * Port for an additional test hub. Every test that spins up its own hub must use a distinct
+ * `n`, so that concurrent test runs in other worktrees never collide.
+ *
+ * @param {number} n - 1-4
+ */
+export const testHubPort = n => yhubPort + n
 
 /**
  * Side channel for the custom api test endpoints defined below.
@@ -147,7 +155,7 @@ export const yhub = await createYHub({
     taskDebounce: 1000,
     minMessageLifetime: 3000
   },
-  postgres: env.ensureConf('postgres'),
+  postgres: env.ensureConf('postgres-testing'),
   persistence: [
     new S3PersistenceV1({
       bucket: env.ensureConf('S3_YHUB_TEST_BUCKET'),

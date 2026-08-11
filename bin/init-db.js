@@ -156,17 +156,18 @@ if (s3Bucket) {
 }
 
 const redisUrl = env.getConf('redis') || null
-const prefix = env.getConf('redis-prefix')
-const redisWorkerGroupName = prefix + ':worker'
+const prefix = env.getConf('redis-prefix') || 'yhub'
 const redisWorkerStreamName = prefix + ':worker'
 if (redisUrl) {
   const redis = createRedisClient({ url: redisUrl })
-  redis.connect()
+  await redis.connect()
   try {
-    await redis.xGroupCreate(redisWorkerStreamName, redisWorkerGroupName, '0', { MKSTREAM: true })
-    log.info('successfully created redis worker and group')
+    await redis.xGroupCreate(redisWorkerStreamName, redisWorkerStreamName, '0', { MKSTREAM: true })
+    log.info({ redisWorkerStreamName }, 'successfully created redis worker stream and group')
   } catch (err) {
-    log.error({ err, redisWorkerStreamName, redisWorkerGroupName }, 'failed to init worker stream')
+    // the group already exists - anything else must fail the initialization
+    if (!/BUSYGROUP/.test(/** @type {Error} */ (err).message)) throw err
+    log.info({ redisWorkerStreamName }, 'redis worker stream and group already exist')
   }
 }
 

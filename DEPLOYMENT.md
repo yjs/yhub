@@ -206,10 +206,10 @@ AUTH_PUBLIC_KEY=...
 AUTH_PRIVATE_KEY=...
 
 # Server (optional)
-PORT=3002
+PORT=4400
 
-# Logging (optional)
-LOG=*
+# Logging (optional): trace | debug | info | warn | error | fatal | silent
+LOG_LEVEL=info
 ```
 
 ---
@@ -219,7 +219,7 @@ LOG=*
 After configuring your environment, run:
 
 ```bash
-npm run init
+npm run start:init
 ```
 
 This creates the PostgreSQL tables and S3 bucket if they don't exist.

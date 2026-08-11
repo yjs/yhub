@@ -3,7 +3,7 @@ include:
 services:
   demo:
     build: .
-    profiles: ["all"]
+    profiles: ["app"]
     ports:
       - 5173:5173
     depends_on:

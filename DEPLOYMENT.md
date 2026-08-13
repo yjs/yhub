@@ -207,6 +207,9 @@ AUTH_PRIVATE_KEY=...
 
 # Server (optional)
 PORT=4400
+# Max request header bytes (cookies included); requests over it are rejected with 431.
+# uWebSockets.js default: 4096. Must be present in the environment at process startup.
+# UWS_HTTP_MAX_HEADERS_SIZE=32768
 
 # Logging (optional): trace | debug | info | warn | error | fatal | silent
 LOG_LEVEL=info

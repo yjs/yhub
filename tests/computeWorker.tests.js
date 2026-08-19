@@ -139,6 +139,7 @@ export const testActivityGrouping = async _tc => {
     group: true,
     groupMaxGap: 1000,
     groupMaxDuration: Number.MAX_SAFE_INTEGER,
+    mergeUsers: false,
     ...opts
   }))).activity
   // default: 500ms gaps are below groupMaxGap=1000, everything merges
@@ -152,6 +153,75 @@ export const testActivityGrouping = async _tc => {
   t.compare(capped.map(a => [a.from, a.to]), [[1000, 1500], [2000, 2000]])
   const ungrouped = await activity({ group: false })
   t.assert(ungrouped.length === 3)
+  doc.destroy()
+  await pool.destroy()
+}
+
+/**
+ * @param {t.TestCase} _tc
+ */
+export const testActivityMergeUsers = async _tc => {
+  const pool = createComputePool({ poolSize: 2 })
+  const doc = new Y.Doc({ gc: false })
+  // three edits at timestamps 1000, 1500, 2000, authored user1 -> user2 -> user1
+  /** @type {Array<Y.ContentMap>} */
+  const contentmaps = []
+  let prevContentIds = Y.createContentIdsFromUpdate(Y.encodeStateAsUpdate(new Y.Doc()))
+  /**
+   * @param {string} text
+   * @param {string} user
+   * @param {number} at
+   */
+  const edit = (text, user, at) => {
+    doc.get('test').insert(doc.get('test').length, text)
+    const contentIds = Y.createContentIdsFromUpdate(Y.encodeStateAsUpdate(doc))
+    contentmaps.push(Y.createContentMapFromContentIds(
+      Y.excludeContentIds(contentIds, prevContentIds),
+      [Y.createContentAttribute('insert', user), Y.createContentAttribute('insertAt', at)],
+      [Y.createContentAttribute('delete', user), Y.createContentAttribute('deleteAt', at)]
+    ))
+    prevContentIds = contentIds
+  }
+  edit('hello', 'user1', 1000)
+  edit(' world', 'user2', 1500)
+  edit('!', 'user1', 2000)
+  const nongcDoc = Y.encodeStateAsUpdate(doc)
+  const contentmapBin = Y.encodeContentMap(Y.mergeContentMaps(contentmaps))
+  /**
+   * @param {object} opts
+   * @return {Promise<Array<{ from: number, to: number, by: string? }>>}
+   */
+  const activity = async (opts = {}) => decoding.readAny(decoding.createDecoder(await pool.activity({
+    nongcDoc,
+    contentmapBin,
+    from: 0,
+    to: Number.MAX_SAFE_INTEGER,
+    by: '',
+    withCustomAttributions: null,
+    includeCustomAttributions: false,
+    includeDelta: false,
+    includeYdoc: false,
+    includeAttributions: false,
+    limit: Number.MAX_SAFE_INTEGER,
+    reverse: false,
+    group: true,
+    groupMaxGap: 1000,
+    groupMaxDuration: Number.MAX_SAFE_INTEGER,
+    mergeUsers: false,
+    ...opts
+  }))).activity
+  // without mergeUsers the author changes on every edit, so nothing groups
+  const perUser = await activity({})
+  t.compare(perUser.map(a => [a.from, a.to, a.by]), [[1000, 1000, 'user1'], [1500, 1500, 'user2'], [2000, 2000, 'user1']])
+  // with mergeUsers the gaps alone decide: one entry listing both authors, user1 not repeated
+  const merged = await activity({ mergeUsers: true })
+  t.compare(merged.map(a => [a.from, a.to, a.by]), [[1000, 2000, 'user1,user2']])
+  // mergeUsers still respects groupMaxGap
+  const smallGap = await activity({ mergeUsers: true, groupMaxGap: 400 })
+  t.compare(smallGap.map(a => [a.from, a.to, a.by]), [[1000, 1000, 'user1'], [1500, 1500, 'user2'], [2000, 2000, 'user1']])
+  // ...and groupMaxDuration: the third edit would span 1000ms >= 600, so it starts a new group
+  const capped = await activity({ mergeUsers: true, groupMaxGap: 10000, groupMaxDuration: 600 })
+  t.compare(capped.map(a => [a.from, a.to, a.by]), [[1000, 1500, 'user1,user2'], [2000, 2000, 'user1']])
   doc.destroy()
   await pool.destroy()
 }

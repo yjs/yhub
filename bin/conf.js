@@ -46,8 +46,9 @@ export const conf = {
   server: {
     port: number.parseInt(env.getConf('port') || '4400'),
     auth: types.createAuthPlugin({
-      // this demo configuration picks a "unique" userid and grants everyone write access
-      async readAuthInfo (_req) { return { userid: random.oneOf(userIdChoices) } },
+      // this demo configuration takes the userid from `?userid=` (or picks a "unique" one) and
+      // grants everyone write access
+      async readAuthInfo (req) { return { userid: req.getQuery('userid') || random.oneOf(userIdChoices) } },
       async getAccessType () { return 'rw' }
     })
   },

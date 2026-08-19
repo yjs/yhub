@@ -60,7 +60,8 @@ const $computeTask = s.$union(
     reverse: s.$boolean,
     group: s.$boolean,
     groupMaxGap: s.$number,
-    groupMaxDuration: s.$number
+    groupMaxDuration: s.$number,
+    mergeUsers: s.$boolean
   }),
   s.$object({
     type: s.$literal('patchYdoc'),
@@ -362,6 +363,7 @@ class ComputePool {
    * @param {boolean} opts.group
    * @param {number} opts.groupMaxGap
    * @param {number} opts.groupMaxDuration
+   * @param {boolean} opts.mergeUsers
    * @param {Object<string, any>} [logContext]
    * @returns {Promise<Uint8Array<ArrayBuffer>>}
    */

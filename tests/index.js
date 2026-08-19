@@ -2,6 +2,7 @@
 
 import * as api from './api.tests.js'
 import * as customApi from './customApi.tests.js'
+import * as cors from './cors.tests.js'
 import * as auth from './auth.tests.js'
 import * as ws from './ws.tests.js'
 import * as storage from './storage.tests.js'
@@ -17,6 +18,7 @@ runTests({
   worker,
   api,
   customApi,
+  cors,
   auth,
   ws,
   agents,

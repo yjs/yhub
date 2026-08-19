@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **Proper CORS support replaces the hardcoded `Access-Control-Allow-Origin: *`, and cross-origin browser access is closed by default.** Api requests and WebSocket upgrades from a foreign `Origin` are rejected with `403` (rest denials carry a json `{ error, code: 'origin-not-allowed' }` body and are logged with `origin` and `host`) unless allowed by the new cors config; same-origin pages and non-browser clients keep working without any configuration. Same-origin follows Go 1.25's `http.CrossOriginProtection`: `Sec-Fetch-Site` when the browser sends it — an http page targeting the https api is denied — with the scheme-blind `Origin`/`Host` comparison as fallback, so TLS-terminating proxies keep working. To open the api to your app's origin(s), set `server.cors` (`createYHub`) or `CORS_ORIGIN` (CLI / docker image) — `'*'` restores the old wide-open behavior and logs a warning. ([API docs](API.md#cors), [`src/cors.js`](src/cors.js), [`src/api.js`](src/api.js), [`src/server.js`](src/server.js), [`bin/conf.js`](bin/conf.js))
+
+### New Features
+
+- **`server.cors` configures cross-origin access.** `origin` (`'*'`, one origin, or an allowlist — `https://*.example.com` wildcards included), `credentials`, `allowHeaders`, `exposeHeaders`, `maxAge`, and `trustSameOrigin`. Configuration mistakes — `'*'` with `credentials`, a bare `'*'` in `allowHeaders` (the Fetch wildcard never covers `Authorization`; write `['*', 'Authorization']`), malformed or non-string origins, a negative or fractional `maxAge`, unknown fields — throw at startup. `Vary: Origin` is sent on every response the origin gate makes origin-dependent, cors unset included. A custom endpoint can override the hub config with its own `cors` field (`cors: null` disables CORS for that endpoint entirely; explicit `undefined` fields inherit). ([API docs](API.md#cors), [`src/cors.js`](src/cors.js), [`src/api.js`](src/api.js))
+
+### Other
+
+- **uws bumped to v20.69.0, adding Node 26 support.** uws ships prebuilt binaries for exactly Node 22, 24, and 26 from this version on — Node 25 (and 20, already below yhub's floor) are no longer supported. `engines.node` now reflects that: `^22.9.0 || ^24.0.0 || ^26.0.0`. ([`package.json`](package.json))
+
 ## [0.6.0]
 
 > **Upgrading: run `npm run start:init` (`bin/init-db.js`) before starting this version.** It adds

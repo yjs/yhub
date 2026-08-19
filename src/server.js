@@ -12,6 +12,7 @@ import * as protocol from './protocol.js'
 import * as math from 'lib0/math'
 import { mergeUpdates } from './y-utils.js'
 import { registerApi, resolveApiPrefix, isApiError, statusLine } from './api.js'
+import { originAllowed, resolveCors } from './cors.js'
 import { parseCustomAttributionsParam } from './builtin-api.js'
 import { logger } from './logger.js'
 
@@ -96,23 +97,13 @@ export const createYHubServer = async (yhub, conf) => {
   const app = uws.App({})
   const yhubServer = new YHubServer(yhub, conf, app)
   yhub.server = yhubServer
-  // resolve once, before any route registration - an invalid prefix fails fast
+  // resolve once, before any route registration - an invalid prefix or cors config fails fast
   const prefix = resolveApiPrefix(yhub)
-  registerWebsocketServer(yhub, app, prefix)
-
-  // Handle CORS preflight requests
-  app.options('/*', (res, req) => {
-    // reflect the requested headers so custom request headers pass the preflight
-    const requestedHeaders = req.getHeader('access-control-request-headers')
-    res.cork(() => {
-      // the status must be written before any header - otherwise uws locks the status to "200 OK"
-      res.writeStatus('204 No Content')
-      res.writeHeader('Access-Control-Allow-Origin', '*')
-      res.writeHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
-      res.writeHeader('Access-Control-Allow-Headers', requestedHeaders !== '' ? requestedHeaders : 'Content-Type, Authorization')
-      res.end()
-    })
-  })
+  const cors = resolveCors(conf.server?.cors, undefined)
+  if (cors?.originAll === true) {
+    log.warn('cors.origin is "*" - the api and websockets are open to every origin: any site can act in a logged-in visitor\'s session if the auth plugin reads ambient credentials (cookies). Use an allowlist in production.')
+  }
+  registerWebsocketServer(yhub, app, prefix, cors)
 
   // built-in + custom rest endpoints - served under `/{apiPrefix}/{name}/{version}/...`
   registerApi(yhub, app)
@@ -332,8 +323,9 @@ class WSUser {
  * @param {import('./index.js').YHub} yhub
  * @param {uws.TemplatedApp} app
  * @param {string} prefix
+ * @param {import('./cors.js').ResolvedCors|null} cors
  */
-const registerWebsocketServer = (yhub, app, prefix) => {
+const registerWebsocketServer = (yhub, app, prefix, cors) => {
   const maxDocSize = s.$number.cast(yhub.conf.server?.maxDocSize)
   app.ws(`/${prefix}/ws/v1/:org/:docid`, /** @type {uws.WebSocketBehavior<{ user: WSUser }>} */ ({
     compression: uws.DISABLED,
@@ -344,6 +336,9 @@ const registerWebsocketServer = (yhub, app, prefix) => {
     sendPingsAutomatically: true,
     upgrade: async (res, req, context) => {
       const url = req.getUrl()
+      const origin = req.getHeader('origin')
+      const host = req.getHeader('host')
+      const secFetchSite = req.getHeader('sec-fetch-site')
       const headerWsKey = req.getHeader('sec-websocket-key')
       const headerWsProtocol = req.getHeader('sec-websocket-protocol')
       const headerWsExtensions = req.getHeader('sec-websocket-extensions')
@@ -353,6 +348,17 @@ const registerWebsocketServer = (yhub, app, prefix) => {
         aborted = true
       })
       try {
+        // browsers don't enforce cors on websockets - any page may open one - so the origin is
+        // checked here explicitly: cross-origin is denied unless cors allows it, same-origin
+        // passes (see originAllowed). Clients that send no `Origin` (node, server-to-server)
+        // are never restricted; the auth plugin gates those.
+        if (!originAllowed(cors, origin, host, secFetchSite)) {
+          log.info({ url, origin, host }, 'ws upgrade denied, origin not allowed')
+          res.cork(() => {
+            res.writeStatus('403 Forbidden').end('Forbidden')
+          })
+          return
+        }
         const room = reqToRoom(req)
         const gc = req.getQuery('gc') !== 'false' // default to true unless explicitly set to 'false'
         const customAttributionsParam = req.getQuery('customAttributions')

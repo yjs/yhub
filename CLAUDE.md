@@ -81,7 +81,7 @@ Environment variables needed for tests: `REDIS`, `POSTGRES`, `S3_ENDPOINT`, `S3_
 - **Minimalistic and correctness-focused.** Keep code short, direct, and free of unnecessary abstractions. Don't add defensive code, extra error handling, or validation beyond what is needed. Prefer simple, correct implementations over clever or verbose ones.
 - Pure JavaScript with JSDoc type annotations (no .ts files). TypeScript is used only for declaration generation (`emitDeclarationOnly`).
 - Linted with [standard](https://standardjs.com/) (no semicolons, 2-space indent).
-- ESM (`"type": "module"`) throughout. Node >= 22 required.
+- ESM (`"type": "module"`) throughout. Node 22, 24, or 26 required (uws ships binaries for exactly these).
 - Heavy use of `lib0` utilities (encoding, decoding, logging, promises, schemas).
 - Schemas defined with `lib0/schema` (`s.$object`, `s.$union`, `s.$literal`, etc.) for runtime validation.
 

@@ -123,12 +123,15 @@ export const testMethodsAndReturnValues = async tc => {
     t.assert(res.status === 204)
     t.assert((await res.arrayBuffer()).byteLength === 0)
   })
-  await t.groupAsync('options preflight advertises all methods and reflects requested headers', async () => {
+  await t.groupAsync('options preflight advertises the endpoint\'s methods and the configured headers', async () => {
     const res = await fetch(base, { method: 'OPTIONS', headers: { Origin: 'http://example.com', 'Access-Control-Request-Method': 'PUT', 'Access-Control-Request-Headers': 'x-custom-header' } })
     t.assert(res.status === 204)
     const allowed = res.headers.get('access-control-allow-methods') ?? ''
     t.assert(allowed.includes('PUT') && allowed.includes('DELETE') && allowed.includes('PATCH'))
-    t.assert(res.headers.get('access-control-allow-headers') === 'x-custom-header')
+    // the requested headers are no longer reflected - the configured set is authoritative.
+    // this hub sets neither allowHeaders nor maxAge, so both come from the defaults
+    t.assert(res.headers.get('access-control-allow-headers') === 'Content-Type, Authorization')
+    t.assert(res.headers.get('access-control-max-age') === '3600')
   })
 }
 
@@ -520,9 +523,13 @@ export const testSpecValidation = _tc => {
    */
   const patterns = []
   /**
+   * @type {Array<string>}
+   */
+  const optionsPatterns = []
+  /**
    * @type {any}
    */
-  const stubApp = { get: (/** @type {string} */ p) => { patterns.push(p); return stubApp }, post: () => stubApp, put: () => stubApp, patch: () => stubApp, del: () => stubApp }
+  const stubApp = { get: (/** @type {string} */ p) => { patterns.push(p); return stubApp }, post: () => stubApp, put: () => stubApp, patch: () => stubApp, del: () => stubApp, options: (/** @type {string} */ p) => { optionsPatterns.push(p); return stubApp } }
   /**
    * @param {Array<any>} api
    * @param {string} [apiPrefix]
@@ -534,6 +541,15 @@ export const testSpecValidation = _tc => {
   registerApi(fakeYhub([{ name: 'a', get: { handler } }]), stubApp)
   t.assert(patterns.includes('/api/a/v1/:org/:docid'))
   t.assert(patterns.includes('/api/ydoc/v1/:org/:docid'))
+  // without cors there is nothing to preflight - no OPTIONS route is registered
+  t.assert(optionsPatterns.length === 0)
+  // with cors, every endpoint gets its own preflight route, so Allow-Methods can be exact
+  registerApi(/** @type {any} */ ({ conf: { server: { auth: null, api: [{ name: 'a', get: { handler } }], cors: { origin: '*' } } } }), stubApp)
+  t.assert(optionsPatterns.includes('/api/a/v1/:org/:docid'))
+  t.assert(optionsPatterns.includes('/api/ydoc/v1/:org/:docid'))
+  // ... except for an endpoint that opts out via cors: null
+  registerApi(/** @type {any} */ ({ conf: { server: { auth: null, api: [{ name: 'b', cors: null, get: { handler } }], cors: { origin: '*' } } } }), stubApp)
+  t.assert(!optionsPatterns.includes('/api/b/v1/:org/:docid'))
   // same name under a different version is fine
   registerApi(fakeYhub([{ name: 'a', get: { handler } }, { name: 'a', version: 'v2', get: { handler } }]), stubApp)
   // same name at a different url depth is fine (collection + item)

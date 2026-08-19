@@ -54,7 +54,8 @@ when codes are added:
 A missing close frame is routine: server shutdown, the 120s idle timeout (pings are sent
 automatically — only a dead link times out), and network or proxy failures. Always transient.
 
-A denied upgrade is HTTP, never a close code: `401` unauthenticated, `403` insufficient access,
+A denied upgrade is HTTP, never a close code: `401` unauthenticated, `403` insufficient access
+or an origin the CORS config does not allow (see [CORS](#cors)),
 or the status of a branded `apiError` thrown by the auth plugin (e.g. `503` while its backend is
 down). Browsers can't observe upgrade statuses — the client only sees a failed connection
 attempt. `4401` is the explicit stop signal; a client that ignores it reconnects into a `403`
@@ -84,6 +85,7 @@ Error responses carry a lib0-any encoded `{ error: string, ...extra }` body (see
 |---|---|---|
 | `400` `404` `409` `422` | caller mistake — invalid body or query (`code: 'invalid-body'` / `'invalid-query'`), missing resource, conflict | no — fix the request |
 | `401` `403` | unauthenticated / no access | no — obtain fresh credentials, then send a new request |
+| `403` with `code: 'origin-not-allowed'` | the page's origin is not allowed by `server.cors` (see [CORS](#cors)) — always json | no — fix the server's cors config, not the credentials |
 | `429` | rate limited — yhub itself never sends this; reserved for proxies and custom endpoints | yes — back off first |
 | `500`–`599` | server-side failure — `500` internal error, `503` a dependency (e.g. the auth backend) is temporarily down | yes |
 
@@ -432,6 +434,7 @@ startup.
 | `scope` | `'doc' \| 'org' \| 'global'` | `'doc'` | route shape: `/api/{name}/{version}/{org}/{docid}`, `/api/{name}/{version}/{org}`, or `/api/{name}/{version}` |
 | `path` | `string` | `''` | extra named path segments appended to the route, e.g. `'/:commentId'` (named params only, available via `req.params`) |
 | `accessPurpose` | `string` | `null` | forwarded as `purpose` to the auth access callback (see below) |
+| `cors` | `object \| null` | inherits `server.cors` | overrides the hub's CORS for this endpoint, shallow-merged over `server.cors`; `null` disables CORS on it (no cross-origin access — same-origin and non-browser clients only). See [CORS](#cors) |
 | `get`, `post`, `put`, `patch`, `delete` | `{ $query?, $body?, accessPurpose?, handler }` | — | method definitions; at least one is required. `handler` is the async request handler; `$query` optionally declares the supported query attributes and `$body` (not on `get`) the request body (see below); `accessPurpose` overrides the endpoint's for this method alone. `get` requires `'r'` access, all other methods require `'rw'`. |
 
 Because the prefix, names, and versions are single segments, every request under the api namespace
@@ -580,7 +583,7 @@ any time, also after `await`s:
 
 | Handler returns | Response |
 |---|---|
-| `Response` | status, headers, and body are taken from the `Response` — the full-control escape hatch. The default CORS headers are added unless the `Response` sets its own `Access-Control-Allow-Origin`; `content-length`/`transfer-encoding` are managed by the server. |
+| `Response` | status, headers, and body are taken from the `Response` — the full-control escape hatch. The configured CORS headers are added unless the `Response` sets one itself (its own `Access-Control-Allow-Origin` takes over CORS entirely — though `Vary: Origin` is still written for allowlist configs — and no header is ever emitted twice); `content-length`/`transfer-encoding` are managed by the server. |
 | `undefined` / `null` | `204 No Content` |
 | `string` | `200`, `text/plain; charset=utf-8` |
 | `Uint8Array` / `Buffer` | `200`, `application/octet-stream`, as-is — opaque bytes, never transcoded |
@@ -605,6 +608,172 @@ import * as buffer from 'lib0/buffer'
 const res = await fetch(`http://${yhubHost}/api/comments/v1/${org}/${docid}`)
 const { comments } = buffer.decodeAny(new Uint8Array(await res.arrayBuffer()))
 ```
+
+### CORS
+
+Browsers may only call the api from a page whose origin the server allows. **Until
+`server.cors` is configured, cross-origin browser access is closed**: no `Access-Control-*`
+header is sent, so responses stay unreadable, and WebSocket upgrades and api requests
+carrying a cross-origin `Origin` are rejected with `403`. Same-origin pages work with zero
+configuration (see [Same-origin requests](#same-origin-requests)), and non-browser clients
+(node, server-to-server, curl) are never restricted — they send no `Origin` header; the auth
+plugin gates those.
+
+```js
+server: {
+  cors: {
+    origin: ['https://app.example.com', 'https://admin.example.com'],
+    credentials: true,
+    allowHeaders: ['Content-Type', 'Authorization'],
+    exposeHeaders: ['x-request-id'],
+    maxAge: 7200
+  }
+}
+```
+
+`Access-Control-Allow-Origin` holds a single value, so serving several origins works by echoing
+back the one that matched. yhub therefore sends `Vary: Origin` automatically whenever `origin`
+is anything but `'*'` (a single origin is a one-entry allowlist) — without it a cache or CDN in
+front of yhub would serve one origin's response to another. The same applies while CORS is not
+configured at all (or disabled on an endpoint): no `Access-Control-*` header is ever written,
+but the origin gate still answers the same url `200` same-origin and `403` cross-origin, so
+`Vary: Origin` is sent there too. A request from an origin that does
+not match is rejected with `403 { error: 'origin not allowed', code: 'origin-not-allowed' }` —
+always json, a browser is by definition on the other end (see below); the rejection carries
+`Vary: Origin` but no
+`Access-Control-*` header — nothing about the response is readable.
+
+An allowlist entry may start its host with `*.`: `https://*.example.com` matches every host
+under `example.com` — subdomains of subdomains included — but never `https://example.com`
+itself (list the apex separately) and never another port (spell ports out, e.g.
+`https://*.example.com:8443`). The `.` after the star pins the suffix to a domain boundary, so
+a wildcard can only ever match hosts under the domain it names.
+Warning: `https://*.github.io`, or `https://*.vercel.app` are accepted and allowlist every site anyone
+can host under the suffix — just as open as `*.com`. Only wildcard a domain you own outright,
+and mind the blast radius under `credentials: true`: a compromise of *any* host under the
+suffix — say, one preview deploy — yields credentialed api access.
+
+Only the headers that apply to a given response are sent: `Allow-Methods`, `Allow-Headers` and
+`Max-Age` on preflights, `Expose-Headers` on real responses, `Allow-Origin` and
+`Allow-Credentials` on both. `Allow-Methods` lists exactly the methods that endpoint registers
+(a plain `Allow` header carries the same list, per RFC 9110). `allowHeaders` defaults to
+`['Content-Type', 'Authorization']` — the built-in api authenticates via `Authorization`, which
+always preflights — and `maxAge` defaults to `3600`. Preflight routes exist only where CORS
+does: an endpoint with CORS disabled, and any unregistered path, answers `OPTIONS` with the
+default `404`.
+
+Setting `allowHeaders` **replaces** the default — re-list `Content-Type` and `Authorization`
+alongside your own headers, or authorized browser requests fail at the preflight. Browser
+tracing SDKs are the usual reason to extend it: OpenTelemetry adds `traceparent`/`tracestate`
+and Sentry adds `sentry-trace`/`baggage` to instrumented fetches, and neither passes the
+default list. To allow every request header, write `allowHeaders: ['*', 'Authorization']` —
+the Fetch wildcard never covers `Authorization`, so a bare `['*']` is refused at startup, and
+credentialed configs must enumerate their headers (browsers read `*` literally then).
+
+`CORS_ORIGIN` sets `origin` for the packaged CLI and docker image (comma-separated for an
+allowlist). While it is unset, `server.cors` stays unset — same-origin pages and non-browser
+clients only; `CORS_ORIGIN='*'` opens the api to every origin and logs a warning.
+
+#### Per-endpoint overrides
+
+A custom endpoint may override the hub's CORS via its `cors` field, shallow-merged over
+`server.cors`. Use it to open one endpoint to everybody, or to close one off:
+
+```js
+createApiEndpoint('public-stats', { cors: { origin: '*' }, get: { handler } })
+createApiEndpoint('admin', { cors: null, post: { handler } })
+```
+
+`cors: null` means no cross-origin access: no `Access-Control-*` header is ever written, no
+preflight route is registered, and cross-origin requests are rejected — the endpoint serves
+same-origin pages and non-browser clients only. Note that `null` means *as if `server.cors`
+were unset*, not "most restrictive": an endpoint opting out under a hub with
+`trustSameOrigin: false` regains the implicit same-origin trust. The WebSocket route and the
+built-in endpoints always follow `server.cors` — only custom endpoints can override it.
+
+Each endpoint's *merged* config is validated at startup: the `'*'`/`credentials` rule — browsers
+reject the pair, so an endpoint opening itself to every origin under a hub with
+`credentials: true` must disable them explicitly, `cors: { origin: '*', credentials: false }` —
+plus field-by-field checks, so a typoed field or a stringly value in an override throws instead
+of being silently ignored (`cors: false` is refused too — only `null` disables). Every such
+startup error names the endpoint at fault.
+
+Preflights are answered from the configured CORS alone — a handler `Response` that takes over
+`Access-Control-Allow-Origin` affects only real responses, never its route's preflight.
+
+#### Where CORS alone is not enough
+
+Browsers do not apply CORS to WebSocket connections: any page can open one regardless of what
+`Access-Control-Allow-Origin` says. And they send "simple" requests — e.g. a `text/plain` POST —
+*without* a preflight; CORS only hides the response, but the request still reaches the server
+carrying the visitor's cookies, and its timing stays observable. yhub closes these gaps itself:
+a WebSocket upgrade or an api request — GET included — is rejected with `403` unless its
+`Origin` is allowed by the cors config or same-origin, **also while `server.cors` is entirely
+unset**. Denying a GET the browser would hide anyway costs nothing legitimate, and it keeps
+response timing unobservable and expensive reads untriggerable cross-site. A request with no
+`Origin` header (node clients, server-to-server, `<img>`/`<script>` embeds) is never
+restricted; the auth plugin gates those. The gate follows Go 1.25's stdlib
+`http.CrossOriginProtection`: `Sec-Fetch-Site` is consulted when a browser sends it (see
+[Same-origin requests](#same-origin-requests)), the `Origin`/`Host` comparison is the fallback —
+though yhub is stricter in gating GET, and never restricts requests without an `Origin` header
+(browsers attach `Origin` to every cross-site request the gate is for).
+
+#### Same-origin requests
+
+A request whose `Origin` names the request's own `Host` (`host[:port]`, compared
+case-insensitively) is same-origin: it passes the gate without being listed, so an app served
+from the same host as yhub works with no cors configuration at all — same-origin responses need
+no `Access-Control-*` header either. The scheme is deliberately not compared: behind a
+TLS-terminating proxy yhub sees plain http while the browser's `Origin` says `https://…`. A
+proxy that rewrites `Host` fails the comparison *closed* — list your origin in `cors.origin`
+explicitly then. A browser that sends `Sec-Fetch-Site` (all of them since 2023) must also
+report `same-origin` (or `none`) for the implicit trust to apply — an http page targeting the
+https api reports `cross-site` and is denied, closing the scheme gap the comparison cannot
+see, while an https page behind the TLS-terminating proxy still reports `same-origin` (the
+header travels through untouched). The allowlist is unaffected either way, and requests
+without the header fall back to the comparison alone. Set `trustSameOrigin: false` to drop the
+implicit trust and enforce the
+allowlist for every browser origin, same-origin included.
+
+#### Origins are fixed at startup
+
+The allowlist is resolved once at startup: there is no per-request origin callback and no
+reload — adding an origin means a restart. Platforms where third parties share one apex
+(Vercel-style `myapp-git-branch.vercel.app` previews) cannot be wildcarded safely: the
+partial-prefix form `https://myapp-*.vercel.app` is refused at startup, and
+`https://*.vercel.app` would allowlist every tenant on the platform. List such deploys
+explicitly, or front yhub with a proxy that
+authenticates the deployment itself and strips the `Origin` header (requests without an
+`Origin` pass the gate; the auth plugin gates them like any other non-browser client).
+
+#### Apps without a listable origin
+
+Capacitor/Ionic apps (`capacitor://localhost`) and browser extensions
+(`chrome-extension://<id>`) have perfectly listable origins — extensions must be listed even
+though `host_permissions` bypasses CORS in-browser, because the origin gate still checks them.
+Electron/webview apps loading from `file://` send `Origin: null`, which is never allowlistable
+(`'null'` is also the origin of every sandboxed iframe on the internet) — such apps control
+their network stack and should strip or replace the `Origin` header instead. An iframe widget
+needs only the widget's own origin listed, whatever site embeds it: requests from inside the
+iframe carry the widget's origin, not the embedder's.
+
+#### What CORS does and does not protect
+
+CORS is not an authorization mechanism. `origin: '*'` does not expose data the auth plugin would
+refuse, because an attacker's server can call the api directly regardless — the auth plugin is
+what protects your data. What an allowlist does prevent is a page on another origin using a
+visitor's browser to call the api. That only becomes a real escalation together with
+`credentials: true`, which is why `'*'` and `credentials` cannot be combined. The same applies to
+any auth plugin that reads ambient credentials (cookies, http auth): pair it with an origin
+allowlist — with `'*'`, any page on the internet can open a WebSocket or fire a simple POST in
+the visitor's session.
+
+Cookie-authenticated cross-site deployments have two more browser rules to satisfy, neither of
+them CORS-shaped: session cookies must be `SameSite=None; Secure`, or the browser silently
+withholds them from cross-site fetches *and* from the WebSocket handshake — the symptom is a
+`401` from the auth plugin, not a CORS error. And browsers cannot attach an `Authorization`
+header to a WebSocket: token-auth clients pass the token via the url or
+`Sec-WebSocket-Protocol` for `readAuthInfo` to pick up.
 
 ### YHub Import API
 
@@ -636,6 +805,13 @@ const yhub = await createYHub(config)
 | `server.api` | `ApiSpec[]` | no | Custom rest endpoints served under `/{apiPrefix}/{name}/{version}/...`, next to the built-in ones. See [Custom API endpoints](#custom-api-endpoints). |
 | `server.apiPrefix` | `string` | no | First path segment under which all endpoints are served — built-in and custom rest endpoints plus the websocket route `/{apiPrefix}/ws/v1/...` — e.g. `'collaboration'` → `/collaboration/{name}/{version}/...`. A single path segment. Default: `'api'` |
 | `server.maxDocSize` | `number` | no | Maximum Ydoc size in bytes, used for WebSocket payload limits. Default: 500 MB |
+| `server.cors` | `object \| null` | no | Cross-origin resource sharing — see [CORS](#cors). **While this is unset, cross-origin browser access is closed**: no `Access-Control-*` header is sent, and cross-origin WebSocket upgrades and api requests are denied. Same-origin pages and non-browser clients are unaffected. |
+| `server.cors.origin` | `string \| string[]` | yes* | `'*'` for every origin, one origin, or an allowlist. An allowlist echoes back the request's `Origin` when it matches and sends `Vary: Origin`; a request from a non-matching origin is denied. An entry may start its host with `*.` — `https://*.example.com` matches every host under `example.com` but never the apex, and ports must be spelled out. Only wildcard a domain you own outright: `https://*.co.uk`-style public-suffix wildcards are accepted but allowlist every site under the suffix. |
+| `server.cors.credentials` | `boolean` | no | Send `Access-Control-Allow-Credentials: true`, letting browsers send cookies and http auth. Requires a concrete `origin` — `'*'` together with `credentials` throws at startup, because browsers reject the pair. Default: `false` |
+| `server.cors.trustSameOrigin` | `boolean` | no | Trust browser requests whose `Origin` names the request's own `Host`: they pass the origin gate without being listed — the scheme is not compared, so TLS-terminating proxies keep working, but a browser that sends `Sec-Fetch-Site` must also report `same-origin`/`none`, which closes the scheme gap. Set `false` to enforce the allowlist for every browser origin, same-origin included. Affects only the origin gate on WebSocket upgrades and api requests. Default: `true` |
+| `server.cors.allowHeaders` | `string[]` | no | `Access-Control-Allow-Headers` on the preflight. Setting it **replaces** the default, so re-list `Content-Type` and `Authorization` alongside your own headers. `['*', 'Authorization']` allows everything — the Fetch wildcard never covers `Authorization`, so a bare `['*']` throws at startup. Default: `['Content-Type', 'Authorization']` — `Authorization` is never a "simple" header, so every authorized browser request preflights and would fail without it. |
+| `server.cors.exposeHeaders` | `string[]` | no | `Access-Control-Expose-Headers` — response headers browser code may read. |
+| `server.cors.maxAge` | `number` | no | `Access-Control-Max-Age` in seconds (a non-negative integer; browsers cap it, e.g. Chrome at `7200`). Default: `3600` |
 | `worker` | `object \| null` | no | Background compaction worker config. Set to `null` to disable. |
 | `worker.taskConcurrency` | `number` | yes* | Maximum number of compaction tasks to process in parallel |
 | `worker.events.docUpdate` | `function` | no | Called after each compaction with the merged `DocTable` plus the `room` it belongs to |

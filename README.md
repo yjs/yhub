@@ -187,6 +187,11 @@ AUTH_PRIVATE_KEY={"kty":"EC",...}
 # Server port
 PORT=4400
 
+# Origin(s) allowed to call the api from a browser. Comma-separated for an allowlist (wildcards
+# like https://*.example.com included), '*' for every origin. While unset, cross-origin browser
+# access is closed; same-origin pages and non-browser clients always work.
+CORS_ORIGIN=https://app.example.com,https://admin.example.com
+
 # Testing database and websocket port (for running tests)
 POSTGRES_TESTING=postgres://user:pass@localhost:5432/yhub-testing
 S3_YHUB_TEST_BUCKET=yhub-testing

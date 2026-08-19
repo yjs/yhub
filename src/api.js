@@ -6,18 +6,10 @@ import * as s from 'lib0/schema'
 import * as string from 'lib0/string'
 import * as t from './types.js'
 import { builtinApi } from './builtin-api.js'
+import { originAllowed, resolveCors, writeCorsPreflight, writeCorsResponse } from './cors.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'api' })
-
-/**
- * @param {import('uws').HttpResponse} res
- */
-const setCorsHeaders = (res) => {
-  res.writeHeader('Access-Control-Allow-Origin', '*')
-  res.writeHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
-  res.writeHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-}
 
 /**
  * `JSON.stringify` replacer producing the json representation of any-encodable values: binary
@@ -39,16 +31,17 @@ const jsonReplacer = function (key, value) {
 
 /**
  * @param {import('uws').HttpResponse} res
+ * @param {(res: import('uws').HttpResponse, skip?: Set<string>) => void} writeHeaders
  * @param {string} status
  * @param {{ [key: string]: any, error: string }} body
  * @param {boolean} [acceptsJson]
  */
-const sendErrorResponse = (res, status, body, acceptsJson = false) => {
+const sendErrorResponse = (res, writeHeaders, status, body, acceptsJson = false) => {
   const response = acceptsJson ? JSON.stringify(body, jsonReplacer) : buffer.encodeAny(body)
   res.cork(() => {
     // the status must be written before any header - otherwise uws locks the status to "200 OK"
     res.writeStatus(status)
-    setCorsHeaders(res)
+    writeHeaders(res)
     res.writeHeader('Content-Type', acceptsJson ? 'application/json' : 'application/x-lib0any')
     res.end(response)
   })
@@ -213,6 +206,17 @@ export const registerApi = (yhub, app) => {
     if (typeof name !== 'string' || !apiSegmentRegex.test(name) || typeof version !== 'string' || !apiSegmentRegex.test(version) || (scope !== 'doc' && scope !== 'org' && scope !== 'global') || (accessPurpose !== null && typeof accessPurpose !== 'string')) {
       throw error.create(`invalid api endpoint: name="${name}" version="${version}" scope="${scope}"`)
     }
+    // an invalid cors config fails at startup, like every other endpoint validation here - with
+    // the endpoint named, since the message alone can't tell an override from `server.cors`
+    /**
+     * @type {import('./cors.js').ResolvedCors|null}
+     */
+    let cors = null
+    try {
+      cors = resolveCors(yhub.conf.server?.cors, endpoint.cors)
+    } catch (err) {
+      throw error.create(`${/** @type {Error} */ (err).message} (endpoint "${name}")`)
+    }
     /**
      * @type {Array<string>}
      */
@@ -271,9 +275,33 @@ export const registerApi = (yhub, app) => {
         paramOffset,
         coerceQuery,
         bodySpec,
-        queryDeclaresBranch
+        queryDeclaresBranch,
+        cors
       }))
     })
+    // one endpoint owns exactly one uws pattern (see routeKey above), so a single preflight
+    // route covers it and can advertise precisely the methods registered on it. Without cors
+    // there is nothing to preflight - the route stays unregistered and uws answers 404.
+    if (cors != null) {
+      const allowedMethods = [...methods.map(m => m.toUpperCase()), 'OPTIONS'].join(', ')
+      app.options(pattern, (res, req) => {
+        const origin = req.getHeader('origin')
+        const host = req.getHeader('host')
+        const url = req.getUrl()
+        res.cork(() => {
+          // the status must be written before any header - otherwise uws locks it to "200 OK"
+          res.writeStatus('204 No Content')
+          // rfc 9110: an options response says what the resource supports
+          res.writeHeader('Allow', allowedMethods)
+          if (!writeCorsPreflight(cors, res, origin, allowedMethods) && origin !== '') {
+            // the denial itself is spec-shaped (no Access-Control header at all), but it would
+            // otherwise be the only origin denial that leaves no server-side trace
+            log.info({ path: url, origin, host }, 'preflight denied, origin not allowed')
+          }
+          res.end()
+        })
+      })
+    }
   })
 }
 
@@ -290,12 +318,23 @@ export const registerApi = (yhub, app) => {
  * @param {((o: any) => { err: string|null, result: any })|null} opts.coerceQuery
  * @param {{ $schema: s.Schema<any>, coerce: (o: any) => { err: string|null, result: any } }|null} opts.bodySpec
  * @param {boolean} opts.queryDeclaresBranch
+ * @param {import('./cors.js').ResolvedCors|null} opts.cors
  * @returns {(res: import('uws').HttpResponse, req: import('uws').HttpRequest) => void}
  */
-const createApiHandler = (yhub, { method, handler, requiredAccess, scope, accessPurpose, pathParams, paramOffset, coerceQuery, bodySpec, queryDeclaresBranch }) => (res, req) => {
+const createApiHandler = (yhub, { method, handler, requiredAccess, scope, accessPurpose, pathParams, paramOffset, coerceQuery, bodySpec, queryDeclaresBranch, cors }) => (res, req) => {
   const ctx = { aborted: false }
   // assigned once the headers are snapshotted - stays false when reading the request throws
   let acceptsJson = false
+  // likewise - an unknown origin simply receives no cors headers
+  let origin = ''
+  /**
+   * Every response goes through here. `skip` holds the lowercased headers a handler's own
+   * `Response` already defines, which win over the configured ones.
+   *
+   * @param {import('uws').HttpResponse} res
+   * @param {Set<string>} [skip]
+   */
+  const writeHeaders = (res, skip) => writeCorsResponse(cors, res, origin, skip)
   /**
    * @type {t.ApiRequest|null}
    */
@@ -353,6 +392,19 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
     const headers = {}
     req.forEach((key, value) => { headers[key] = value })
     acceptsJson = (headers.accept ?? '').includes('application/json')
+    origin = headers.origin ?? ''
+    // a cross-site page can fire requests the browser never preflights - "simple" POSTs
+    // carrying the visitor's ambient credentials, GETs whose timing is observable even though
+    // the response is withheld - and cors only ever hides responses. So every method checks the
+    // origin before anything else runs: cross-origin is denied unless cors allows it,
+    // same-origin passes (see originAllowed)
+    if (!originAllowed(cors, origin, headers.host ?? '', headers['sec-fetch-site'] ?? '')) {
+      log.info({ path, origin, host: headers.host }, 'api request denied, origin not allowed')
+      // the gate only denies requests carrying an `Origin` - a browser is on the other end, so
+      // the body is json regardless of `Accept`
+      sendErrorResponse(res, writeHeaders, statusLine(403), { error: 'origin not allowed', code: 'origin-not-allowed' }, true)
+      return
+    }
     const room = scope === 'doc' ? /** @type {t.Room} */ ({ org, docid, branch }) : null
     log.debug({ endpoint: `${method.toUpperCase()} ${path}` }, 'api request')
     // auth starts synchronously - readAuthInfo reads the live uws request
@@ -429,10 +481,16 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
       if (result instanceof Response) {
         const body = new Uint8Array(await result.arrayBuffer())
         if (ctx.aborted) return
+        // the handler's own headers win over the configured ones - writing both would emit the
+        // header twice. `Headers` keys are already lowercased.
+        /**
+         * @type {Set<string>}
+         */
+        const own = new Set()
+        result.headers.forEach((_value, key) => own.add(key))
         res.cork(() => {
           res.writeStatus(result.statusText !== '' ? `${result.status} ${result.statusText}` : statusLine(result.status))
-          // default cors headers, unless the handler's Response controls cors itself
-          if (!result.headers.has('access-control-allow-origin')) setCorsHeaders(res)
+          writeHeaders(res, own)
           result.headers.forEach((value, key) => {
             // uws manages the response framing
             if (key !== 'content-length' && key !== 'transfer-encoding') res.writeHeader(key, value)
@@ -442,7 +500,7 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
       } else if (result == null) {
         res.cork(() => {
           res.writeStatus('204 No Content')
-          setCorsHeaders(res)
+          writeHeaders(res)
           res.end()
         })
       } else {
@@ -470,7 +528,7 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
         }
         res.cork(() => {
           res.writeStatus('200 OK')
-          setCorsHeaders(res)
+          writeHeaders(res)
           res.writeHeader('Content-Type', contentType)
           res.end(body)
         })
@@ -485,12 +543,12 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
         // raised by `getDoc`, so every endpoint that reads the document - built-in or custom -
         // reports a deleted one as absent rather than as a server error. `code` matters because
         // a docid that was never written answers 200 with an empty document.
-        sendErrorResponse(res, statusLine(404), { error: 'Not Found', code: 'doc-deleted' }, acceptsJson)
+        sendErrorResponse(res, writeHeaders, statusLine(404), { error: 'Not Found', code: 'doc-deleted' }, acceptsJson)
       } else if (isApiError(err)) {
-        sendErrorResponse(res, statusLine(err.status), { error: err.message, ...err.extra }, acceptsJson)
+        sendErrorResponse(res, writeHeaders, statusLine(err.status), { error: err.message, ...err.extra }, acceptsJson)
       } else {
         log.error({ err, path }, 'error handling api request')
-        sendErrorResponse(res, '500 Internal Server Error', { error: 'Internal server error' }, acceptsJson)
+        sendErrorResponse(res, writeHeaders, '500 Internal Server Error', { error: 'Internal server error' }, acceptsJson)
       }
     })
   } catch (err) {
@@ -499,7 +557,7 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
       log.debug({ err }, 'api request could not be read')
     } else {
       log.error({ err }, 'error handling api request')
-      sendErrorResponse(res, '500 Internal Server Error', { error: 'Internal server error' }, acceptsJson)
+      sendErrorResponse(res, writeHeaders, '500 Internal Server Error', { error: 'Internal server error' }, acceptsJson)
     }
   }
 }

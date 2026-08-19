@@ -207,6 +207,13 @@ AUTH_PRIVATE_KEY=...
 
 # Server (optional)
 PORT=4400
+# Origin(s) allowed to call the api from a browser - comma-separated for an allowlist, an entry
+# may start its host with '*.': https://*.example.com matches every host under example.com. While unset,
+# cross-origin browser access is closed (same-origin pages and non-browser clients always work);
+# '*' opens the api to every origin and logs a warning. Cross-origin websocket connections and
+# api requests are denied unless the origin is allowed - browsers do not apply cors to those
+# requests, so yhub does.
+CORS_ORIGIN=https://app.example.com
 # Max request header bytes (cookies included); requests over it are rejected with 431.
 # uWebSockets.js default: 4096. Must be present in the environment at process startup.
 # UWS_HTTP_MAX_HEADERS_SIZE=32768

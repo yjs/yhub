@@ -19,6 +19,7 @@ const userIdChoices = [
 ]
 
 const bucket = env.getConf('s3-yhub-bucket')
+const corsOrigin = env.getConf('cors-origin') || null
 
 /**
  * @type {import('../src/types.js').YHubConfig}
@@ -45,6 +46,10 @@ export const conf = {
       ],
   server: {
     port: number.parseInt(env.getConf('port') || '4400'),
+    // CORS_ORIGIN unset leaves cors unset: same-origin pages and non-browser clients only. A
+    // comma-separated value becomes an allowlist, '*' opens the api to every origin - the
+    // latter is safe here only because `credentials` stays off; browsers reject that pair.
+    cors: corsOrigin === null ? undefined : { origin: corsOrigin.includes(',') ? corsOrigin.split(',').map(origin => origin.trim()).filter(origin => origin !== '') : corsOrigin.trim() },
     auth: types.createAuthPlugin({
       // this demo configuration picks a "unique" userid and grants everyone write access
       async readAuthInfo (_req) { return { userid: random.oneOf(userIdChoices) } },

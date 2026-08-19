@@ -406,15 +406,16 @@ export const createAuthPlugin = authDef => authDef
  *
  * Fields: `version` (default: 'v1'), `scope` (default: 'doc'), `path` (additional named path
  * segments, e.g. '/:commentId'), `accessPurpose` (forwarded as `purpose` to the auth access
- * callback). Each method is defined as a `{ $query?, handler }` object - see `ApiMethodDef`.
+ * callback), `cors` (overrides `server.cors` for this endpoint - `null` disables cors on it).
+ * Each method is defined as a `{ $query?, handler }` object - see `ApiMethodDef`.
  *
- * @typedef {{ name: string, version?: string, scope?: 'doc', path?: string, accessPurpose?: string } & ApiEndpointMethods<ApiDocRequest>} ApiDocEndpoint
+ * @typedef {{ name: string, version?: string, scope?: 'doc', path?: string, accessPurpose?: string, cors?: Partial<CorsConfig>|null } & ApiEndpointMethods<ApiDocRequest>} ApiDocEndpoint
  */
 /**
- * @typedef {{ name: string, version?: string, scope: 'org', path?: string, accessPurpose?: string } & ApiEndpointMethods<ApiOrgRequest>} ApiOrgEndpoint
+ * @typedef {{ name: string, version?: string, scope: 'org', path?: string, accessPurpose?: string, cors?: Partial<CorsConfig>|null } & ApiEndpointMethods<ApiOrgRequest>} ApiOrgEndpoint
  */
 /**
- * @typedef {{ name: string, version?: string, scope: 'global', path?: string, accessPurpose?: string } & ApiEndpointMethods<ApiGlobalRequest>} ApiGlobalEndpoint
+ * @typedef {{ name: string, version?: string, scope: 'global', path?: string, accessPurpose?: string, cors?: Partial<CorsConfig>|null } & ApiEndpointMethods<ApiGlobalRequest>} ApiGlobalEndpoint
  */
 /**
  * @typedef {ApiDocEndpoint | ApiOrgEndpoint | ApiGlobalEndpoint} ApiEndpoint
@@ -459,10 +460,63 @@ export const createAuthPlugin = authDef => authDef
  * @template [BPatch=undefined]
  * @template [BDelete=undefined]
  * @param {Name} name
- * @param {{ version?: string, scope?: Scope, path?: string, accessPurpose?: string, get?: { $query?: QGet, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QGet>>) => any }, post?: { $query?: QPost, $body?: BPost, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPost>, ApiBodyType<BPost>>) => any }, put?: { $query?: QPut, $body?: BPut, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPut>, ApiBodyType<BPut>>) => any }, patch?: { $query?: QPatch, $body?: BPatch, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPatch>, ApiBodyType<BPatch>>) => any }, delete?: { $query?: QDelete, $body?: BDelete, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QDelete>, ApiBodyType<BDelete>>) => any } }} opts
+ * @param {{ version?: string, scope?: Scope, path?: string, accessPurpose?: string, cors?: Partial<CorsConfig>|null, get?: { $query?: QGet, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QGet>>) => any }, post?: { $query?: QPost, $body?: BPost, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPost>, ApiBodyType<BPost>>) => any }, put?: { $query?: QPut, $body?: BPut, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPut>, ApiBodyType<BPut>>) => any }, patch?: { $query?: QPatch, $body?: BPatch, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPatch>, ApiBodyType<BPatch>>) => any }, delete?: { $query?: QDelete, $body?: BDelete, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QDelete>, ApiBodyType<BDelete>>) => any } }} opts
  * @return {ApiEndpoint & { name: Name }}
  */
 export const createApiEndpoint = (name, opts) => /** @type {any} */ ({ name, ...opts })
+
+export const $cors = s.$object({
+  /**
+   * Allowed origin(s). `'*'` allows every origin - it cannot be combined with `credentials`,
+   * which browsers reject. An array is an allowlist: the request's `Origin` is echoed back when
+   * it matches (the header holds a single value), and `Vary: Origin` is sent so caches don't
+   * mix origins up; a single origin behaves as a one-entry allowlist. A request from an origin that doesn't match is denied. An entry may start
+   * its host with `*.` - `https://*.example.com` matches every host under `example.com`
+   * (subdomains of subdomains included) but never the apex, and ports must be spelled out.
+   * Mind that a wildcard on a shared or public suffix (`https://*.co.uk`,
+   * `https://*.github.io`) allowlists every site anyone can host under it - see API.md.
+   * Websocket upgrades and api requests are origin-gated beyond cors itself: cross-origin is
+   * denied unless allowed here or same-origin (see `trustSameOrigin`).
+   */
+  origin: s.$union(s.$string, s.$array(s.$string)),
+  /**
+   * Send `Access-Control-Allow-Credentials: true`, letting browsers send cookies and http auth.
+   * Requires a concrete `origin`. (default: false)
+   */
+  credentials: s.$boolean.optional,
+  /**
+   * Trust browser requests whose `Origin` names the request's own `Host`: they pass the origin
+   * gate without being listed in the allowlist. The scheme is not compared - behind a
+   * tls-terminating proxy the server sees http while the browser says https (see API.md) - but
+   * a browser that sends `Sec-Fetch-Site` (all since 2023) must also report `same-origin` (or
+   * `none`), which closes the scheme gap the comparison cannot see. Set
+   * to false to enforce the allowlist for every browser origin, same-origin included. Affects
+   * only the origin gate on websocket upgrades and api requests - a same-origin response needs
+   * no Access-Control header. (default: true)
+   */
+  trustSameOrigin: s.$boolean.optional,
+  /**
+   * Request headers browsers may send, as `Access-Control-Allow-Headers` on the preflight.
+   * (default: `['Content-Type', 'Authorization']` - `Authorization` is never a "simple" header,
+   * and omitting it would fail every authorized browser request at the preflight). A `'*'`
+   * entry is accepted without `credentials`, but the Fetch wildcard never covers
+   * `Authorization` - list it alongside: `['*', 'Authorization']`.
+   */
+  allowHeaders: s.$array(s.$string).optional,
+  /**
+   * Response headers browsers may read, as `Access-Control-Expose-Headers`.
+   */
+  exposeHeaders: s.$array(s.$string).optional,
+  /**
+   * Seconds a browser may cache the preflight, as `Access-Control-Max-Age`. A non-negative
+   * integer. (default: 3600)
+   */
+  maxAge: s.$number.optional
+})
+
+/**
+ * @typedef {s.Unwrap<typeof $cors>} CorsConfig
+ */
 
 export const $config = s.$object({
   redis: s.$object({
@@ -538,7 +592,14 @@ export const $config = s.$object({
      * Maximum expected Ydoc size in bytes. Used as baseline to calculate WebSocket
      * maxPayloadLength and maxBackpressure. (default: 500MB)
      */
-    maxDocSize: s.$number.optional
+    maxDocSize: s.$number.optional,
+    /**
+     * Cross-origin resource sharing. While this is unset, no `Access-Control-*` header is sent
+     * and cross-origin websocket upgrades and api requests are denied - only same-origin pages
+     * and non-browser clients can use the api. Individual endpoints may override it via their
+     * `cors` field. See API.md.
+     */
+    cors: $cors.nullable.optional
   }).nullable.optional
 })
 

@@ -51,8 +51,9 @@ export const conf = {
     // latter is safe here only because `credentials` stays off; browsers reject that pair.
     cors: corsOrigin === null ? undefined : { origin: corsOrigin.includes(',') ? corsOrigin.split(',').map(origin => origin.trim()).filter(origin => origin !== '') : corsOrigin.trim() },
     auth: types.createAuthPlugin({
-      // this demo configuration picks a "unique" userid and grants everyone write access
-      async readAuthInfo (_req) { return { userid: random.oneOf(userIdChoices) } },
+      // this demo configuration takes the userid from `?userid=` (or picks a "unique" one) and
+      // grants everyone write access
+      async readAuthInfo (req) { return { userid: req.getQuery('userid') || random.oneOf(userIdChoices) } },
       async getAccessType () { return 'rw' }
     })
   },

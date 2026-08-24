@@ -251,7 +251,7 @@ The `ydoc` is the document at `to`; its alive content already *is* that point-in
 Retrieve all editing-timestamps for a certain document. Use
 the activity API and the changeset API to reconstruct an editing trail.
 
-* `GET /api/activity/v1/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, groupMaxGap?: number, groupMaxDuration?: number, delta?: boolean, withCustomAttributions?: string, customAttributions?: boolean, contentIds?: string }`
+* `GET /api/activity/v1/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, groupMaxGap?: number, groupMaxDuration?: number, mergeUsers?: boolean, delta?: boolean, withCustomAttributions?: string, customAttributions?: boolean, contentIds?: string }`
   * `from`/`to`: unix timestamp range filter
   * `by=string`: comma-separated list of user-ids to filter by
   * `withCustomAttributions=string`: filter by custom attributions using `key:value` pairs, comma-separated (e.g. `source:import,tag:v2`). Only changes matching all specified attributions are included.
@@ -259,8 +259,9 @@ the activity API and the changeset API to reconstruct an editing trail.
   * `limit=number`: maximum number of entries to return
   * `order='asc'|'desc'`: `"asc"` (oldest first) or `"desc"` (newest first, default)
   * `group=boolean`: bundle consecutive changes from the same user into a single entry (experimental)
-  * `groupMaxGap=number`: maximum time gap (in milliseconds) between consecutive changes by the same user that still merges them into a single entry (default: `1000`). Only applies when grouping is enabled.
+  * `groupMaxGap=number`: maximum time gap (in milliseconds) between consecutive changes that still merges them into a single entry (default: `1000`). Only applies when grouping is enabled.
   * `groupMaxDuration=number`: maximum total span (in milliseconds) of a grouped entry (`entry.to - entry.from`). A change is not merged into a group if the resulting span would exceed this value (default: unlimited). Only applies when grouping is enabled.
+  * `mergeUsers=boolean`: also bundle consecutive changes from *different* users into a single entry, so that grouping is decided purely by `groupMaxGap`/`groupMaxDuration` (default: `false`). The entry's `by` then lists every contributing user-id, comma-separated in order of first appearance — the same encoding `by=` accepts as a filter. Only applies when grouping is enabled. Useful for a "what happened to this document between 9am and 10am" timeline, where interleaved edits by several people should read as one session rather than one entry per author switch.
   * `delta=boolean`: include a delta representation for each activity entry — the document at that entry's `to`, with the entry's changes highlighted.
   * `ydoc=boolean`: return a single shared partially-gc'd document for the whole list, plus per entry a `renderedContent` IdSet (= content alive at the entry's `to`). The response shape becomes `{ ydoc, activity }`. Render any entry client-side by applying `ydoc` to a `gc: false` doc and overlaying an `AttributionsRenderer` with that entry's `renderedContent` (and `attributions`) — see [Rendering with AttributionsRenderer](#rendering-with-attributionsrenderer).
   * `attributions=boolean`: include each entry's attribution `ContentMap` (as `attributions: Uint8Array`).

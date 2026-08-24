@@ -126,7 +126,7 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       break
     }
     case 'activity': {
-      const { nongcDoc: nongcDocBin, contentmapBin, from, to, by, contentIds: contentIdsBin, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupMaxGap, groupMaxDuration } = msg
+      const { nongcDoc: nongcDocBin, contentmapBin, from, to, by, contentIds: contentIdsBin, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupMaxGap, groupMaxDuration, mergeUsers } = msg
       const contentmap = Y.decodeContentMap(contentmapBin)
       const contentIds = contentIdsBin && Y.decodeContentIds(contentIdsBin)
       const filteredAttributions = filterContentMap(contentmap, from, to, by || undefined, contentIds, withCustomAttributions)
@@ -180,13 +180,21 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       const groupDistance = group ? groupMaxGap : 1
       /** @type {{ from: number, to: number, by: string?, customAttributions: Array<{k:string,v:string}>|null }|null} */
       let lastActivity = null
+      // authors of `lastActivity`, only tracked when mergeUsers lets entries span multiple users
+      /** @type {Set<string>} */
+      let lastBy = new Set()
       activity.forEach(act => {
-        if (lastActivity != null && lastActivity.by === act.by && act.from - lastActivity.to < groupDistance && act.to - lastActivity.from < groupMaxDuration) {
+        if (lastActivity != null && (mergeUsers || lastActivity.by === act.by) && act.from - lastActivity.to < groupDistance && act.to - lastActivity.from < groupMaxDuration) {
           lastActivity.to = act.to
+          if (mergeUsers && act.by) {
+            act.by.split(',').forEach(u => lastBy.add(u))
+            lastActivity.by = Array.from(lastBy).join(',')
+          }
           lastActivity.customAttributions?.push(...(act?.customAttributions || []))
         } else {
           activityResult.push(act)
           lastActivity = act
+          if (mergeUsers) lastBy = new Set(act.by ? act.by.split(',') : [])
         }
       })
       if (includeCustomAttributions) {

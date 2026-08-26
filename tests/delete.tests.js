@@ -87,11 +87,11 @@ const encodeDocForStore = ydoc => {
 
 /**
  * @param {import('../src/index.js').YHub} yhub
- * @param {import('../src/types.js').Room} room
+ * @param {import('../src/types.js').DocRef} docRef
  */
-const listS3Objects = async (yhub, room) => {
+const listS3Objects = async (yhub, docRef) => {
   const s3 = /** @type {any} */ (yhub.conf.persistence[0])
-  const prefix = `id:ydoc:v1/${encodeURIComponent(room.org)}/${encodeURIComponent(room.docid)}/${encodeURIComponent(room.branch)}/`
+  const prefix = `id:ydoc:v1/${encodeURIComponent(docRef.org)}/${encodeURIComponent(docRef.docid)}/${encodeURIComponent(docRef.branch)}/`
   /**
    * @type {Array<string>}
    */
@@ -104,10 +104,10 @@ const listS3Objects = async (yhub, room) => {
 
 /**
  * @param {import('../src/index.js').YHub} yhub
- * @param {import('../src/types.js').Room} room
+ * @param {import('../src/types.js').DocRef} docRef
  */
-const readDoc = async (yhub, room) => {
-  const { gcDoc } = await yhub.getDoc(room, { gc: true })
+const readDoc = async (yhub, docRef) => {
+  const { gcDoc } = await yhub.getDoc(docRef, { gc: true })
   const ydoc = new Y.Doc()
   gcDoc && Y.applyUpdate(ydoc, gcDoc)
   return ydoc
@@ -121,146 +121,146 @@ const readDoc = async (yhub, room) => {
  * @param {t.TestCase} tc
  */
 export const testSoftDeleteKeepsContent = async tc => {
-  const { createWsClient, yhub, defaultRoom } = await utils.createTestCase(tc)
+  const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
   const { ydoc } = await createWsClient({ waitForSync: true })
   ydoc.get().setAttr('a', 1)
   await promise.wait(500)
-  const tombstone = await yhub.deleteDoc(defaultRoom, { by: 'user1' })
+  const tombstone = await yhub.deleteDoc(defaultDocRef, { by: 'user1' })
   t.assert(tombstone.hard === false, 'soft by default')
   t.assert(tombstone.purgedAt === null, 'a soft deletion erases nothing')
   t.assert(tombstone.by === 'user1' && tombstone.deletedAt > 0)
-  t.assert((await yhub.getDoc(defaultRoom, { gc: true })).tombstone != null, 'getDoc reports the deletion')
+  t.assert((await yhub.getDoc(defaultDocRef, { gc: true })).tombstone != null, 'getDoc reports the deletion')
   // the update was still on the stream when the document was deleted - the worker persists it
   dropClients()
   await utils.waitTasksProcessed(yhub)
-  const persisted = await yhub.persistence.retrieveDoc(defaultRoom, { gc: true })
+  const persisted = await yhub.persistence.retrieveDoc(defaultDocRef, { gc: true })
   t.assert(persisted.gcDoc.length > 0, 'a soft deletion does not stop compaction')
-  t.assert((await readDoc(yhub, defaultRoom)).get().getAttr('a') === 1, 'the content survived')
+  t.assert((await readDoc(yhub, defaultDocRef)).get().getAttr('a') === 1, 'the content survived')
 }
 
 /**
  * @param {t.TestCase} tc
  */
 export const testRestoreDoc = async tc => {
-  const { createWsClient, yhub, defaultRoom } = await utils.createTestCase(tc)
+  const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
   const { ydoc } = await createWsClient({ waitForSync: true })
   ydoc.get().setAttr('a', 1)
   await promise.wait(500)
-  await yhub.deleteDoc(defaultRoom)
-  t.assert((await yhub.getDoc(defaultRoom, { gc: true })).tombstone != null, 'getDoc reports the deletion')
-  await yhub.restoreDoc(defaultRoom)
-  t.assert(await yhub.persistence.retrieveTombstone(defaultRoom) === null, 'the tombstone is gone')
-  const restored = await yhub.getDoc(defaultRoom, { gc: true })
+  await yhub.deleteDoc(defaultDocRef)
+  t.assert((await yhub.getDoc(defaultDocRef, { gc: true })).tombstone != null, 'getDoc reports the deletion')
+  await yhub.restoreDoc(defaultDocRef)
+  t.assert(await yhub.persistence.retrieveTombstone(defaultDocRef) === null, 'the tombstone is gone')
+  const restored = await yhub.getDoc(defaultDocRef, { gc: true })
   const check = new Y.Doc()
   Y.applyUpdate(check, restored.gcDoc)
   t.assert(check.get().getAttr('a') === 1, 'the document came back with its content')
   // restoring what was never deleted is a no-op, not an error
-  await yhub.restoreDoc(defaultRoom)
+  await yhub.restoreDoc(defaultDocRef)
 }
 
 /**
  * @param {t.TestCase} tc
  */
 export const testRestoreRefusesErasedContent = async tc => {
-  const { yhub, defaultRoom } = await utils.createTestCase(tc)
-  await yhub.deleteDoc(defaultRoom, { hard: true })
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
+  await yhub.deleteDoc(defaultDocRef, { hard: true })
   // the content is gone, so dropping the record would resurrect a partial document
-  await t.failsAsync(() => yhub.restoreDoc(defaultRoom))
-  t.assert(await yhub.persistence.retrieveTombstone(defaultRoom) != null, 'the record is still there')
+  await t.failsAsync(() => yhub.restoreDoc(defaultDocRef))
+  t.assert(await yhub.persistence.retrieveTombstone(defaultDocRef) != null, 'the record is still there')
 }
 
 /**
  * @param {t.TestCase} tc
  */
 export const testHardDeleteErasesContent = async tc => {
-  const { createWsClient, yhub, defaultRoom } = await utils.createTestCase(tc)
+  const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
   const { ydoc } = await createWsClient({ waitForSync: true })
   ydoc.get().setAttr('a', 1)
   await promise.wait(500)
   // compact first, so there is something in postgres and in s3 to erase
   await utils.waitTasksProcessed(yhub)
-  t.assert((await yhub.persistence.retrieveDoc(defaultRoom, { gc: true })).gcDoc.length > 0, 'rows exist')
-  t.assert((await listS3Objects(yhub, defaultRoom)).length > 0, 's3 objects exist')
-  const tombstone = await yhub.deleteDoc(defaultRoom, { hard: true })
+  t.assert((await yhub.persistence.retrieveDoc(defaultDocRef, { gc: true })).gcDoc.length > 0, 'rows exist')
+  t.assert((await listS3Objects(yhub, defaultDocRef)).length > 0, 's3 objects exist')
+  const tombstone = await yhub.deleteDoc(defaultDocRef, { hard: true })
   t.assert(tombstone.hard && tombstone.purgedAt != null, 'the returned record reports the completed purge')
-  t.assert((await yhub.persistence.retrieveDoc(defaultRoom, { gc: true })).gcDoc.length === 0, 'no rows left')
+  t.assert((await yhub.persistence.retrieveDoc(defaultDocRef, { gc: true })).gcDoc.length === 0, 'no rows left')
   // the rows go first and the assets follow on the plugin's schedule (S3PersistenceV1 defers to
   // let concurrent readers finish), so converge rather than expecting them gone on return
-  await promise.untilAsync(async () => (await listS3Objects(yhub, defaultRoom)).length === 0, 30000)
-  t.assert((await listS3Objects(yhub, defaultRoom)).length === 0, 'the s3 objects are erased too')
+  await promise.untilAsync(async () => (await listS3Objects(yhub, defaultDocRef)).length === 0, 30000)
+  t.assert((await listS3Objects(yhub, defaultDocRef)).length === 0, 'the s3 objects are erased too')
   // deleting again purges again, finds nothing left and stays happy - which is what makes the
   // retention sweep safe to re-run over a document it already handled
-  const again = await yhub.deleteDoc(defaultRoom, { hard: true })
+  const again = await yhub.deleteDoc(defaultDocRef, { hard: true })
   t.assert(again.purgedAt != null && again.deletedAt === tombstone.deletedAt, 're-purging is a no-op')
-  t.assert((await yhub.persistence.retrieveDoc(defaultRoom, { gc: true })).gcDoc.length === 0, 'still no rows')
+  t.assert((await yhub.persistence.retrieveDoc(defaultDocRef, { gc: true })).gcDoc.length === 0, 'still no rows')
 }
 
 /**
  * The guard that closes the race: a compact task can spend minutes merging between reading the
- * room's state and calling `store`, so a deletion that lands in that window is only caught
+ * document's state and calling `store`, so a deletion that lands in that window is only caught
  * inside the insert itself.
  *
  * @param {t.TestCase} tc
  */
 export const testHardDeleteBlocksPersistence = async tc => {
-  const { yhub, defaultRoom } = await utils.createTestCase(tc)
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
   const ydoc = new Y.Doc()
   ydoc.get().setAttr('a', 1)
-  await yhub.deleteDoc(defaultRoom, { hard: true })
+  await yhub.deleteDoc(defaultDocRef, { hard: true })
   // a compaction that started before the deletion still arrives here
-  await yhub.persistence.store(defaultRoom, { lastClock: `${await yhub.stream.getTime()}-0`, ...encodeDocForStore(ydoc) })
-  t.assert((await yhub.persistence.retrieveDoc(defaultRoom, { gc: true })).gcDoc.length === 0, 'store is refused')
+  await yhub.persistence.store(defaultDocRef, { lastClock: `${await yhub.stream.getTime()}-0`, ...encodeDocForStore(ydoc) })
+  t.assert((await yhub.persistence.retrieveDoc(defaultDocRef, { gc: true })).gcDoc.length === 0, 'store is refused')
   // and so does unsafePersistDoc, which bypasses the stream and the api entirely
-  await yhub.unsafePersistDoc(defaultRoom, Y.encodeStateAsUpdate(ydoc), { by: 'user1' })
-  t.assert((await yhub.persistence.retrieveDoc(defaultRoom, { gc: true })).gcDoc.length === 0, 'unsafePersistDoc is refused')
+  await yhub.unsafePersistDoc(defaultDocRef, Y.encodeStateAsUpdate(ydoc), { by: 'user1' })
+  t.assert((await yhub.persistence.retrieveDoc(defaultDocRef, { gc: true })).gcDoc.length === 0, 'unsafePersistDoc is refused')
   // a soft deletion deliberately does not block it - reach past restoreDoc, which refuses to
-  // undo a hard deletion, to get the room back to a soft-deleted state
-  await yhub.persistence.deleteTombstone(defaultRoom)
-  await yhub.deleteDoc(defaultRoom)
-  await yhub.persistence.store(defaultRoom, { lastClock: `${await yhub.stream.getTime()}-1`, ...encodeDocForStore(ydoc) })
-  t.assert((await yhub.persistence.retrieveDoc(defaultRoom, { gc: true })).gcDoc.length === 1, 'a soft deletion still stores')
+  // undo a hard deletion, to get the document back to a soft-deleted state
+  await yhub.persistence.deleteTombstone(defaultDocRef)
+  await yhub.deleteDoc(defaultDocRef)
+  await yhub.persistence.store(defaultDocRef, { lastClock: `${await yhub.stream.getTime()}-1`, ...encodeDocForStore(ydoc) })
+  t.assert((await yhub.persistence.retrieveDoc(defaultDocRef, { gc: true })).gcDoc.length === 1, 'a soft deletion still stores')
 }
 
 /**
  * @param {t.TestCase} tc
  */
 export const testRetentionSweep = async tc => {
-  const { createWsClient, yhub, defaultRoom, org } = await utils.createTestCase(tc)
+  const { createWsClient, yhub, defaultDocRef, org } = await utils.createTestCase(tc)
   const { ydoc } = await createWsClient({ waitForSync: true })
   ydoc.get().setAttr('a', 1)
   await promise.wait(500)
   await utils.waitTasksProcessed(yhub)
-  await yhub.deleteDoc(defaultRoom)
+  await yhub.deleteDoc(defaultDocRef)
   dropClients()
   // a soft deletion leaves the content in place, which is what a retention task later sweeps
-  t.assert((await yhub.persistence.retrieveDoc(defaultRoom, { gc: true })).gcDoc.length > 0, 'the content is still there')
-  const due = (await yhub.getTombstones(org, { purged: false })).filter(d => d.docid === defaultRoom.docid)
+  t.assert((await yhub.persistence.retrieveDoc(defaultDocRef, { gc: true })).gcDoc.length > 0, 'the content is still there')
+  const due = (await yhub.getTombstones(org, { purged: false })).filter(d => d.docid === defaultDocRef.docid)
   t.assert(due.length === 1 && due[0].hard === false, 'the sweep finds it pending')
   for (const doc of due) await yhub.deleteDoc(doc, { hard: true })
-  const swept = /** @type {import('../src/types.js').Tombstone} */ (await yhub.persistence.retrieveTombstone(defaultRoom))
+  const swept = /** @type {import('../src/types.js').Tombstone} */ (await yhub.persistence.retrieveTombstone(defaultDocRef))
   t.assert(swept.hard && swept.purgedAt != null, 'the sweep hard-deleted and purged it')
-  t.assert((await yhub.persistence.retrieveDoc(defaultRoom, { gc: true })).gcDoc.length === 0, 'its rows are gone')
-  t.assert((await yhub.getTombstones(org, { purged: false })).every(d => d.docid !== defaultRoom.docid), 'and it is no longer pending')
+  t.assert((await yhub.persistence.retrieveDoc(defaultDocRef, { gc: true })).gcDoc.length === 0, 'its rows are gone')
+  t.assert((await yhub.getTombstones(org, { purged: false })).every(d => d.docid !== defaultDocRef.docid), 'and it is no longer pending')
 }
 
 /**
- * Tombstone is per branch, like every other room-keyed thing in the system.
+ * Tombstone is per branch, like every other docRef-keyed thing in the system.
  *
  * @param {t.TestCase} tc
  */
 export const testDeleteIsBranchScoped = async tc => {
-  const { createWsClient, yhub, defaultRoom } = await utils.createTestCase(tc)
-  const roomB2 = { ...defaultRoom, branch: 'b2' }
+  const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
+  const docRefB2 = { ...defaultDocRef, branch: 'b2' }
   const main = await createWsClient({ waitForSync: true })
   const b2 = await createWsClient({ waitForSync: true, branch: 'b2' })
   main.ydoc.get().setAttr('a', 1)
   b2.ydoc.get().setAttr('b', 2)
   await promise.wait(500)
   await utils.waitTasksProcessed(yhub)
-  await yhub.deleteDoc(defaultRoom, { hard: true })
-  t.assert((await yhub.getDoc(defaultRoom, { gc: true })).tombstone != null, 'getDoc reports the deletion')
-  t.assert(await yhub.persistence.retrieveTombstone(roomB2) === null, 'the sibling branch was not deleted')
-  const other = await yhub.getDoc(roomB2, { gc: true })
+  await yhub.deleteDoc(defaultDocRef, { hard: true })
+  t.assert((await yhub.getDoc(defaultDocRef, { gc: true })).tombstone != null, 'getDoc reports the deletion')
+  t.assert(await yhub.persistence.retrieveTombstone(docRefB2) === null, 'the sibling branch was not deleted')
+  const other = await yhub.getDoc(docRefB2, { gc: true })
   const check = new Y.Doc()
   Y.applyUpdate(check, other.gcDoc)
   t.assert(check.get().getAttr('b') === 2, 'the sibling branch kept its content')
@@ -270,14 +270,14 @@ export const testDeleteIsBranchScoped = async tc => {
  * @param {t.TestCase} tc
  */
 export const testDeletedRestApi = async tc => {
-  const { createWsClient, yhub, defaultRoom, org } = await utils.createTestCase(tc)
+  const { createWsClient, yhub, defaultDocRef, org } = await utils.createTestCase(tc)
   const { ydoc } = await createWsClient({ waitForSync: true })
   ydoc.get().setAttr('a', 1)
   await promise.wait(500)
   await utils.waitTasksProcessed(yhub)
-  const docPath = `/api/ydoc/v1/${org}/${defaultRoom.docid}`
-  const activityPath = `/api/activity/v1/${org}/${defaultRoom.docid}`
-  const changesetPath = `/api/changeset/v1/${org}/${defaultRoom.docid}`
+  const docPath = `/api/ydoc/v1/${org}/${defaultDocRef.docid}`
+  const activityPath = `/api/activity/v1/${org}/${defaultDocRef.docid}`
+  const changesetPath = `/api/changeset/v1/${org}/${defaultDocRef.docid}`
   t.assert((await yhubRequest(docPath)).status === 200, 'readable before the deletion')
   // warm the response cache with the exact requests repeated after the deletion below. A cache hit
   // never reaches getDoc, so serving these afterwards is precisely what deleteDoc's invalidation
@@ -312,9 +312,9 @@ export const testDeletedRestApi = async tc => {
   t.assert(jsonPatch.status === 404, 'a json PATCH on a deleted doc is refused')
   t.compare(await jsonPatch.json(), { error: 'Not Found', code: 'doc-deleted' })
   // the mutating endpoints refuse too - each checks the tombstone getDoc handed it
-  const rolledBack = await yhubPost(`/api/rollback/v1/${org}/${defaultRoom.docid}`, { from: 1 })
+  const rolledBack = await yhubPost(`/api/rollback/v1/${org}/${defaultDocRef.docid}`, { from: 1 })
   t.assert(rolledBack.status === 404 && rolledBack.body.code === 'doc-deleted', 'rollback is refused')
-  const pruned = await yhubPost(`/api/prune/v1/${org}/${defaultRoom.docid}`, { from: 1 })
+  const pruned = await yhubPost(`/api/prune/v1/${org}/${defaultDocRef.docid}`, { from: 1 })
   t.assert(pruned.status === 404 && pruned.body.code === 'doc-deleted', 'prune is refused')
   // idempotent, and a retry must not move the deletion timestamp
   const again = await yhubRequest(docPath, 'DELETE')
@@ -325,14 +325,14 @@ export const testDeletedRestApi = async tc => {
  * @param {t.TestCase} tc
  */
 export const testWsKickOnDelete = async tc => {
-  const { createWsClient, yhub, defaultRoom } = await utils.createTestCase(tc)
+  const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
   const { provider } = await createWsClient({ waitForSync: true })
   /**
    * @type {Array<number>}
    */
   const closeCodes = []
   provider.on('connection-close', event => { event && closeCodes.push(event.code) })
-  await yhub.deleteDoc(defaultRoom)
+  await yhub.deleteDoc(defaultDocRef)
   await promise.until(5000, () => closeCodes.includes(wsCloseDocDeleted))
   t.assert(closeCodes.includes(wsCloseDocDeleted), 'the client was closed with the deleted close code')
   dropClients()
@@ -358,13 +358,13 @@ export const testWsKickOnDelete = async tc => {
  * @param {t.TestCase} tc
  */
 export const testHardDeleteClearsStream = async tc => {
-  const { createWsClient, yhub, defaultRoom, defaultStream } = await utils.createTestCase(tc)
+  const { createWsClient, yhub, defaultDocRef, defaultStream } = await utils.createTestCase(tc)
   const { ydoc } = await createWsClient({ waitForSync: true })
   ydoc.get().setAttr('a', 1)
   await promise.wait(500)
-  const lastClockBefore = (await yhub.stream.getMessages([{ room: defaultRoom, clock: '0' }]))[0].lastClock
-  await yhub.deleteDoc(defaultRoom, { hard: true })
-  const [entry] = await yhub.stream.getMessages([{ room: defaultRoom, clock: '0' }])
+  const lastClockBefore = (await yhub.stream.getMessages([{ docRef: defaultDocRef, clock: '0' }]))[0].lastClock
+  await yhub.deleteDoc(defaultDocRef, { hard: true })
+  const [entry] = await yhub.stream.getMessages([{ docRef: defaultDocRef, clock: '0' }])
   t.assert(entry.messages.length === 1 && entry.messages[0].type === 'ydoc:tombstone:v1', 'only the kick is left')
   t.assert(isSmallerRedisClock(lastClockBefore, entry.lastClock), 'the kick sorts after everything before it')
   dropClients()
@@ -374,23 +374,23 @@ export const testHardDeleteClearsStream = async tc => {
   // and in one worker pass rather than after the tombstone ages out: under age-based trimming the
   // key could not go before minMessageLifetime had elapsed, so this bound is what distinguishes them
   t.assert(Date.now() - deletedAt < yhub.stream.minMessageLifetime, 'the stream drained in one pass')
-  t.assert((await yhub.persistence.retrieveDoc(defaultRoom, { gc: true })).gcDoc.length === 0, 'the worker persisted nothing')
+  t.assert((await yhub.persistence.retrieveDoc(defaultDocRef, { gc: true })).gcDoc.length === 0, 'the worker persisted nothing')
 }
 
 /**
  * @param {t.TestCase} tc
  */
 export const testGetDeletedDocs = async tc => {
-  const { yhub, defaultRoom, org } = await utils.createTestCase(tc)
-  const roomB2 = { ...defaultRoom, branch: 'b2' }
-  await yhub.deleteDoc(defaultRoom)
-  await yhub.deleteDoc(roomB2, { hard: true })
+  const { yhub, defaultDocRef, org } = await utils.createTestCase(tc)
+  const docRefB2 = { ...defaultDocRef, branch: 'b2' }
+  await yhub.deleteDoc(defaultDocRef)
+  await yhub.deleteDoc(docRefB2, { hard: true })
   const pending = await yhub.getTombstones(org, { purged: false })
   t.assert(pending.every(d => d.purgedAt === null), 'pending deletions still hold their content')
-  t.assert(pending.some(d => d.docid === defaultRoom.docid && d.branch === 'main'), 'the soft deletion is pending')
-  t.assert(!pending.some(d => d.docid === defaultRoom.docid && d.branch === 'b2'), 'the hard deletion was purged already')
+  t.assert(pending.some(d => d.docid === defaultDocRef.docid && d.branch === 'main'), 'the soft deletion is pending')
+  t.assert(!pending.some(d => d.docid === defaultDocRef.docid && d.branch === 'b2'), 'the hard deletion was purged already')
   const all = await yhub.getTombstones(org)
-  t.assert(all.filter(d => d.docid === defaultRoom.docid).length === 2, 'both branches are listed')
+  t.assert(all.filter(d => d.docid === defaultDocRef.docid).length === 2, 'both branches are listed')
 }
 
 /**
@@ -402,23 +402,23 @@ export const testGetDeletedDocs = async tc => {
  * @param {t.TestCase} tc
  */
 export const testInlineAssetsPurgeWithoutFetching = async tc => {
-  const { yhub, defaultRoom } = await utils.createTestCase(tc)
-  const room = { ...defaultRoom, branch: 'b2' }
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
+  const docRef = { ...defaultDocRef, branch: 'b2' }
   const ydoc = new Y.Doc()
   ydoc.get().setAttr('a', 1)
-  await yhub.persistence.store(room, { lastClock: `${await yhub.stream.getTime()}-0`, ...encodeDocForStore(ydoc) })
+  await yhub.persistence.store(docRef, { lastClock: `${await yhub.stream.getTime()}-0`, ...encodeDocForStore(ydoc) })
   const all = { gc: true, nongc: true, contentmap: true, contentids: true }
   const marked = await yhub.persistence.sql`
     SELECT gcdoc_is_reference AS a, nongcdoc_is_reference AS b, contentmap_is_reference AS c, contentids_is_reference AS d
-    FROM yhub_ydoc_v1 WHERE org = ${room.org} AND docid = ${room.docid} AND branch = ${room.branch}`
+    FROM yhub_ydoc_v1 WHERE org = ${docRef.org} AND docid = ${docRef.docid} AND branch = ${docRef.branch}`
   t.assert(marked.every(r => !r.a && !r.b && !r.c && !r.d), 'inline assets are marked as data, not references')
-  const { assets } = await yhub.persistence.retrieveAssets(room, all, { onlyReferences: true })
+  const { assets } = await yhub.persistence.retrieveAssets(docRef, all, { onlyReferences: true })
   t.assert(assets.length === 4, 'every column still yields an entry - that is what names the row')
   t.assert(assets.every(a => a.asset === null), 'and none of their bytes were fetched')
   // the resolved path still sees the content
-  t.assert((await yhub.persistence.retrieveAssets(room, all)).assets.every(a => a.asset != null), 'the content path is unaffected')
-  await yhub.deleteDoc(room, { hard: true })
-  t.assert((await yhub.persistence.retrieveDoc(room, { gc: true })).gcDoc.length === 0, 'the all-inline rows are gone')
+  t.assert((await yhub.persistence.retrieveAssets(docRef, all)).assets.every(a => a.asset != null), 'the content path is unaffected')
+  await yhub.deleteDoc(docRef, { hard: true })
+  t.assert((await yhub.persistence.retrieveDoc(docRef, { gc: true })).gcDoc.length === 0, 'the all-inline rows are gone')
 }
 
 /**
@@ -429,20 +429,20 @@ export const testInlineAssetsPurgeWithoutFetching = async tc => {
  * @param {t.TestCase} tc
  */
 export const testPreMigrationRowsPurge = async tc => {
-  const { yhub, defaultRoom } = await utils.createTestCase(tc)
-  const room = { ...defaultRoom, branch: 'b2' }
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
+  const docRef = { ...defaultDocRef, branch: 'b2' }
   const ydoc = new Y.Doc()
   ydoc.get().setAttr('a', 1)
-  await yhub.persistence.store(room, { lastClock: `${await yhub.stream.getTime()}-0`, ...encodeDocForStore(ydoc) })
+  await yhub.persistence.store(docRef, { lastClock: `${await yhub.stream.getTime()}-0`, ...encodeDocForStore(ydoc) })
   // what an ALTER-added column looks like on a row that predates it
   await yhub.persistence.sql`
     UPDATE yhub_ydoc_v1 SET gcdoc_is_reference = true, nongcdoc_is_reference = true,
       contentmap_is_reference = true, contentids_is_reference = true
-    WHERE org = ${room.org} AND docid = ${room.docid} AND branch = ${room.branch}`
-  const { assets } = await yhub.persistence.retrieveAssets(room, { gc: true, nongc: true, contentmap: true, contentids: true }, { onlyReferences: true })
+    WHERE org = ${docRef.org} AND docid = ${docRef.docid} AND branch = ${docRef.branch}`
+  const { assets } = await yhub.persistence.retrieveAssets(docRef, { gc: true, nongc: true, contentmap: true, contentids: true }, { onlyReferences: true })
   t.assert(assets.every(a => a.asset != null), 'the default makes them fetched and checked')
-  await yhub.deleteDoc(room, { hard: true })
-  t.assert((await yhub.persistence.retrieveDoc(room, { gc: true })).gcDoc.length === 0, 'and they still purge')
+  await yhub.deleteDoc(docRef, { hard: true })
+  t.assert((await yhub.persistence.retrieveDoc(docRef, { gc: true })).gcDoc.length === 0, 'and they still purge')
 }
 
 /**
@@ -452,17 +452,17 @@ export const testPreMigrationRowsPurge = async tc => {
  * @param {t.TestCase} tc
  */
 export const testMissingObjectRowIsPurged = async tc => {
-  const { createWsClient, yhub, defaultRoom } = await utils.createTestCase(tc)
+  const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
   const { ydoc } = await createWsClient({ waitForSync: true })
   ydoc.get().setAttr('a', 1)
   await promise.wait(500)
   await utils.waitTasksProcessed(yhub)
-  const names = await listS3Objects(yhub, defaultRoom)
+  const names = await listS3Objects(yhub, defaultDocRef)
   t.assert(names.length > 0, 's3 objects exist')
   const s3 = /** @type {any} */ (yhub.conf.persistence[0])
   await s3.s3client.removeObjects(s3.bucket, names)
-  t.assert((await listS3Objects(yhub, defaultRoom)).length === 0, 'their objects are gone behind our back')
+  t.assert((await listS3Objects(yhub, defaultDocRef)).length === 0, 'their objects are gone behind our back')
   dropClients()
-  await yhub.deleteDoc(defaultRoom, { hard: true })
-  t.assert((await yhub.persistence.retrieveDoc(defaultRoom, { gc: true })).gcDoc.length === 0, 'the rows are cleaned up anyway')
+  await yhub.deleteDoc(defaultDocRef, { hard: true })
+  t.assert((await yhub.persistence.retrieveDoc(defaultDocRef, { gc: true })).gcDoc.length === 0, 'the rows are cleaned up anyway')
 }

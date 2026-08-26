@@ -44,6 +44,10 @@
       "default": "./src/index.js",
       "types": "./dist/src/index.d.ts"
     },
+    "./permissions": {
+      "default": "./src/permissions.js",
+      "types": "./dist/src/permissions.d.ts"
+    },
     "./plugins/s3": {
       "default": "./src/plugins/s3.js",
       "types": "./dist/src/storage/s3.d.ts"
@@ -65,15 +69,14 @@
   "standard": {
     "ignore": [
       "/dist",
-      "/node_modules",
-      "/demos"
+      "/node_modules"
     ]
   },
   "dependencies": {
     "@y-crdt/yn": "^0.1.4",
     "@y/protocols": "^1.0.6-rc.1",
     "@y/y": "^14.0.0-rc.24",
-    "lib0": "^1.0.0-rc.26",
+    "lib0": "^1.0.0-rc.27",
     "minio": "^8.0.6",
     "pino": "^10.3.1",
     "postgres": "^3.4.3",

@@ -14,8 +14,10 @@ Two terms were broken, and one ordering:
   `{org, docid, branch}` triple a websocket attaches to. The sync unit is precisely *a document
   on a branch*, so "room" disappears: the triple is a **`DocRef`** (`{org, docid, branch}` —
   `docid` and `branch` stay the field names, the ref is the full address), and everything
-  room-named follows (`$room` → `$docRef`, `reqToRoom` → `reqToDocRef`, stream keys
-  `{prefix}:room:…` → `{prefix}:doc:…`, log fields).
+  room-named follows (`$room` → `$docRef`, `reqToRoom` → `reqToDocRef`, log fields). The stream
+  keys `{prefix}:room:…` → `{prefix}:doc:…` are the one **deferred** piece: respelling live redis
+  keys orphans in-flight entries on a rolling deploy, so the data-plane rename ships separately
+  with a migration story (see §6).
 - **"resource"** (the provisional tier name during design) is generic to the point of
   meaninglessness — worse, it was doing double duty: in authorization prose, *everything* is a
   resource (an org is a resource, a doc is a resource). "Resource" keeps exactly that abstract
@@ -131,13 +133,14 @@ The full rename set (breaking, one release):
 | room (concept) | a document on a branch (the sync unit) / `DocRef` (the `{org, docid, branch}` triple) |
 | `$room`, `Room` typedef | `$docRef`, `DocRef` |
 | `reqToRoom` | `reqToDocRef` |
-| stream keys `{prefix}:room:{org}:{docid}:{branch}` | `{prefix}:doc:{org}:{docid}:{branch}` |
+| stream keys `{prefix}:room:{org}:{docid}:{branch}` | `{prefix}:doc:{org}:{docid}:{branch}` — **deferred** (data-plane; needs a drain/dual-read migration). The key-builder names `encodeRoomName`/`decodeRoomName`/`encodeQuarantineName` keep their spelling until the keys flip |
 | `docid`, `branch` (params, columns, routes) | **unchanged** |
 | `deleteDoc(room)` | **name unchanged** — `deleteDoc(docRef)` already says what it does (deletes the document on that branch); a document-wide (all branches) cascade arrives with the deferred extensions |
 | `Persistence.listDocids(org)` | unchanged; plugin enumeration hook is `listDocuments` |
 | capabilities / grant (earlier drafts) | permissions (objects), assignment (stored record), grant/revoke (verbs), check (decision) |
 | `RoomCapabilities`, `BranchPermissions` (drafts, leaf) | `DocumentPermissions` (`'permissions:document:v1'`) |
 | `ResourcePermissions`, middle-tier `DocumentPermissions` (drafts) | `BranchPermissions` (`'permissions:branch:v1'`, `{org, branch}`, endpoint-only in v1) |
-| endpoint `scope: 'doc'` | **unchanged** (addresses a document on a branch); a docless `scope: 'branch'` becomes possible |
-| `accessPurpose` | per-method `requires` + the `endpoint` facet |
-| `rest` / `restCustom` (draft) | `endpoint` facet / `context` attribute |
+| endpoint `scope: 'doc'` | `scope: 'document'` — the one spelling of the tier across `createApiEndpoint({ scope })`, `authorize(scope, ..)`, and `createAuthorize({ document })` (the type literal stays `'permissions:document:v1'`; `docid`/`docRef` stay); a docless `scope: 'branch'` is deferred (its route shape is undecided: branch is a query parameter) |
+| `accessPurpose` | the `endpoint` facet (checked for every rest endpoint) + in-handler facet checks |
+| `readAuthInfo` / `getAccessType`, `getOrgAccessType`, `getGlobalAccessType` | `authenticate` / `authorize` — the auth plugin is `{ authenticate, authorize }` |
+| `rest` / `restCustom` (draft) | `endpoint` facet (the draft's `context` attribute was dropped — permissions.md §8) |

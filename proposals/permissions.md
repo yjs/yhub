@@ -1,8 +1,10 @@
 # Permissions
 
-Status: proposal. Replaces `AccessType` (`'r'|'rw'|null`), `getAccessType` / `getOrgAccessType` /
-`getGlobalAccessType`, and the advisory `accessPurpose` mechanism. Breaking; no compatibility layer
-beyond the `permissionsFromAccessType` migration helper.
+Status: accepted; schemas and merges are implemented (`src/permissions.js`, importable as
+`@y/hub/permissions`), enforcement is wired through the server. Replaces `AccessType`
+(`'r'|'rw'|null`), `readAuthInfo` / `getAccessType` / `getOrgAccessType` / `getGlobalAccessType`
+(the plugin is now `{ authenticate, authorize }`), and the advisory `accessPurpose` mechanism.
+Breaking; no compatibility layer — the migration mapping is documented in §12.
 
 Companions: [permissions-prior-art.md](./permissions-prior-art.md) — the research this proposal
 draws on (Zanzibar/Leopard, SpiceDB/OpenFGA, Discord, AWS ABAC/IAM, Cedar, XACML, Ably, Liveblocks,
@@ -19,7 +21,7 @@ V1 implements a sound, self-contained framework for **what a subject can do on a
 extensible without breaking changes. In: the four typed permission objects (doc permissions
 with the full facet vocabulary; branch/org/global as *endpoint-only* objects), positional CRUD
 masks, the normalized view + implication normalization, the merge algebra (union + intersect),
-the single `getPermissions` plugin hook, and the enforcement invariants (§9).
+the single `authorize` plugin hook, and the enforcement invariants (§9).
 
 Deliberately **deferred** (each reserved as a purely additive extension): scope floors and any
 permission inheritance between scopes — an org- or branch-level answer never implies anything
@@ -32,9 +34,9 @@ subdocuments (naming.md §5); `explainPermissions`.
 
 A **permission object** describes everything a subject may do with one resource. Permissions are
 tied to the resource's facets (ydoc, awareness, history, …), never to transport routes — REST and
-websocket gates both *consume* the same permission object. The auth plugin returns permissions per
-`(authInfo, selector)`; yhub normalizes them into a canonical form, caches them per connection,
-and enforces every gate from them.
+websocket gates both *consume* the same permission object. The auth plugin answers each
+`authorize(scope, resourceId, user)` question with one; yhub normalizes it into a canonical form,
+caches it per connection, and enforces every gate from it.
 
 yhub has **five permission levels**:
 
@@ -55,7 +57,7 @@ Permission objects exist in two representations:
   explicit denial. This is the *delta* form; merging operates on it, and merge results are
   themselves valid input.
 - **Normalized view** — fully materialized, every facet present, one spelling per denial —
-  produced by `normalizeDocPermissions` (which also validates: invalid answers throw) after the
+  produced by `normalizeDocumentPermissions` (which also validates: invalid answers throw) after the
   last merge. Enforcement and recheck comparison read only this view; its endpoint map is
   canonical (redundant entries equal to the `'*'` fallback are dropped), so plain deep equality
   over normalized views is a sound semantic comparison.
@@ -113,7 +115,7 @@ default `'main'`). This type replaces the earlier working names "RoomPermissions
 ### Input form and normalized view
 
 ```js
-// input form ($docPermissionsV1) - what plugins/config write; absent = unspecified,
+// input form ($documentPermissionsV1) - what plugins/config write; absent = unspecified,
 // false = explicit denial (on mask keys it is sugar for '----')
 {
   type:      'permissions:document:v1',
@@ -125,8 +127,8 @@ default `'main'`). This type replaces the earlier working names "RoomPermissions
 }
 ```
 
-`normalizeDocPermissions` validates (invalid answers **throw** — validation lives at this single
-boundary) and returns the `DocPermissionsV1Normalized` view: every facet present with eager plain
+`normalizeDocumentPermissions` validates (invalid answers **throw** — validation lives at this single
+boundary) and returns the `DocumentPermissionsV1Normalized` view: every facet present with eager plain
 properties, one spelling per denial (mask keys `'----'`; `history`/`delete`/empty-`delete` →
 `false`), the `delete` array sorted + deduped, and the endpoint map prototype-free and
 **canonical** — the `'*'` fallback is kept only when it grants something and a named entry only
@@ -137,15 +139,15 @@ Facet semantics and the exact gate each one owns:
 
 | leaf | permits | enforcement point |
 |---|---|---|
-| `ydoc[1] === 'r'` | read doc state: ws upgrade + initial sync, `GET /ydoc`, receiving `ydoc:update:v1` fan-out | `server.js` upgrade/open; `api.js` baseline |
+| `ydoc[1] === 'r'` | read doc state: ws upgrade + initial sync, `GET /ydoc`, receiving `ydoc:update:v1` fan-out | `server.js` upgrade/open; the `GET /ydoc` handler |
 | `ydoc[2] === 'u'` | submit doc updates | ws `message` case 0 (replaces the blanket `hasWriteAccess` early-return); `PATCH /ydoc` |
 | `awareness[2] === 'u'` | broadcast presence | ws `message` case 1; awareness field of `PATCH /ydoc` |
 | `awareness[1] === 'r'` | receive presence | awareness relay in `onStreamMessage`; initial awareness send in `open`; `GET /ydoc?awareness=true` |
-| `history.from` | read attributed history from `from` onward (0 = full) | `changeset`/`activity`: bounds clamped **before** the cache key (§9); `gc=false` requires `from: 0` (§9) |
+| `history.from` | read attributed history from `from` onward (0 = full) | `changeset`/`activity`: bounds clamped **before** the cache key (§9); `?ydoc=`/`?delta=` additionally require ydoc `r` (§9.7); `gc=false` requires `from: 0` (§9) |
 | `history.rollback` | revert doc content | `POST /rollback`; requested range must be ⊆ the granted ray (§9) |
 | `history.prune` | destroy history permanently | `POST /prune`; same containment rule |
 | `delete` contains `'soft'` / `'hard'` | `DELETE /ydoc` (`?hard=true` requires `'hard'`) — this document on this branch | replaces `accessPurpose: 'delete'` — enforced, not advisory. `hard` was previously programmatic-only; granting it over REST is now an explicit permission |
-| `endpointPermission(perms, name)` | call custom endpoints (§8) | `createApiHandler` |
+| `endpointPermission(perms, name)` | call rest endpoints - builtin and custom (§8) | `createApiHandler` |
 
 Creation is **not** a document facet — the document does not exist yet on that branch, so the
 object describing it cannot carry its own creation right. V1 therefore keeps today's creation
@@ -173,21 +175,21 @@ but the merges treat it as "no statement" (identity in a union) where `false` is
 denial (absorbing in an intersection). `null` is rejected by the schema — too similar to
 undefined/absent.
 
-An invalid or unknown-shaped answer **throws** at the `normalizeDocPermissions` boundary — the
+An invalid or unknown-shaped answer **throws** at the `normalizeDocumentPermissions` boundary — the
 earlier per-key warn+drop machinery was deliberately dropped with the simplified rewrite: a
 malformed plugin answer is a loud error, not a silent partial denial. Permissions read from
 *external* input (json bodies, tokens, http responses) must pass through `sanitizePermissions`
 first: it rebuilds the object and its open-keyed endpoint map without a prototype and validates —
 endpoint names share a namespace with `Object.prototype` members (`constructor` is a valid
 endpoint name), and json-derived maps may carry an own `__proto__` key. The merges and
-`normalizeDocPermissions` assume sanitized input and explicitly do not repeat this work.
+`normalizeDocumentPermissions` assume sanitized input and explicitly do not repeat this work.
 
 ## 4. BranchPermissions, OrgPermissions, GlobalPermissions
 
 In v1 the coarser scopes are **endpoint-only**: they gate custom endpoints registered at their
 scope, nothing more. There is no floor and no inheritance — holding a branch- or org-level
 permission implies nothing about any document, and vice versa; every scope is answered by its own
-`getPermissions(authInfo, selector)` call. Cross-scope relations are a deferred extension:
+`authorize(scope, resourceId, user)` call. Cross-scope relations are a deferred extension:
 adding a floor key (e.g. `branch.docs`) later is purely additive and changes no v1 shape.
 
 ```js
@@ -203,12 +205,12 @@ adding a floor key (e.g. `branch.docs`) later is purely additive and changes no 
 
 Exactly two operations, both closed over the input form (their results are schema-valid input):
 
-- **`docPermissionsUnion(a, b)`** — independent grants held simultaneously ('-r--' via one
+- **`documentPermissionsUnion(a, b)`** — independent grants held simultaneously ('-r--' via one
   assignment, '-ru-' via another → '-ru-'). Per-facet join: masks take the positional union,
   booleans OR, delete arrays the set union, history rays `min(from)` (`0` = full history wins
   naturally — rays are closed under union, the join is exact). `false` and absent are both
   bottom for a union: a grant survives them.
-- **`docPermissionsIntersect(a, b)`** — the least permission survives (attenuation: e.g. a token
+- **`documentPermissionsIntersect(a, b)`** — the least permission survives (attenuation: e.g. a token
   capability ∩ the subject's actual permissions). Per-facet meet: masks positional intersection,
   booleans AND, delete arrays set intersection, history rays `max(from)` — the more restrictive
   ray survives. `false` absorbs (an explicit denial can never be intersected away); absent means
@@ -227,7 +229,7 @@ them, and an overlay can be reintroduced as a separate operation if a real need 
 
 ### Implication normalization (dead-grant elimination)
 
-`normalizeDocPermissions` makes the view self-consistent: `history.rollback`/`prune` are dead
+`normalizeDocumentPermissions` makes the view self-consistent: `history.rollback`/`prune` are dead
 grants without update access on the doc (their gates demand a write), so they normalize to
 `false` unless `ydoc` has `u`. A stale `rollback: true` next to a read-only mask is thereby
 visible as denied in logs and in the recheck comparison, not just guarded in some handler.
@@ -235,8 +237,8 @@ visible as denied in logs and in the recheck comparison, not just guarded in som
 ## 6. Defaults
 
 There is no core default-merging machinery: composing a subject's permissions out of defaults,
-role grants, and per-doc grants is the plugin's business, done with `docPermissionsUnion` /
-`docPermissionsIntersect` before answering. Deny-by-default falls out of absence — an empty
+role grants, and per-doc grants is the plugin's business, done with `documentPermissionsUnion` /
+`documentPermissionsIntersect` before answering. Deny-by-default falls out of absence — an empty
 answer grants nothing — and destructive permissions (`rollback`, `prune`, `delete`) are granted
 by name, never implied by a write mask (this deliberately breaks today's implicit "rw ⇒
 rollback/delete"). "All endpoints open" is one entry: `endpoint: { '*': 'crud' }`. A plugin
@@ -246,64 +248,108 @@ answering `null` denies the subject outright.
 
 ```js
 /**
- * @typedef {{ org: string, docid: string, branch: string }
- *         | { org: string, branch: string }
- *         | { org: string }
- *         | {}} PermissionSelector
+ * @typedef {'global'|'org'|'branch'|'document'} PermissionScope
+ */
+/**
+ * The resource an `authorize` call addresses - the shape follows the scope:
+ * 'document' → { org, docid, branch }, 'branch' → { org, branch }, 'org' → { org },
+ * 'global' → {}.
+ *
+ * @template {PermissionScope} S
+ * @typedef {...} PermissionResourceId
  */
 /**
  * @template {UserAuthInfo} AuthInfo
  * @typedef {object} AuthPlugin
- * @property {(req) => Promise<AuthInfo|null>} readAuthInfo   // unchanged; null/throw ⇒ 401
- * @property {(authInfo: AuthInfo, sel: PermissionSelector) => Promise<PermissionsInput|null>} getPermissions
- *   Input form of the selector's scope. null ⇒ deny.
- *   Deny is a value, never a throw. A throw is an infrastructure failure: REST answers 401 (a
- *   branded apiError passes its status through, e.g. 503), a ws recheck disconnects 1013
- *   (transient), never 4401. A plugin composed of layers (inferred baseline + refinement
- *   queries) MUST throw when any layer fails - never return a partial composition.
+ * @property {(req) => Promise<AuthInfo|null>} authenticate
+ *   was readAuthInfo. null ⇒ an anonymous caller (not a rejection: `authorize` is asked with
+ *   user null). A branded apiError(401) rejects a presented credential; any other throw is an
+ *   infrastructure failure ⇒ 503.
+ * @property {<S extends PermissionScope>(scope: S, resourceId: PermissionResourceId<S>, user: AuthInfo|null) => Promise<ToPermissionType<S>|null>} authorize
+ *   Input form of the scope named by `scope` - the answer's own `type` literal must match it.
+ *   null ⇒ deny. Deny is a value, never a throw. A throw is an infrastructure failure: REST
+ *   and the ws upgrade answer 503 (a branded apiError passes its status through), a ws recheck
+ *   disconnects 1013 (transient), never 4401. A plugin composed of layers (inferred baseline +
+ *   refinement queries) MUST throw when any layer fails - never return a partial composition.
  */
 // deferred (§10): optional bulk + enumeration hooks `getDocumentPermissions` / `listDocuments`
 ```
 
-yhub core computes, per REST request / ws upgrade / recheck:
+The return type is *forced* per scope (`ToPermissionType<S>`). TypeScript cannot correlate a
+runtime check of `type` with the return type inside a single function body, so the blessed
+implementation shape is **`createAuthorize`** — one handler per scope, each fully checked
+(per-scope resourceId parameter, per-scope return type), scopes without a handler denying:
 
 ```js
-effective = pluginResult == null
-  ? null // deny outright (§6)
-  : normalizeDocPermissions(pluginResult)   // validates - an invalid answer throws
+authorize: createAuthorize({
+  document: async (docRef, user) => await lookupDocPermissions(user, docRef)
+})
 ```
 
-Determinism contract: `getPermissions` must be deterministic per `(authInfo, selector)` between
+A hand-rolled `authorize (type, resourceId, user)` stays possible but needs one cast at the
+return — the deliberate cost of the forced signature.
+
+yhub core computes, per REST request / ws upgrade / recheck, through one funnel
+(`resolvePermissions` → `normalizeAuthorizeAnswer` in `src/api.js`): an answer whose `type` is a
+well-formed but unknown literal (a future version) is denied whole with a warning
+(`isKnownPermissionsType`); every other non-null answer is validated against its scope's
+permission schema — an invalid or wrong-scope object throws a loud, descriptive error (REST 500,
+logged), never a silent denial — and `null` **stays `null`**: nothing fabricates a permission
+object. `req.permissions` and a connection's view are therefore nullable, and
+`hasPermissions(null, ..)` is false, so every gate answers the same `missing-permission` 403.
+
+**Anonymous callers.** `authenticate` → `null` is an identity ("nobody"), not a rejection; yhub
+never answers 401 for a missing credential — a plugin rejects a *presented* credential with a
+branded `apiError(401)`, and a custom handler that needs an identity checks `req.authInfo`
+itself. One built-in rule: **writing the document needs an identity**, because attributions
+carry the userid. Where an anonymous caller *holds* ydoc `u` and tries to use it, the answer is
+401 (`code: 'unauthenticated'`) — after the permission check, so a caller without `u` gets the
+ordinary 403: `PATCH /ydoc` with an `update`, `POST /rollback`, and the ws upgrade (an anonymous
+socket never holds `u`, so the per-message write gate needs no identity check; the recheck keeps
+the invariant since a newly granted `u` differs from the stored mask). Reads, presence, history,
+prune, and delete (`by: null`) work anonymously when granted.
+
+Determinism contract: `authorize` must be deterministic per `(type, resourceId, user)` between
 upgrade and recheck — a plugin computing wall-clock-relative bounds (`from: now - 30d`) at call
 time makes every recheck compare unequal and flap connections. Compute such bounds when the
-assignment is *stored*, not when it is read.
+assignment is *stored*, not when it is read. Note the flip side: permissions derived purely from
+the frozen `user` object (e.g. token claims) re-derive identically forever, so plain rechecks
+cannot revoke them — revoke via `recheckAuth({ forceDisconnect: true })` plus short token
+lifetimes, or consult a revocation list inside `authorize`.
 
-The module (`src/permissions.js`) exports: the `CRUD` mask vocabulary (`$crud` — exactly the 16
-masks — with `crudUnion`/`crudIntersect`); the input-form schemas `$docPermissionsV1` /
-`$branchPermissionsV1` / `$orgPermissionsV1` / `$globalPermissionsV1` / `$permissions` (the
-`DocPermissionsV1` typedef is derived from the schema — one source of truth); the merges
-`docPermissionsUnion` / `docPermissionsIntersect`; `sanitizePermissions` (the boundary for
-externally-read input); `normalizeDocPermissions` returning the prototype-less
-`DocPermissionsV1Normalized` view; and `endpointPermission(normalized, name)` — the one lookup
-that isn't a single char compare (the `'*'` fallback, with an explicit `'----'` entry blocking
-it). Facet checks need no helpers: `perms.ydoc[1] === 'r'`.
+The module (`src/permissions.js`, importable as `@y/hub/permissions`) exports: the creators
+`createPermissions(scope, facets)` / `createDocumentPermissions` / `createBranchPermissions` /
+`createOrgPermissions` / `createGlobalPermissions` (prototype-free input-form objects — the one
+spelling of hand-written answers and of requirements; also exported from `@y/hub`); the `CRUD` mask
+vocabulary (`$crud` — exactly the 16 masks — with `crudUnion`/`crudIntersect`); the input-form
+schemas `$documentPermissionsV1` / `$branchPermissionsV1` / `$orgPermissionsV1` /
+`$globalPermissionsV1` / `$permissions` (the `DocumentPermissionsV1` typedef is derived from the
+schema — one source of truth); the merges `documentPermissionsUnion` / `documentPermissionsIntersect`;
+`sanitizePermissions` (the boundary for externally-read input); `normalizeDocumentPermissions` /
+`normalizeBranchPermissions` / `normalizeOrgPermissions` / `normalizeGlobalPermissions` returning
+the prototype-less normalized views; `isKnownPermissionsType`; and
+`endpointPermission(normalized, name)` — the one lookup that isn't a single char compare (the
+`'*'` fallback, with an explicit `'----'` entry blocking it). Facet checks need no helpers:
+`perms.ydoc[1] === 'r'`.
 
 ## 8. REST endpoints
 
 The `endpoint` facet is the successor of `accessPurpose` (which is deleted), renamed from `rest` —
-it gates *custom* endpoints; builtin endpoint names are excluded from the axis (their gates are the
-semantic facets; two gates on one door with undefined precedence is exactly what this design
-removes). To keep the exclusion enforceable, registration now **refuses custom endpoints reusing a
-builtin name** in any version — today API.md blesses a custom `name: 'ydoc', version: 'v2'`, which
-would be simultaneously excluded from the axis and uncovered by the facets; that pattern is
-withdrawn (breaking; amend API.md).
+it gates **every** rest endpoint, builtin and custom alike, before the handler runs. The two-gate
+model is a plain AND: the endpoint entry answers "may this subject call this route", and the
+semantic facets answer "may it touch this data" — checked *inside* the handlers (builtins check
+the facets they use; a custom handler that reads or writes the document checks `req.permissions`
+itself). Registration **refuses custom endpoints reusing a builtin name** in any version — one
+name in the facet must mean one route family; the previously blessed custom
+`name: 'ydoc', version: 'v2'` pattern is withdrawn (breaking; amend API.md).
 
 An entry is a plain CRUD mask:
 
 - Which of the endpoint's methods may be called follows the verb class of each method, derived
-  from its HTTP verb (`get` → `r`, `post` → `c`, `put`/`patch` → `u`, `delete` → `d`),
-  overridable in the endpoint definition (`post: { class: 'r', ... }` for a search-shaped POST).
-  A method is callable iff its class position is set in the effective mask.
+  from its HTTP verb (`get` → `r`, `post` → `c`, `put`/`patch` → `u`, `delete` → `d`). The
+  mapping is fixed — crud maps onto the REST verbs exactly, so there is no per-method override
+  (a class-override knob was considered and dropped). A method is callable iff its class
+  position is set in the effective mask.
 - `'*'` is the fallback entry for names not listed (`endpointPermission`: named entry, else
   `'*'`, else `'----'`). An explicit `'----'` (or `false`) entry blocks the fallback. The merges
   resolve every name through the fallback before combining, and normalization drops entries
@@ -313,24 +359,27 @@ An entry is a plain CRUD mask:
   beyond a mask must obtain it themselves (e.g. from `authInfo`); if a real need for a forwarded
   payload appears, it returns as a separate proposal.
 
-Endpoint scopes follow the tiers: `scope: 'doc'` keeps its name (routes carry `?branch=` and
-address a document on a branch, gated by the doc permissions' `endpoint` facet); `'org'` and
-`'global'` exist as today; a `'branch'` scope (docless routes spanning the branch's documents)
-becomes possible with the branch tier.
+Endpoint scopes follow the tiers: `scope: 'document'` (the default; routes carry `?branch=` and
+address a document on a branch, gated by the doc permissions' `endpoint` facet — one spelling
+with `authorize('document', ..)`, see naming.md); `'org'` and `'global'` exist as today; a
+`'branch'` scope (docless routes spanning the branch's documents) is deferred until its route
+shape is decided — branch is a query parameter, so a branch route would collide with the org
+route.
 
-**The per-method baseline survives at doc scope.** Each doc-scoped custom method declares
-`requires: 'r' | 'u' | null` (default: `'r'` on get, `'u'` otherwise), checked against the ydoc
-mask — in addition to the endpoint entry. Without this net, `endpoint: { '*': 'crud' }` plus a
-handler that checks nothing is an open door to the doc for any authenticated subject.
-`requires: null` is the explicit opt-out for endpoints that genuinely don't touch the doc.
-Branch-/org-/global-scoped methods declare no `requires` — with no floors in v1 there is no ydoc
-mask to check it against; their sole gate is the endpoint entry, which must be granted
-explicitly (§6).
+**There is no framework-side baseline beyond the endpoint entry.** An earlier draft added a
+per-method `requires: 'r' | 'u' | null` check against the ydoc mask; it was dropped — the
+framework checks exactly one thing (the endpoint entry), and a handler that touches the document
+validates the relevant facets on `req.permissions` itself. The cost is deliberate:
+`endpoint: { '*': 'crud' }` plus a handler that checks nothing admits any authenticated subject
+to that handler — grant `'*'` narrowly and write the facet check where the document is read.
 
 Request object: `accessType` is replaced by `req.permissions` (the normalized view of the
-route's scope); handlers check endpoint access via `endpointPermission(req.permissions, name)`
-or their own facet positions. 403 bodies name what was missing:
-`{ error, code: 'missing-permission', required: ... }`.
+route's scope, or `null`). Handlers state their requirement with one call —
+`checkPermissions(req.permissions, createDocumentPermissions({ ydoc: '-r--' }))`; the
+requirement is a permission object of the route's scope, written with the creators — and the
+framework's endpoint gate is the same call with `createPermissions(scope, { endpoint: { name:
+mask } })`. 403 bodies name the whole requirement:
+`{ error: 'requires permission {...}', code: 'missing-permission', required }`.
 
 Builtins, rewritten: `GET /ydoc` — ydoc `r` (+awareness `r` for `?awareness=true`, +`history.from
 === 0` for `?gc=false`); `PATCH /ydoc` — ydoc `u` for updates (which also creates the document on
@@ -341,6 +390,22 @@ contains `'soft'`/`'hard'`; `POST /rollback` — `history.rollback` + range cont
 clamped.
 
 ## 9. Enforcement invariants
+
+Rest enforcement has one primitive: **containment**. `hasPermissions(granted, required)` decides
+`required ⊆ granted` in the merge algebra — the intersection of the two normalizes to exactly
+the (normalized) requirement — and `checkPermissions` is its throwing form (the uniform
+`missing-permission` 403). `granted` is the normalized view the request or connection already
+holds (or `null`, which contains nothing); validation happens at the two boundaries only — the
+plugin answer in the funnel and the code-authored fragment — while the requirement and the
+intersection are built unchecked, the merges being closed over valid input. A handler states its whole requirement as one permission object at
+its head; the algebra supplies the semantics per facet: crud subsets, ray containment on
+`history.from` (changeset/activity limit the query's `from` to the granted ray first and require
+exactly that `history: { from }`), `delete` subsets, `'*'`-resolved endpoint entries. Two guardrails keep the primitive honest as a security check: requiring
+`history.rollback`/`prune` implicitly also requires ydoc `u` (the requirement-side mirror of
+implication normalization — otherwise normalizing the requirement would silently *drop* the
+boolean), and a fragment naming a facet the scope's schema doesn't know throws instead of
+checking less than the caller wrote. Hand-rolled char compares remain only on the ws hot path
+(per-message gates, upgrade, recheck).
 
 These are the rules that keep the granular model sound; each has a concrete exploit without it:
 
@@ -370,14 +435,21 @@ These are the rules that keep the granular model sound; each has a concrete expl
    case 0 needs ydoc `u`, case 1 needs awareness `u` — read-only connections can finally
    broadcast cursors when granted. Fan-out: awareness relayed only when awareness has `r` (one
    char compare per batch in `onStreamMessage`, plus the initial awareness send in `open`).
-6. **Recheck compares the ws projection only.** At upgrade, store the ws-relevant projection of
-   the normalized view: `{ ydoc, awareness, gc === false ? history.from === 0 : (omitted) }`.
-   Recheck recomputes and deep-compares; change ⇒ close 4401, plugin throw ⇒ 1013. REST-only
-   facets (`delete`, `rollback`, `prune`, `endpoint`) never bounce live connections;
-   bounded-ray tweaks never bounce `gc=true` connections. Memory: documents with thousands of
-   connections would hold thousands of deep-equal normalized objects — intern them by structural
-   hash (FNV-1a, per project convention) so identical permissions share one object and the
-   recheck comparison fast-paths on reference equality.
+6. **Recheck compares the ws-relevant leaves only.** The connection stores its normalized view
+   (on the `WSUser`, next to `userid`); recheck recomputes and compares exactly the leaves the
+   socket consumes: the `ydoc` mask, the `awareness` mask, and — for `gc=false` connections —
+   whether `history.from === 0` still holds. Any difference ⇒ close 4401 (downgrades *and*
+   upgrades: the frozen view must not silently widen), plugin throw ⇒ 1013. REST-only facets
+   (`delete`, `rollback`, `prune`, `endpoint`) never bounce live connections; bounded-ray tweaks
+   never bounce `gc=true` connections. (An interned ws projection was designed and dropped — the
+   per-connection view is small and a plain three-leaf compare is simpler than any sharing
+   scheme.)
+7. **History grants attributions, not content reconstruction.** `changeset`/`activity` with
+   `?ydoc=true` or `?delta=true` render the document as it stood at `to` from a time-0 baseline —
+   content from before any granted ray. Those two flags therefore additionally require ydoc `r`;
+   the history ray bounds the *attributions*, never the rendered content snapshot. Without this
+   gate, an "audit-log reader" (`history` granted, `ydoc: '----'`) reconstructs the entire
+   document.
 
 ## 10. Deferred: bulk checking and v2 multi-doc sync
 
@@ -446,7 +518,7 @@ Model:
   never match a row and the zero-match rule would deny every global-scoped endpoint outright. A
   doc check merges, per layer, the org row's `branches.docs` floor below the branch row's `docs`
   floor below doc rows.
-- **Check** (`getPermissions(authInfo, sel)`): fetch the selector's own and its ancestors'
+- **Check** (`authorize(scope, resourceId, user)`): fetch the resource's own and its ancestors'
   assignments whose `tag ∈ authInfo.tags` — one indexed query, redis-cached per `(org, docid)`
   with `cacheTtl` + explicit invalidation — then merge: union within each layer (tombstone wins
   ties), refine `grant → restrict → override`, coarser scope below finer scope within a layer.
@@ -487,27 +559,36 @@ plugin interface is the same.
 
 ## 12. Migration
 
-- The old `AccessType` world maps directly onto masks (the wiring writes this mapping where it
-  replaces `getAccessType`; a helper is added only if several call sites need it). Doc scope:
-  `'rw'` → `{ type: 'permissions:document:v1', ydoc: 'cru-', awareness: '-ru-',
-  history: { from: 0 }, endpoint: { '*': 'crud' } }`, `'r'` → the same with `ydoc: '-r--'`,
-  `null` → `null`. Branch/org/global scopes (endpoint-only in v1): `'r'`/`'rw'` →
-  `{ type: 'permissions:<scope>:v1', endpoint: { '*': 'crud' } }`, `null` → `null`. Deliberately
-  excluded everywhere: `rollback`, `prune`, `delete` — destructive permissions are opted into by
-  name (compose with `docPermissionsUnion`).
+- The old `AccessType` world maps directly onto masks. The mapping is documentation — no compat
+  helper ships; migrating plugins write the objects literally where `authorize` replaces
+  `getAccessType`. Doc scope: `'rw'` → `{ type: 'permissions:document:v1', ydoc: 'cru-',
+  awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } }`, `'r'` → the same with
+  `ydoc: '-r--'` **and `endpoint: { '*': '-r--' }`**, `null` → `null`. Branch/org/global scopes
+  (endpoint-only in v1): `'rw'` → `{ type: 'permissions:<scope>:v1', endpoint: { '*': 'crud' } }`,
+  `'r'` → the same with `endpoint: { '*': '-r--' }`, `null` → `null`. The `'r'` rows grant only
+  the GET verb class — the old rule required `'rw'` for every non-GET method at every scope, and
+  a `'crud'` fallback for `'r'` would silently widen every non-GET route to read-only
+  subjects. Deliberately excluded everywhere:
+  `rollback`, `prune`, `delete` — destructive permissions are opted into by name (compose with
+  `documentPermissionsUnion`).
 - Deleted: `$accessType`, `hasReadAccess`/`hasWriteAccess`, `getAccessType`,
-  `getOrgAccessType`, `getGlobalAccessType`, `accessPurpose`, `req.accessType`.
+  `getOrgAccessType`, `getGlobalAccessType`, `accessPurpose`, `req.accessType`. Renamed:
+  `readAuthInfo` → `authenticate` (unchanged semantics) — the plugin reads
+  `{ authenticate, authorize }`.
 - Renamed throughout code and docs per naming.md: the `Room` triple → `DocRef` addressing
-  (`docid` and `branch` stay), stream keys `:room:` → `:doc:`, `reqToRoom` → `reqToDocRef`, log
-  fields. `deleteDoc` keeps its name — it deletes the document on that branch. (A cross-branch
-  delete cascade arrives with the deferred extensions.)
+  (`docid` and `branch` stay), `reqToRoom` → `reqToDocRef`, `req.room` → `req.docRef`, log
+  fields. **Deferred**: the stream-key spelling `{prefix}:room:` → `{prefix}:doc:` (and with it
+  the `encodeRoomName`/`decodeRoomName`/`encodeQuarantineName` helper names) — respelling live
+  redis keys orphans in-flight stream entries on a rolling deploy; it needs a drain/dual-read
+  migration of its own. `deleteDoc` keeps its name — it deletes the document on that branch. (A
+  cross-branch delete cascade arrives with the deferred extensions.)
 - Read-preset apps gain cursor broadcasting for viewers (awareness `-ru-` in the `'r'` mapping) —
   today's swallowed-awareness behavior is gone deliberately.
 
 ## 13. Zanzibar interop
 
 The plugin route is unchanged by the tag store: a SpiceDB/OpenFGA-backed plugin implements
-`getPermissions` as one `CheckBulkPermissions`/`BatchCheck` over the facet-permission vocabulary
+`authorize` as one `CheckBulkPermissions`/`BatchCheck` over the facet-permission vocabulary
 on `doc` objects (`ydoc_read`, `ydoc_write`, `awareness_read`, `awareness_write`,
 `history_read` (+ caveat for the window), `rollback_doc`, `prune_doc`, `delete_soft`,
 `delete_hard`, `endpoint_call` with `{name}` condition context) and, once the deferred extensions
@@ -524,7 +605,8 @@ without a Zanzibar.
 1. ~~Window direction~~ — resolved: the history restriction is a **from-ray** (`false | {from}`);
    a `to` permission bound has no product use-case and stays a query parameter (§3).
 2. ~~Unbounded sentinel~~ — resolved: none exists. `from` is a plain unix-ms int; `0` (the
-   epoch) is full history; `history: true` is sugar for `{ from: 0 }`.
+   epoch) is full history. (`history: true` sugar for `{ from: 0 }` was considered and rejected —
+   the schema stays strict: `false | { from, rollback?, prune? }`, one spelling per grant.)
 3. ~~Context merge semantics~~ — moot: the endpoint `context` payload was dropped with the
    simplified rewrite (§8).
 4. **Org-/branch-wide recheck** enumeration of active documents (§11).

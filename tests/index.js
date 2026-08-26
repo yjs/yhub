@@ -11,10 +11,12 @@ import * as agents from './agents.tests.js'
 import * as deleteDoc from './delete.tests.js'
 import * as worker from './worker.tests.js'
 import * as permissions from './permissions.tests.js'
+import * as permissionsEnforcement from './permissionsEnforcement.tests.js'
 import { runTests } from 'lib0/testing'
 
 runTests({
   permissions,
+  permissionsEnforcement,
   computeWorker,
   storage,
   worker,

@@ -8,7 +8,7 @@ import * as utils from './utils.js'
  */
 export const testSyncAndCleanup = async tc => {
   const removedAfterXTimeouts = 6 // always needs min 2x of minMessageLifetime
-  const { createWsClient, yhub, defaultStream, defaultRoom } = await utils.createTestCase(tc)
+  const { createWsClient, yhub, defaultStream, defaultDocRef } = await utils.createTestCase(tc)
   const redisClient = yhub.stream.redis
   const { ydoc: doc1 } = createWsClient({ syncAwareness: false })
   // doc2: can retrieve changes propagated on stream
@@ -42,14 +42,14 @@ export const testSyncAndCleanup = async tc => {
   await utils.waitDocsSynced(doc3, doc4)
   t.info('docs synced (3)')
   t.assert(doc3.get().getAttr('a') === 1)
-  const { references } = await yhub.getDoc(defaultRoom, { references: true, gc: true })
+  const { references } = await yhub.getDoc(defaultDocRef, { references: true, gc: true })
   t.assert(references.length === 1 * 2)
   t.info('doc retrieved')
   // now write another updates that the worker will collect
   doc1.get().setAttr('a', 2)
   await promise.wait(yhub.stream.minMessageLifetime * removedAfterXTimeouts)
   t.assert(doc2.get().getAttr('a') === 2)
-  const { references: references2 } = await yhub.getDoc(defaultRoom, { references: true, gc: true })
+  const { references: references2 } = await yhub.getDoc(defaultDocRef, { references: true, gc: true })
   t.info('map retrieved')
   // should delete old references
   t.assert(references2.length === 1 * 2)
@@ -64,7 +64,7 @@ export const testSyncAndCleanup = async tc => {
  * @param {t.TestCase} tc
  */
 export const testAwarenessDisconnectDeliveredOnConnect = async tc => {
-  const { createWsClient, yhub, defaultRoom } = await utils.createTestCase(tc)
+  const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
   const fakeClientid = 0xfeed
   /**
    * @param {number} clientid
@@ -78,8 +78,8 @@ export const testAwarenessDisconnectDeliveredOnConnect = async tc => {
     encoding.writeVarString(encoder, JSON.stringify(state))
   })
   // fake client appears with a state, then disconnects
-  await yhub.stream.addMessage(defaultRoom, { type: 'awareness:v1', update: encodeOneEntry(fakeClientid, 1, { user: 'alice' }) })
-  await yhub.stream.addMessage(defaultRoom, { type: 'awareness:v1', update: encodeOneEntry(fakeClientid, 2, null) })
+  await yhub.stream.addMessage(defaultDocRef, { type: 'awareness:v1', update: encodeOneEntry(fakeClientid, 1, { user: 'alice' }) })
+  await yhub.stream.addMessage(defaultDocRef, { type: 'awareness:v1', update: encodeOneEntry(fakeClientid, 2, null) })
 
   const { provider } = await createWsClient({ waitForSync: true })
   await promise.wait(200) // give the awareness snapshot a moment to be applied
@@ -90,7 +90,7 @@ export const testAwarenessDisconnectDeliveredOnConnect = async tc => {
 }
 
 /**
- * A room that only ever receives awareness messages must NOT be persisted. Awareness carries
+ * A document that only ever receives awareness messages must NOT be persisted. Awareness carries
  * no document content, so it must not advance the compaction guard (which now compares against
  * `lastUpdateClock`, not the awareness-inclusive `lastClock`). The stream is still trimmed and
  * cleaned up once the awareness entries age past `minMessageLifetime`.
@@ -98,7 +98,7 @@ export const testAwarenessDisconnectDeliveredOnConnect = async tc => {
  * @param {t.TestCase} tc
  */
 export const testAwarenessOnlyDoesNotPersist = async tc => {
-  const { yhub, defaultRoom, defaultStream } = await utils.createTestCase(tc)
+  const { yhub, defaultDocRef, defaultStream } = await utils.createTestCase(tc)
   /**
    * @param {number} clientid
    * @param {number} clock
@@ -111,37 +111,37 @@ export const testAwarenessOnlyDoesNotPersist = async tc => {
     encoding.writeVarString(encoder, JSON.stringify(state))
   })
   t.info('seeding the stream with awareness-only messages (schedules a compact task)')
-  await yhub.stream.addMessage(defaultRoom, { type: 'awareness:v1', update: encodeOneEntry(0xc0ffee, 1, { user: 'alice' }) })
-  await yhub.stream.addMessage(defaultRoom, { type: 'awareness:v1', update: encodeOneEntry(0xc0ffee, 2, { user: 'alice', typing: true }) })
+  await yhub.stream.addMessage(defaultDocRef, { type: 'awareness:v1', update: encodeOneEntry(0xc0ffee, 1, { user: 'alice' }) })
+  await yhub.stream.addMessage(defaultDocRef, { type: 'awareness:v1', update: encodeOneEntry(0xc0ffee, 2, { user: 'alice', typing: true }) })
 
   t.info('waiting for compaction to run and the stream to be cleaned up')
   await utils.waitTasksProcessed(yhub)
 
   t.info('asserting nothing was persisted and the stream was trimmed away')
-  const persisted = await yhub.persistence.retrieveDoc(defaultRoom, { gc: true })
-  t.assert(persisted.lastClock === '0', 'awareness-only room must not be persisted')
-  t.assert(persisted.gcDoc.length === 0, 'no gc doc assets should exist for an awareness-only room')
+  const persisted = await yhub.persistence.retrieveDoc(defaultDocRef, { gc: true })
+  t.assert(persisted.lastClock === '0', 'awareness-only document must not be persisted')
+  t.assert(persisted.gcDoc.length === 0, 'no gc doc assets should exist for an awareness-only document')
   const streamExists = await yhub.stream.redis.exists(defaultStream)
   t.assert(!streamExists, 'awareness-only stream should be trimmed and deleted (no persist, no infinite re-enqueue)')
 }
 
 /**
- * A room that only ever receives auth:check directives must NOT be persisted (the compaction
+ * A document that only ever receives auth:check directives must NOT be persisted (the compaction
  * guard only advances on update/prune messages). The stream is still trimmed and cleaned up
  * once the entries age past `minMessageLifetime`.
  *
  * @param {t.TestCase} tc
  */
 export const testAuthCheckOnlyDoesNotPersist = async tc => {
-  const { yhub, defaultRoom, defaultStream } = await utils.createTestCase(tc)
+  const { yhub, defaultDocRef, defaultStream } = await utils.createTestCase(tc)
   t.info('seeding the stream with an auth:check message (schedules a compact task)')
-  await yhub.recheckAuth(defaultRoom, { forceDisconnect: true })
+  await yhub.recheckAuth(defaultDocRef, { forceDisconnect: true })
   t.info('waiting for compaction to run and the stream to be cleaned up')
   await utils.waitTasksProcessed(yhub)
   t.info('asserting nothing was persisted and the stream was trimmed away')
-  const persisted = await yhub.persistence.retrieveDoc(defaultRoom, { gc: true })
-  t.assert(persisted.lastClock === '0', 'auth-check-only room must not be persisted')
-  t.assert(persisted.gcDoc.length === 0, 'no gc doc assets should exist for an auth-check-only room')
+  const persisted = await yhub.persistence.retrieveDoc(defaultDocRef, { gc: true })
+  t.assert(persisted.lastClock === '0', 'auth-check-only document must not be persisted')
+  t.assert(persisted.gcDoc.length === 0, 'no gc doc assets should exist for an auth-check-only document')
   const streamExists = await yhub.stream.redis.exists(defaultStream)
   t.assert(!streamExists, 'auth-check-only stream should be trimmed and deleted (no persist, no infinite re-enqueue)')
 }

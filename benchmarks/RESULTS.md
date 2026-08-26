@@ -117,7 +117,7 @@ The `expansion factor` is heap bytes per serialized byte — the single most imp
 | large |   500 |      143.4 |      4.83 |         9.66 |                               2 416 |
 | large | 1 500 |      430.5 |      14.0 |         9.34 |                              21 012 |
 
-This runs **once per subscriber per batch** (`src/server.js:636`), where a document update is a memcpy. Cost is dominated by a `JSON.parse` of every participant state and a `JSON.stringify` of every state of the merged result (`@y/protocols/src/awareness.js`), plus a throwaway `Awareness` + `Y.Doc` per call (`src/protocol.js:25`) — which is why `µs per state` is so high at N=1 and falls as the fixed cost is amortised. The last column is the number that matters: N participants present in a room means N states to merge **and** N subscribers to merge them for, so one presence tick costs the server `time × N` on a single thread.
+This runs **once per subscriber per batch** (`src/server.js:636`), where a document update is a memcpy. Cost is dominated by a `JSON.parse` of every participant state and a `JSON.stringify` of every state of the merged result (`@y/protocols/src/awareness.js`), plus a throwaway `Awareness` + `Y.Doc` per call (`src/protocol.js:25`) — which is why `µs per state` is so high at N=1 and falls as the fixed cost is amortised. The last column is the number that matters: N participants present in a document means N states to merge **and** N subscribers to merge them for, so one presence tick costs the server `time × N` on a single thread.
 
 ### Y1.6 Structured-clone a buffer of size S to a compute worker
 
@@ -147,7 +147,7 @@ _no data_
 |   500 |     304.5 |  1 642 |             272.5 |             280.3 |             281.1 |             281.4 |       0 |              224.7 |                51.4 |        0.10 |          289.8 |
 | 1 500 |     930.5 |  1 612 |             609.4 |             875.1 |             876.1 |             876.5 |       0 |              287.6 |               114.2 |       0.076 |          1 032 |
 
-Each connection is also a new room, so this is the per-connection **and** per-room floor. Server baseline with nothing connected: 173.3 MB. Compare `MB per room` against Y2.2, where all N share one room: the difference is the cost of a room.
+Each connection is also a new document, so this is the per-connection **and** per-document floor. Server baseline with nothing connected: 173.3 MB. Compare `MB per room` against Y2.2, where all N share one document: the difference is the cost of a document.
 
 ### Y2.2 Connect N clients to one empty document
 
@@ -159,7 +159,7 @@ Each connection is also a new room, so this is the per-connection **and** per-ro
 |   500 |     216.0 |  2 315 |             197.5 |             201.4 |             202.0 |             202.1 |       0 |              287.6 |                   0 |                 0 |          255.4 |
 | 1 500 |     902.6 |  1 662 |             739.7 |             781.3 |             785.1 |             786.0 |       0 |              291.2 |                3.67 |            0.0024 |          859.5 |
 
-One `WSUser` and one socket per connection; no `Y.Doc` per connection or per room, and no document cache anywhere in the heap. Server baseline with nothing connected: 287.6 MB.
+One `WSUser` and one socket per connection; no `Y.Doc` per connection or per document, and no document cache anywhere in the heap. Server baseline with nothing connected: 287.6 MB.
 
 ### Y2.3 Idle: hold N connections with no traffic
 
@@ -179,7 +179,7 @@ Confirms idle connections are genuinely tier A and that nothing accumulates. Any
 
 Capped at `scale.joinStormMax` = 150 joiners, separately from the rest of the `connections` sweep: `peak MB per concurrent sync` below is per joiner **per MB of document**, so this is the one measurement bounded by RAM rather than CPU. Y2.5 is where larger populations are covered, by ramping them.
 
-The join storm: a deploy, a load-balancer failover, or everyone opening the same document at 09:00. The fetch, the state-vector scan and the merge are identical across concurrent joiners of the same room and are nevertheless recomputed for each one (`src/server.js:740-764`). The bytes sent are inherent; this work is not. `queueDepth` is the compute pool's unbounded queue, which holds full payloads.
+The join storm: a deploy, a load-balancer failover, or everyone opening the same document at 09:00. The fetch, the state-vector scan and the merge are identical across concurrent joiners of the same document and are nevertheless recomputed for each one (`src/server.js:740-764`). The bytes sent are inherent; this work is not. `queueDepth` is the compute pool's unbounded queue, which holds full payloads.
 
 ### Y2.5 Connect N clients to one document of size S, ramped at r conn/s
 
@@ -232,7 +232,7 @@ The agent flush. Compare `µs cpu per cell` here against Y3.1: if batching is ch
 |  50 |          500 |     2 018 |          394.0 |             788.1 |               10.5 |          900.9 |          50 |                  93 |
 | 200 |        2 000 |     2 040 |          785.8 |             392.9 |               11.1 |          2 269 |         200 |                  71 |
 
-Write throughput when load is spread over many rooms. Every write is its own room, so there is no fan-out: the expectation is that the worker binds before the server does, because each room is compacted independently.
+Write throughput when load is spread over many documents. Every write is its own document, so there is no fan-out: the expectation is that the worker binds before the server does, because each document is compacted independently.
 
 ### Y3.4 M clients writing to the same document
 
@@ -242,7 +242,7 @@ Write throughput when load is spread over many rooms. Every write is its own roo
 |  50 |          500 |            2 001 |     2 211 |          391.9 |             783.9 |                 3.58 |                 5.75 |                 6.70 |                 7.19 |             0 |               17.7 |       0 |
 | 200 |        2 000 |            6 401 |     2 051 |          1 888 |             944.0 |                 4.34 |                 9.38 |                 10.6 |                 11.1 |             0 |              146.7 |       0 |
 
-The same write load concentrated on one room, so every writer is also a subscriber. The gap against Y3.3 at equal M *is* the per-subscriber delivery cost — that is the number `messages × subscribers` is multiplied by.
+The same write load concentrated on one document, so every writer is also a subscriber. The gap against Y3.3 at equal M *is* the per-subscriber delivery cost — that is the number `messages × subscribers` is multiplied by.
 
 ### Y3.5 M agents flushing a batch simultaneously to one document
 
@@ -305,7 +305,7 @@ Awareness alone: the batch is largest relative to the payload, and the per-subsc
 |       2 | 1 500 |                  750 |     2 378 |          102 000 |                1 518 |                     759.1 |                 16.4 |                 34.0 |                 39.9 |                 45.8 |             0 |                         32.6 |
 |       3 | 1 500 |                  500 |     2 300 |          102 500 |                2 046 |                     682.1 |                 13.7 |                 32.8 |                 41.3 |                 51.2 |             0 |                         41.9 |
 
-Confirms fan-out cost partitions across pods: total CPU should stay roughly flat while per-pod CPU and the worst pod's event-loop delay fall with the number of servers. This is what justifies "add a server" as the remedy for the awareness cost in Y4.2 and Y4.3. Note that all pods share one Redis, and the Redis read is shared across all rooms in a process (`src/stream.js:292`).
+Confirms fan-out cost partitions across pods: total CPU should stay roughly flat while per-pod CPU and the worst pod's event-loop delay fall with the number of servers. This is what justifies "add a server" as the remedy for the awareness cost in Y4.2 and Y4.3. Note that all pods share one Redis, and the Redis read is shared across all documents in a process (`src/stream.js:292`).
 
 ## Y5: What does a document's lifetime cost?
 
@@ -379,7 +379,7 @@ Is compaction keeping up? A flat `streamLen` and `pgRows` mean yes. Rising ones 
 |-------|------|-----|-----------|---------|---------|-------------------|-------------------|-------------------|-------------------|----------------|----------------------|----------------------|----------------------|----------------------|---------------|---------------------|----------------|--------------------|------------|---------------------|---------------------|-------------|-----------------|---------|-----------|
 |   500 |  500 | 4mb |        no |       1 |       1 |            18 834 |            12 324 |            18 579 |            18 772 |          2 008 |                    — |                    — |                    — |                    — |             0 |               3 043 |         87 748 |               13.4 |        432 |               2 045 |               1 401 |         500 |           4 014 |       0 |      23.6 |
 
-The spread case: everyone in their own document. No fan-out at all, so this isolates the per-connection and per-room costs plus the worker load of many independent compactions. If your load looks like this, y/hub's design is well matched to it and the expected bottleneck is Redis and Postgres rather than the server process.
+The spread case: everyone in their own document. No fan-out at all, so this isolates the per-connection and per-document costs plus the worker load of many independent compactions. If your load looks like this, y/hub's design is well matched to it and the expected bottleneck is Redis and Postgres rather than the server process.
 
 ### Y6.2 All users on one document, with and without awareness
 

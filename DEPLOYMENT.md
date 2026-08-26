@@ -97,55 +97,73 @@ S3_YHUB_BUCKET=yhub
 
 ## 4. Configure Authentication
 
-You need to implement an auth server that handles two endpoints. See
-`bin/auth-server-example.js` for a complete working example.
+Authentication runs in-process — there is no separate auth server. Your
+application issues the client a token (a JWT or a session cookie), and the auth
+plugin you pass to y/hub verifies it and answers permission questions per
+document:
 
-### Authentication Flow
+1. The client fetches a token from your application and connects to y/hub with it.
+2. `authenticate(req)` verifies the token and returns the user object.
+3. For each document the client opens, y/hub calls
+   `authorize('document', docRef, user)` — return that user's permission object,
+   or `null` to deny.
 
+### Implement the auth plugin
+
+Build the plugin with `createAuthPlugin` from `@y/hub` and pass it as
+`conf.server.auth`:
+
+```javascript
+import { createAuthPlugin, createAuthorize } from '@y/hub'
+
+const auth = createAuthPlugin({
+  async authenticate (req) {
+    // Verify the JWT (or session cookie) the client sent. Return an object
+    // with at least { userid } — it is handed to authorize() as `user`.
+    // Return null for an anonymous caller (authorize() then gets user = null);
+    // throw apiError(401, ...) to reject a bad credential, apiError(503, ...)
+    // for a temporary auth-backend outage. Any other throw answers 503.
+    const { payload } = await jwt.verifyJwt(authPublicKey, readToken(req))
+    return { userid: payload.yuserid }
+  },
+  // One handler per scope - scopes without a handler deny, and each handler's return type is
+  // forced to match its scope. Return the permission object, or null to deny - denial is a
+  // value, never a throw; a throw means infrastructure failure.
+  authorize: createAuthorize({
+    document: async (docRef, user) => {
+      const access = await checkUserAccess(user.userid, docRef)
+      if (access == null) return null // deny
+      return {
+        type: 'permissions:document:v1',
+        ydoc: access.write ? 'cru-' : '-r--', // positional crud mask: create/read/update/delete
+        awareness: '-ru-',                    // r = receive presence, u = broadcast own
+        history: { from: 0 },                 // from-ray, unix ms; 0 = full history
+        delete: [],                           // deletion kinds granted by name, e.g. ['soft']
+        endpoint: { '*': access.write ? 'crud' : '-r--' }  // custom endpoints, '*' = fallback
+      }
+    }
+  })
+})
 ```
-┌────────┐         ┌─────────────┐         ┌────────┐
-│ Client │         │ Auth Server │         │ Y/Hub  │
-└───┬────┘         └──────┬──────┘         └───┬────┘
-    │                     │                    │
-    │ 1. GET /auth/token  │                    │
-    │────────────────────▶│                    │
-    │                     │                    │
-    │ 2. JWT with yuserid │                    │
-    │◀────────────────────│                    │
-    │                     │                    │
-    │ 3. Connect WebSocket with JWT            │
-    │─────────────────────────────────────────▶│
-    │                     │                    │
-    │                     │ 4. GET /auth/perm/:room/:userid
-    │                     │◀───────────────────│
-    │                     │                    │
-    │                     │ 5. { yaccess: 'rw' }
-    │                     │───────────────────▶│
-    │                     │                    │
-    │ 6. Connection accepted                   │
-    │◀─────────────────────────────────────────│
-```
 
-### Generate ECDSA Keys
+Schemas, sanitizers, and permission combinators are exported from
+`@y/hub/permissions`.
+
+### Issue tokens from your application
+
+Your application authenticates the user however it already does (session,
+OAuth, etc.) and hands the client a signed token to present to y/hub. If you
+use JWTs, generate a keypair:
 
 ```bash
 npx 0ecdsa-generate-keypair --name auth
 ```
 
-Add the generated keys to your environment:
-
-```bash
-AUTH_PUBLIC_KEY={"kty":"EC","crv":"P-384",...}
-AUTH_PRIVATE_KEY={"kty":"EC","crv":"P-384",...,"d":"..."}
-```
-
-### Implement Token Endpoint
-
-The client requests a JWT from your auth server. You authenticate the user
-(via session, OAuth, etc.) and return a signed JWT containing their user ID:
+The private key stays with your application's token endpoint; `authenticate()`
+needs only the public key.
 
 ```javascript
-// GET /auth/token
+// GET /auth/token — served by your application, not by y/hub
 app.get('/auth/token', async (req, res) => {
   // Authenticate the user with your existing auth system
   const userId = req.session.userId
@@ -153,31 +171,10 @@ app.get('/auth/token', async (req, res) => {
   const token = await jwt.encodeJwt(authPrivateKey, {
     iss: 'your-app-name',
     exp: time.getUnixTime() + 60 * 60 * 1000,  // 1 hour expiry
-    yuserid: userId  // Required: unique user identifier
+    yuserid: userId  // unique user identifier, read back by authenticate()
   })
 
   res.send(token)
-})
-```
-
-### Implement Permission Callback
-
-When a client connects to y/hub, it calls your permission endpoint to check
-access. Return the access level for this user and room:
-
-```javascript
-// GET /auth/perm/:room/:userid
-app.get('/auth/perm/:room/:userid', async (req, res) => {
-  const { room, userid } = req.params
-
-  // Check your database for user permissions
-  const access = await checkUserAccess(userid, room)
-
-  res.json({
-    yroom: room,
-    yaccess: access,  // 'rw', 'read-only', or 'no-access'
-    yuserid: userid
-  })
 })
 ```
 
@@ -201,7 +198,8 @@ S3_ACCESS_KEY=your-access-key
 S3_SECRET_KEY=your-secret-key
 S3_YHUB_BUCKET=yhub
 
-# Authentication
+# Authentication — read by your application (token endpoint + auth plugin),
+# not by y/hub itself
 AUTH_PUBLIC_KEY=...
 AUTH_PRIVATE_KEY=...
 

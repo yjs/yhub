@@ -53,13 +53,13 @@ const decodeTombstone = row => ({
  * `retrieveAssets` serve both the content path and the reference-only path without repeating
  * itself four times over.
  *
- * @type {Array<{ column: string, include: string, assetId: (room: t.Room, t: string) => t.AssetId }>}
+ * @type {Array<{ column: string, include: string, assetId: (docRef: t.DocRef, t: string) => t.AssetId }>}
  */
 const assetColumns = [
-  { column: 'gcdoc', include: 'gc', assetId: (room, t) => object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), t, gc: true }, room) },
-  { column: 'nongcdoc', include: 'nongc', assetId: (room, t) => object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), t, gc: false }, room) },
-  { column: 'contentmap', include: 'contentmap', assetId: (room, t) => object.assign({ type: /** @type {const} */ ('id:contentmap:v1'), t }, room) },
-  { column: 'contentids', include: 'contentids', assetId: (room, t) => object.assign({ type: /** @type {const} */ ('id:contentids:v1'), t }, room) }
+  { column: 'gcdoc', include: 'gc', assetId: (docRef, t) => object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), t, gc: true }, docRef) },
+  { column: 'nongcdoc', include: 'nongc', assetId: (docRef, t) => object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), t, gc: false }, docRef) },
+  { column: 'contentmap', include: 'contentmap', assetId: (docRef, t) => object.assign({ type: /** @type {const} */ ('id:contentmap:v1'), t }, docRef) },
+  { column: 'contentids', include: 'contentids', assetId: (docRef, t) => object.assign({ type: /** @type {const} */ ('id:contentids:v1'), t }, docRef) }
 ]
 
 /**
@@ -131,7 +131,7 @@ export class Persistence {
   }
 
   /**
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {object} content
    * @param {string} content.lastClock
    * @param {Uint8Array<ArrayBuffer>} content.gcDoc
@@ -140,24 +140,24 @@ export class Persistence {
    * @param {Uint8Array<ArrayBuffer>} content.contentids
    * @returns {Promise<void>}
    */
-  async store (room, { lastClock, gcDoc, nongcDoc, contentmap, contentids }) {
-    log.debug({ room, gcDocSize: gcDoc.byteLength, nongcDocSize: nongcDoc.byteLength, contentmapSize: contentmap.byteLength, contentidsSize: contentids.byteLength }, 'storing doc')
+  async store (docRef, { lastClock, gcDoc, nongcDoc, contentmap, contentids }) {
+    log.debug({ docRef, gcDocSize: gcDoc.byteLength, nongcDocSize: nongcDoc.byteLength, contentmapSize: contentmap.byteLength, contentidsSize: contentids.byteLength }, 'storing doc')
     /**
      * @type {t.AssetId}
      */
-    const gcDocAssetId = object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), gc: true, t: lastClock }, room)
+    const gcDocAssetId = object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), gc: true, t: lastClock }, docRef)
     /**
      * @type {t.AssetId}
      */
-    const nongcDocAssetId = object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), gc: false, t: lastClock }, room)
+    const nongcDocAssetId = object.assign({ type: /** @type {const} */ ('id:ydoc:v1'), gc: false, t: lastClock }, docRef)
     /**
      * @type {t.AssetId}
      */
-    const contentmapAssetId = object.assign({ type: /** @type {const} */ ('id:contentmap:v1'), t: lastClock }, room)
+    const contentmapAssetId = object.assign({ type: /** @type {const} */ ('id:contentmap:v1'), t: lastClock }, docRef)
     /**
      * @type {t.AssetId}
      */
-    const contentidsAssetId = object.assign({ type: /** @type {const} */ ('id:contentids:v1'), t: lastClock }, room)
+    const contentidsAssetId = object.assign({ type: /** @type {const} */ ('id:contentids:v1'), t: lastClock }, docRef)
     const [gcDocAsset, nongcDocAsset, contentmapAsset, contentidsAsset] = await promise.all([
       tryPersistencePluginStore(this.plugins, gcDocAssetId, { type: 'asset:ydoc:v1', update: gcDoc }),
       tryPersistencePluginStore(this.plugins, nongcDocAssetId, { type: 'asset:ydoc:v1', update: nongcDoc }),
@@ -175,42 +175,42 @@ export class Persistence {
     const created = number.parseInt(lastClock.split('-')[0])
     // The `WHERE NOT EXISTS` is the hard-deletion barrier, and it has to be part of this
     // statement rather than a check in front of it: a compact task spends seconds to minutes
-    // merging between reading the room's state and arriving here, and `ON CONFLICT` cannot
+    // merging between reading the document's state and arriving here, and `ON CONFLICT` cannot
     // catch it either, because `t` is a fresh clock on every compaction. Guarding here rather
     // than in the worker also covers `unsafePersistDoc`, which reaches storage directly.
     // Soft deletions are deliberately not guarded: compaction keeps running, so nothing that
     // was already on the stream is lost before it is trimmed, and a restore gets it all back.
     await this.sql`
       INSERT INTO yhub_ydoc_v1 (org,docid,branch,t,created,gcDoc,nongcDoc,contentmap,contentids,gcDoc_is_reference,nongcDoc_is_reference,contentmap_is_reference,contentids_is_reference)
-      SELECT ${room.org},${room.docid},${room.branch},${lastClock},${created},${encodedGcDocAsset},${encodedNongcDocAsset},${encodedContentmapAsset},${encodedContentidsAsset},${isReference(gcDocAsset)},${isReference(nongcDocAsset)},${isReference(contentmapAsset)},${isReference(contentidsAsset)}
+      SELECT ${docRef.org},${docRef.docid},${docRef.branch},${lastClock},${created},${encodedGcDocAsset},${encodedNongcDocAsset},${encodedContentmapAsset},${encodedContentidsAsset},${isReference(gcDocAsset)},${isReference(nongcDocAsset)},${isReference(contentmapAsset)},${isReference(contentidsAsset)}
       WHERE NOT EXISTS (
         SELECT 1 FROM yhub_ydoc_tombstones_v1 d
-        WHERE d.org = ${room.org} AND d.docid = ${room.docid} AND d.branch = ${room.branch} AND d.hard
+        WHERE d.org = ${docRef.org} AND d.docid = ${docRef.docid} AND d.branch = ${docRef.branch} AND d.hard
       )
       ON CONFLICT (org,docid,branch,t) DO NOTHING
     `
   }
 
   /**
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @return {Promise<Y.ContentMap>}
    */
-  async retrieveContentmap (room) {
-    const { contentmap } = await this.retrieveDoc(room, { contentmap: true })
+  async retrieveContentmap (docRef) {
+    const { contentmap } = await this.retrieveDoc(docRef, { contentmap: true })
     return Y.mergeContentMaps(contentmap.map(Y.decodeContentMap))
   }
 
   /**
    * @template {{ gc?: boolean, nongc?: boolean, contentmap?: boolean, references?: boolean, contentids?: boolean }} Include
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {Include} includeContent
-   * The room's tombstone is returned unconditionally - reading a document and learning whether it
+   * The document's tombstone is returned unconditionally - reading a document and learning whether it
    * was deleted is one round trip, never two.
    *
    * @return {Promise<{ lastClock: string, tombstone: t.Tombstone|null, gcDoc: Include['gc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null, nongcDoc: Include['nongc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null, contentmap: Include['contentmap'] extends true ? Array<Uint8Array<ArrayBuffer>> : null, references: Include['references'] extends true ? Array<{ assetId: t.AssetId, asset: t.Asset|null }> : null, contentids: Include['contentids'] extends true ? Array<Uint8Array<ArrayBuffer>> : null }>}
    */
-  async retrieveDoc (room, includeContent) {
-    const { lastClock, tombstone, assets } = await this.retrieveAssets(room, includeContent)
+  async retrieveDoc (docRef, includeContent) {
+    const { lastClock, tombstone, assets } = await this.retrieveAssets(docRef, includeContent)
     // every stored asset is reported, resolved or not, so a version whose object has gone missing
     // still yields its reference and its row can finally be cleaned up
     const refs = includeContent.references === true ? assets : null
@@ -229,7 +229,7 @@ export class Persistence {
         case 'asset:contentids:v1': contentidss.push(retrieved.contentids); break
       }
     }))
-    log.debug({ room, assetCount: assets.length, lastClock, deleted: tombstone != null }, 'retrieved doc')
+    log.debug({ docRef, assetCount: assets.length, lastClock, deleted: tombstone != null }, 'retrieved doc')
     return {
       lastClock,
       tombstone,
@@ -242,8 +242,8 @@ export class Persistence {
   }
 
   /**
-   * Every asset stored for `room` - one entry per version and column - together with the room's
-   * tombstone and last clock.
+   * Every asset stored for `docRef` - one entry per version and column - together with the
+   * document's tombstone and last clock.
    *
    * *Assets*, not references: a column holds either an `asset:retrievable:v1` pointer or the bytes
    * themselves, and this returns whichever it is, unresolved. Resolving pointers through the
@@ -255,13 +255,13 @@ export class Persistence {
    * `assetId`s, so dropping them would strand every row whose assets are all inline.
    *
    * @template {{ gc?: boolean, nongc?: boolean, contentmap?: boolean, contentids?: boolean }} Include
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {Include} includeContent
    * @param {object} [opts]
    * @param {boolean} [opts.onlyReferences]
    * @return {Promise<{ lastClock: string, tombstone: t.Tombstone|null, assets: Array<{ assetId: t.AssetId, asset: t.Asset|null }> }>}
    */
-  async retrieveAssets (room, includeContent, { onlyReferences = false } = {}) {
+  async retrieveAssets (docRef, includeContent, { onlyReferences = false } = {}) {
     const wanted = assetColumns.filter(c => /** @type {any} */ (includeContent)[c.include] === true)
     // `<col>_is_reference` is false only on rows written since the markers were added; the column
     // defaults to true, so anything older is fetched and checked exactly as it always was
@@ -276,13 +276,13 @@ export class Persistence {
     const rows = await this.sql`
       SELECT t ${selection}, deleted_at, hard, purged_at, by
       FROM yhub_ydoc_v1 FULL OUTER JOIN yhub_ydoc_tombstones_v1 USING (org,docid,branch)
-      WHERE org = ${room.org} AND docid = ${room.docid} AND branch = ${room.branch}
+      WHERE org = ${docRef.org} AND docid = ${docRef.docid} AND branch = ${docRef.branch}
     `
-    // FULL OUTER JOIN, not LEFT: a room that was hard-deleted has no versions left but must still
-    // report its tombstone, and USING merges the key columns so one WHERE filters both sides. Every
-    // row repeats the same tombstone columns; a tombstoned room with no versions yields a single
-    // row whose `t` is null - a real tombstone, not a version - which `docRows` drops.
-    const tombstone = rows[0]?.deleted_at != null ? decodeTombstone(/** @type {any} */ (object.assign({}, room, rows[0]))) : null
+    // FULL OUTER JOIN, not LEFT: a document that was hard-deleted has no versions left but must
+    // still report its tombstone, and USING merges the key columns so one WHERE filters both sides.
+    // Every row repeats the same tombstone columns; a tombstoned document with no versions yields a
+    // single row whose `t` is null - a real tombstone, not a version - which `docRows` drops.
+    const tombstone = rows[0]?.deleted_at != null ? decodeTombstone(/** @type {any} */ (object.assign({}, docRef, rows[0]))) : null
     const docRows = rows.filter(row => row.t != null)
     /**
      * @type {Array<{ assetId: t.AssetId, asset: t.Asset|null }>}
@@ -290,7 +290,7 @@ export class Persistence {
     const assets = []
     docRows.forEach(row => wanted.forEach(c => {
       const column = row[c.column]
-      assets.push({ assetId: c.assetId(room, row.t), asset: column == null ? null : /** @type {t.Asset} */ (buffer.decodeAny(column)) })
+      assets.push({ assetId: c.assetId(docRef, row.t), asset: column == null ? null : /** @type {t.Asset} */ (buffer.decodeAny(column)) })
     }))
     const lastClock = array.last(docRows.map(row => row.t).sort((a, b) => isSmallerRedisClock(a, b) ? -1 : 1)) || '0'
     return { lastClock, tombstone, assets }
@@ -309,15 +309,15 @@ export class Persistence {
      * org, docid, branch, t[]
      * @type {Map<string,Map<string,Map<string,Set<string>>>>}
      */
-    const roomsMap = new Map()
+    const docRefsMap = new Map()
     /**
      * @type {Array<{ org: string, docid: string, branch: string, ts: string[] }>}
      */
     const deleteQuery = []
     references.forEach(ref => {
-      map.setIfUndefined(map.setIfUndefined(map.setIfUndefined(roomsMap, ref.assetId.org, map.create), ref.assetId.docid, map.create), ref.assetId.branch, set.create).add(ref.assetId.t)
+      map.setIfUndefined(map.setIfUndefined(map.setIfUndefined(docRefsMap, ref.assetId.org, map.create), ref.assetId.docid, map.create), ref.assetId.branch, set.create).add(ref.assetId.t)
     })
-    roomsMap.forEach((docs, org) => {
+    docRefsMap.forEach((docs, org) => {
       docs.forEach((branches, docid) => {
         branches.forEach((ts, branch) => {
           deleteQuery.push({ org, docid, branch, ts: Array.from(ts) })
@@ -330,15 +330,15 @@ export class Persistence {
   }
 
   /**
-   * The deletion record of `room`, or null when it was never deleted.
+   * The deletion record of `docRef`, or null when it was never deleted.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @return {Promise<t.Tombstone|null>}
    */
-  async retrieveTombstone (room) {
+  async retrieveTombstone (docRef) {
     const [row] = await this.sql`
       SELECT org, docid, branch, deleted_at, hard, purged_at, by FROM yhub_ydoc_tombstones_v1
-      WHERE org = ${room.org} AND docid = ${room.docid} AND branch = ${room.branch}
+      WHERE org = ${docRef.org} AND docid = ${docRef.docid} AND branch = ${docRef.branch}
     `
     return row == null ? null : decodeTombstone(/** @type {any} */ (row))
   }
@@ -364,11 +364,11 @@ export class Persistence {
   }
 
   /**
-   * Record that `room` was deleted. `deletedAt` is never moved by a repeated deletion - a client
+   * Record that `docRef` was deleted. `deletedAt` is never moved by a repeated deletion - a client
    * retry must not extend the retention window - but a soft deletion can be upgraded to a hard
    * one, never the reverse.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {object} deletion
    * @param {number} deletion.deletedAt
    * @param {boolean} deletion.hard
@@ -376,11 +376,11 @@ export class Persistence {
    * @return {Promise<t.Tombstone>} the resulting record, which for a repeated deletion is the
    * one that was already there
    */
-  async storeTombstone (room, { deletedAt, hard, by }) {
-    log.info({ room, deletedAt, hard, by }, 'storing tombstone')
+  async storeTombstone (docRef, { deletedAt, hard, by }) {
+    log.info({ docRef, deletedAt, hard, by }, 'storing tombstone')
     const [row] = await this.sql`
       INSERT INTO yhub_ydoc_tombstones_v1 (org,docid,branch,deleted_at,hard,by)
-      VALUES (${room.org},${room.docid},${room.branch},${deletedAt},${hard},${by})
+      VALUES (${docRef.org},${docRef.docid},${docRef.branch},${deletedAt},${hard},${by})
       ON CONFLICT (org,docid,branch) DO UPDATE SET hard = yhub_ydoc_tombstones_v1.hard OR ${hard}
       RETURNING org, docid, branch, deleted_at, hard, purged_at, by
     `
@@ -388,35 +388,35 @@ export class Persistence {
   }
 
   /**
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {number} purgedAt
    * @return {Promise<t.Tombstone>}
    */
-  async storeTombstonePurged (room, purgedAt) {
+  async storeTombstonePurged (docRef, purgedAt) {
     const [row] = await this.sql`
       UPDATE yhub_ydoc_tombstones_v1 SET purged_at = ${purgedAt}
-      WHERE org = ${room.org} AND docid = ${room.docid} AND branch = ${room.branch}
+      WHERE org = ${docRef.org} AND docid = ${docRef.docid} AND branch = ${docRef.branch}
       RETURNING org, docid, branch, deleted_at, hard, purged_at, by
     `
     return decodeTombstone(/** @type {any} */ (row))
   }
 
   /**
-   * Drop the deletion record of `room`, undeleting it (see `YHub.restoreDoc`).
+   * Drop the deletion record of `docRef`, undeleting it (see `YHub.restoreDoc`).
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @return {Promise<void>}
    */
-  async deleteTombstone (room) {
-    log.info({ room }, 'dropping tombstone')
+  async deleteTombstone (docRef) {
+    log.info({ docRef }, 'dropping tombstone')
     await this.sql`
       DELETE FROM yhub_ydoc_tombstones_v1
-      WHERE org = ${room.org} AND docid = ${room.docid} AND branch = ${room.branch}
+      WHERE org = ${docRef.org} AND docid = ${docRef.docid} AND branch = ${docRef.branch}
     `
   }
 
   /**
-   * Erase every stored version of `room`, through the same `deleteReferences` path compaction
+   * Erase every stored version of `docRef`, through the same `deleteReferences` path compaction
    * uses to drop superseded versions - so there is one way to delete stored content, and it
    * always removes the row before the asset it points at. The reverse order would leave rows
    * referencing objects that no longer exist, which read back as silently missing content.
@@ -425,13 +425,13 @@ export class Persistence {
    * this is how a compaction that was still in flight when the document was deleted gets
    * cleaned up.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @return {Promise<number>} the number of erased references
    */
-  async purgeDoc (room) {
-    const { assets } = await this.retrieveAssets(room, { gc: true, nongc: true, contentmap: true, contentids: true }, { onlyReferences: true })
+  async purgeDoc (docRef) {
+    const { assets } = await this.retrieveAssets(docRef, { gc: true, nongc: true, contentmap: true, contentids: true }, { onlyReferences: true })
     await this.deleteReferences(assets)
-    log.info({ room, assetCount: assets.length }, 'purged doc')
+    log.info({ docRef, assetCount: assets.length }, 'purged doc')
     return assets.length
   }
 

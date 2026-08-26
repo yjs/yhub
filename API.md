@@ -6,8 +6,9 @@ Y/hub is a collaborative document backend built on Yjs. It implements the standa
 
 ## REST API
 
-All endpoints require an `auth-cookie` which will be checked via the PERM
-CALLBACK.
+Every request is authenticated by the auth plugin's `authenticate` callback and authorized
+against the permission object its `authorize` callback answers for the route's scope — see
+[Permissions](#permissions).
 
 It is assumed that all documents can be identified by a unique `{org}/{docid}`
 combination. Furthermore, all "body" content is encoded via lib0/encoding's
@@ -31,6 +32,15 @@ version as well.
   * `branch=string`: Optionally, define a custom branch. Changes won't be automatically synced with other branches.
   * `customAttributions=string`: optional comma-separated `key:value` pairs (e.g. `source:ai,model:gpt4`). All updates sent through this connection will include these custom attributions in the contentmap, stored as `insert:<key>` / `delete:<key>` attribution attributes alongside the standard ones.
 
+Permissions on the socket (see [Permissions](#permissions)): the upgrade requires ydoc `r`, and
+`gc=false` additionally requires full history access (`history.from === 0`) — refused with `403`,
+never silently downgraded to `gc=true`. An anonymous caller (see [Anonymous callers](#contracts))
+may not hold ydoc `u` — attributions carry the userid — so that upgrade is refused with `401`
+after the permission check. After the upgrade each message is gated by its own facet:
+doc updates require ydoc `u` and presence broadcasts awareness `u` (each dropped independently —
+a read-only connection with awareness `u` still broadcasts cursors), and presence is only relayed
+to connections holding awareness `r`.
+
 ### Errors
 
 Every yhub error is either **transient** — retry with backoff — or **permanent** — retrying
@@ -44,20 +54,21 @@ when codes are added:
 
 | Close code | Meaning | Reconnect? |
 |---|---|---|
-| `4400`–`4499` | permanent yhub errors — `4401` permission revoked (see [`yhub.recheckAuth`](#yhubrecheckauthroom-opts); exported as `wsCloseAuthRevoked`), `4404` document deleted (see [`yhub.deleteDoc`](#yhubdeletedocroom-opts); exported as `wsCloseDocDeleted`) | no — act first (e.g. re-authenticate, or drop the local copy), then reconnect deliberately |
+| `4400`–`4499` | permanent yhub errors — `4401` permission revoked: the permissions the socket consumes (the ydoc mask, the awareness mask, or `gc=false`'s full-history requirement) changed on a re-check (see [`yhub.recheckAuth`](#yhubrecheckauthdocref-opts); exported as `wsCloseAuthRevoked`), `4404` document deleted (see [`yhub.deleteDoc`](#yhubdeletedocdocref-opts); exported as `wsCloseDocDeleted`) | no — act first (e.g. re-authenticate, or drop the local copy), then reconnect deliberately |
 | `4500`–`4599` | reserved for transient yhub errors (none sent today) | yes |
 | `1011` | internal error — initial sync, message handling, or stream relay failed | yes |
-| `1013` | try again later — backpressure limit exceeded, or the auth backend was unavailable during a re-check | yes |
+| `1013` | try again later — backpressure limit exceeded, or `authorize` threw during a re-check (the permission backend is down, not the grant revoked) | yes |
 | `1002` `1003` `1008` | standard permanent codes — yhub never sends them | no |
 | *(none)* | closed without a close frame — browsers report `1006`, `@y/websocket` emits `connection-close` with `event = null` | yes |
 
 A missing close frame is routine: server shutdown, the 120s idle timeout (pings are sent
 automatically — only a dead link times out), and network or proxy failures. Always transient.
 
-A denied upgrade is HTTP, never a close code: `401` unauthenticated, `403` insufficient access
+A denied upgrade is HTTP, never a close code: `401` a credential the auth plugin rejected, or an
+anonymous caller granted ydoc `u` (writing needs an identity), `403` insufficient access
 or an origin the CORS config does not allow (see [CORS](#cors)),
-or the status of a branded `apiError` thrown by the auth plugin (e.g. `503` while its backend is
-down). Browsers can't observe upgrade statuses — the client only sees a failed connection
+`503` the auth plugin failed (or the status of a branded `apiError` it threw, e.g. `503` while its
+backend is down). Browsers can't observe upgrade statuses — the client only sees a failed connection
 attempt. `4401` is the explicit stop signal; a client that ignores it reconnects into a `403`
 loop against your auth backend.
 
@@ -84,7 +95,8 @@ Error responses carry a lib0-any encoded `{ error: string, ...extra }` body (see
 | Status | Sent when | Retry? |
 |---|---|---|
 | `400` `404` `409` `422` | caller mistake — invalid body or query (`code: 'invalid-body'` / `'invalid-query'`), missing resource, conflict | no — fix the request |
-| `401` `403` | unauthenticated / no access | no — obtain fresh credentials, then send a new request |
+| `401` `403` | `401`: the auth plugin rejected a presented credential (a branded `apiError(401)`), or an anonymous caller tried to write the document (`code: 'unauthenticated'` — attributions carry the userid; see [Anonymous callers](#contracts)); `403`: no access | no — obtain fresh credentials, then send a new request |
+| `403` with `code: 'missing-permission'` | the caller is authenticated but its permissions don't contain what the request requires — the message reads `requires permission {...}` and the `required` field carries the request's whole requirement as a permission object of the route's scope, e.g. `{ type: 'permissions:document:v1', ydoc: '--u-' }` or `{ type: 'permissions:document:v1', delete: ['hard'] }`; changeset/activity name the clamped ray start, `history: { from }` — the query's `from` limited to the granted ray (see [Permissions](#permissions)) | no — the grant must change first |
 | `403` with `code: 'origin-not-allowed'` | the page's origin is not allowed by `server.cors` (see [CORS](#cors)) — always json | no — fix the server's cors config, not the credentials |
 | `429` | rate limited — yhub itself never sends this; reserved for proxies and custom endpoints | yes — back off first |
 | `500`–`599` | server-side failure — `500` internal error, `503` a dependency (e.g. the auth backend) is temporarily down | yes |
@@ -134,21 +146,30 @@ Retrieve and update the Yjs document via REST API.
 
 Retrieve the current state of the Yjs document.
 
+Access: ydoc `r`; `?awareness=true` additionally requires awareness `r`, and `?gc=false` full
+history access (`history.from === 0`) — the non-gc document *is* the full history, so a bounded
+history ray refuses with `403` instead of silently downgrading.
+
 * `GET /api/ydoc/v1/{org}/{docid}` parameters: `{ gc?: boolean, branch?: string, awareness?: boolean }`
   * `gc=true` (default): retrieve the garbage-collected document
   * `gc=false`: retrieve the full document history (non-gc version)
   * `branch="main"` (default): the branch to retrieve
-  * `awareness=true`: also include the room's merged awareness state in the response (default: omitted)
-  * Returns `{ doc: Uint8Array, awareness?: Uint8Array }`. `doc` is the encoded Yjs document update. `awareness`, when requested and non-empty, contains the bare awareness update bytes (same format as `encodeAwarenessUpdate(...)` and as the `awareness` field accepted by `PATCH /api/ydoc/v1`) — directly consumable by `applyAwarenessUpdate`. Omitted when the room has no awareness state.
+  * `awareness=true`: also include the document's merged awareness state in the response (default: omitted)
+  * Returns `{ doc: Uint8Array, awareness?: Uint8Array }`. `doc` is the encoded Yjs document update. `awareness`, when requested and non-empty, contains the bare awareness update bytes (same format as `encodeAwarenessUpdate(...)` and as the `awareness` field accepted by `PATCH /api/ydoc/v1`) — directly consumable by `applyAwarenessUpdate`. Omitted when the document has no awareness state.
   * A deleted document answers `404 Not Found` with `{ error: 'Not Found', code: 'doc-deleted' }`. The `code` matters: a docid that was never written answers `200` with an empty document, so it is the only way to tell "deleted" from "never existed".
 
 #### DELETE /api/ydoc/v1/{org}/{docid}
 
-Delete a document. Requires write access, and is authorized with the `purpose` `'delete'` (see [Authorization and `purpose`](#authorization-and-purpose)) so it can be gated more tightly than `PATCH`.
+Delete a document.
 
-* `DELETE /api/ydoc/v1/{org}/{docid}` parameters: `{ branch?: string }`
+Access: the `delete` facet must contain the requested kind — `'soft'` for the default, `'hard'`
+for `?hard=true`. Deletion is never implied by a write mask; it is granted by name (see
+[Permissions](#permissions)).
+
+* `DELETE /api/ydoc/v1/{org}/{docid}` parameters: `{ branch?: string, hard?: boolean }`
   * `branch="main"` (default): the branch to delete. **Deletion is per branch** — deleting a document with all of its branches means deleting each of them.
-  * Performs a *soft* deletion: the document stops being readable, connected WebSocket clients are disconnected, but its content is left untouched and can be brought back with [`yhub.restoreDoc`](#yhubrestoredocroom). Irreversible erasure stays out of REST — see [`yhub.deleteDoc`](#yhubdeletedocroom-opts).
+  * `hard=false` (default): performs a *soft* deletion: the document stops being readable, connected WebSocket clients are disconnected, but its content is left untouched and can be brought back with [`yhub.restoreDoc`](#yhubrestoredocdocref).
+  * `hard=true`: additionally clears the stream and erases every row and asset right away. **Irreversible** — requires the `'hard'` grant, and is equivalent to [`yhub.deleteDoc(docRef, { hard: true })`](#yhubdeletedocdocref-opts).
   * Returns `{ deletedAt: number, hard: boolean, by: string|null }`. `deletedAt` is the unix-ms timestamp of the deletion.
   * Idempotent: deleting an already-deleted document answers `200` with the record that is already there, and the original `deletedAt` is never moved by a retry.
 
@@ -156,7 +177,12 @@ After a deletion every endpoint that reads the document answers `404` — `GET`/
 
 #### PATCH /api/ydoc/v1/{org}/{docid}
 
-Update the Yjs document with new changes. Requires write access.
+Update the Yjs document with new changes.
+
+Access: `update` requires ydoc `u` (which also creates the document on that branch when absent),
+`awareness` requires awareness `u` — an awareness-only body passes on awareness `u` alone. All
+facets are checked before anything is applied: partial permission fails the whole request with
+`403` and nothing written.
 
 * `PATCH /api/ydoc/v1/{org}/{docid}` body: `{ update?: Uint8Array, awareness?: Uint8Array, customAttributions?: Array<{ k: string, v: string }> }` parameters: `{ branch?: string }`
   * `update`: optional Yjs update (encoded via `Y.encodeStateAsUpdate` or similar). Diffed against the current document state — only new content is applied and attributed. Attributions are automatically assigned to the authenticated user.
@@ -206,6 +232,12 @@ const patchResponse = await fetch('/api/ydoc/v1/my-org/my-doc-id', {
 Rollback all changes that match the pattern. The changes will be distributed via
 websockets.
 
+Access: `history.rollback` (granted by name inside the history facet), and the requested range
+must be contained in the granted history ray: `from` must be `>= history.from` unless the grant
+is full history (`from: 0`). Filter-only bodies (`by`, `contentIds`, ...) select content from any
+time, so their requested range is unbounded — refused with `403` for bounded rays, never
+silently clamped.
+
 * `POST /api/rollback/v1/{org}/{docid}` body: `{ from?: number, to?: number, by?: string, contentIds?: Y.ContentIds, customAttributions?: Array<{ k: string, v: string }>, withCustomAttributions?: Array<{ k: string, v: string }> }`
   * `from`/`to`: unix timestamp range filter
   * `by=string`: comma-separated list of user-ids that matches the attributions
@@ -226,6 +258,11 @@ websockets.
 
 Visualize attributed changes using either pure deltas or by retrieving the
 before and after state of a Yjs doc. Optionally, include relevant attributions.
+
+Access: the `history` facet — `from` is silently clamped to the granted ray
+(`max(query.from, history.from)`). `?ydoc=true`/`?delta=true` additionally require ydoc `r`: the
+rendered snapshot reconstructs the document from before any ray, so the ray bounds the
+*attributions*, never the content.
 
 * `GET /api/changeset/v1/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, ydoc?: boolean, contentIds?: Y.ContentIds, delta?: boolean, attributions?: boolean, withCustomAttributions?: string }`
   * `from`/`to`: unix timestamp range filter
@@ -250,6 +287,9 @@ The `ydoc` is the document at `to`; its alive content already *is* that point-in
 
 Retrieve all editing-timestamps for a certain document. Use
 the activity API and the changeset API to reconstruct an editing trail.
+
+Access: the `history` facet, with the same clamping and ydoc-read rule as
+[changeset](#changeset).
 
 * `GET /api/activity/v1/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, groupMaxGap?: number, groupMaxDuration?: number, delta?: boolean, withCustomAttributions?: string, customAttributions?: boolean, contentIds?: string }`
   * `from`/`to`: unix timestamp range filter
@@ -317,6 +357,10 @@ state* are never affected.
 > history cannot be recovered. The operation is distributed as a directive on the Redis stream and
 > applied the next time the document is retrieved or compacted.
 
+Access: `history.prune` (granted by name inside the history facet), with the same
+range-containment rule as [rollback](#rollback) — bounded rays refuse requests reaching before
+them, never clamp.
+
 * `POST /api/prune/v1/{org}/{docid}` body: `{ from?: number, to?: number, by?: string, contentIds?: Y.ContentIds, withCustomAttributions?: Array<{ k: string, v: string }> }`
   * `from`/`to`: unix timestamp range filter. Only content whose insertion **and** deletion *both* fall within `[from, to]` is pruned.
   * `by=string`: comma-separated list of user-ids that matches the attributions
@@ -370,12 +414,12 @@ await prune({ from: activity[i].from, to: activity[j].to })
 
 Define your own rest endpoints — served from the same process and guarded by the same auth plugin
 as the built-in endpoints — via the `server.api` config section. Every endpoint — built-in and
-custom — lives under `/{apiPrefix}/{name}/{version}/...`. The built-in endpoints (`ydoc`,
-`rollback`, `prune`, `changeset`, `activity`, plus the websocket route at `/{apiPrefix}/ws/v1/...`)
-are default endpoints in the same namespace, so their names are taken at `v1`: a custom endpoint
-reusing a built-in name at `v1` (same url depth) throws the duplicate-endpoint error at startup,
-while a different version (e.g. `name: 'ydoc', version: 'v2'`) is free. The prefix defaults to
-`api` and can be renamed via `server.apiPrefix` (e.g. `apiPrefix: 'collaboration'` serves
+custom — lives under `/{apiPrefix}/{name}/{version}/...`. The built-in endpoint names (`ydoc`,
+`rollback`, `prune`, `changeset`, `activity`, plus `ws` for the websocket route) are **refused
+for custom endpoints in any version**: one name in the `endpoint` permission facet must mean one
+route family (see [Permissions](#permissions)), and a custom route squatting a builtin name
+would blur what an `endpoint: { ydoc: ... }` grant covers — registration throws at startup. The prefix defaults
+to `api` and can be renamed via `server.apiPrefix` (e.g. `apiPrefix: 'collaboration'` serves
 everything — built-ins included — under `/collaboration/{name}/{version}/...`). It must be a
 single bare path segment (`^[A-Za-z0-9_-]+$`).
 
@@ -392,24 +436,25 @@ const yhub = await createYHub({
       // doc scope (default) → GET/POST /api/comments/v1/{org}/{docid}
       {
         name: 'comments',
-        accessPurpose: 'comments', // forwarded to getAccessType as `purpose`
         get: {
           // supported query attributes - parsed & validated before the handler runs (see below)
           $query: { limit: s.$number.optional, resolved: s.$boolean.optional },
-          handler: async req => ({ comments: await readComments(req.room, req.query), viewer: req.authInfo.userid })
+          handler: async req => ({ comments: await readComments(req.docRef, req.query), viewer: req.authInfo.userid })
         },
         post: {
+          // the framework checks only the `endpoint` facet (`endpoint: { comments: 'c...' }`);
+          // this handler never touches the document, so no further check is needed
           handler: async req => {
             const { text } = await req.any()
             if (!text) throw apiError(400, 'text is required')
-            await saveComment(req.room, req.authInfo.userid, text)
+            await saveComment(req.docRef, req.authInfo.userid, text)
           }
         }
       },
       // item route sharing the collection's name → GET /api/comments/v1/{org}/{docid}/{commentId}
-      { name: 'comments', path: '/:commentId', get: { handler: async req => await getComment(req.room, req.params.commentId) } },
+      { name: 'comments', path: '/:commentId', get: { handler: async req => await getComment(req.docRef, req.params.commentId) } },
       // a breaking revision of the same endpoint → GET /api/comments/v2/{org}/{docid}
-      { name: 'comments', version: 'v2', get: { handler: async req => ({ comments: await readCommentsV2(req.room) }) } },
+      { name: 'comments', version: 'v2', get: { handler: async req => ({ comments: await readCommentsV2(req.docRef) }) } },
       // org scope → GET /api/docs/v1/{org}
       { name: 'docs', scope: 'org', get: { handler: async req => ({ docs: await listDocs(req.org) }) } },
       // global scope → GET /api/stats/v1
@@ -431,11 +476,10 @@ startup.
 |---|---|---|---|
 | `name` | `string` | — | required; a single path segment (`^[A-Za-z0-9_-]+$`). Prefer camelCase — the name doubles as a property name in future typed clients. |
 | `version` | `string` | `'v1'` | a single path segment; bump for breaking revisions of an endpoint |
-| `scope` | `'doc' \| 'org' \| 'global'` | `'doc'` | route shape: `/api/{name}/{version}/{org}/{docid}`, `/api/{name}/{version}/{org}`, or `/api/{name}/{version}` |
+| `scope` | `'document' \| 'org' \| 'global'` | `'document'` | route shape: `/api/{name}/{version}/{org}/{docid}`, `/api/{name}/{version}/{org}`, or `/api/{name}/{version}` |
 | `path` | `string` | `''` | extra named path segments appended to the route, e.g. `'/:commentId'` (named params only, available via `req.params`) |
-| `accessPurpose` | `string` | `null` | forwarded as `purpose` to the auth access callback (see below) |
 | `cors` | `object \| null` | inherits `server.cors` | overrides the hub's CORS for this endpoint, shallow-merged over `server.cors`; `null` disables CORS on it (no cross-origin access — same-origin and non-browser clients only). See [CORS](#cors) |
-| `get`, `post`, `put`, `patch`, `delete` | `{ $query?, $body?, accessPurpose?, handler }` | — | method definitions; at least one is required. `handler` is the async request handler; `$query` optionally declares the supported query attributes and `$body` (not on `get`) the request body (see below); `accessPurpose` overrides the endpoint's for this method alone. `get` requires `'r'` access, all other methods require `'rw'`. |
+| `get`, `post`, `put`, `patch`, `delete` | `{ $query?, $body?, handler }` | — | method definitions; at least one is required. `handler` is the async request handler; `$query` optionally declares the supported query attributes and `$body` (not on `get`) the request body (see below). Each method is gated by the `endpoint` permission facet before the handler runs — the mask position follows the HTTP verb (`get`→`r`, `post`→`c`, `put`/`patch`→`u`, `delete`→`d`). A handler that reads or writes the document states the relevant facets itself via `checkPermissions(req.permissions, createDocumentPermissions({...}))` (see [Permissions](#permissions)). |
 
 Because the prefix, names, and versions are single segments, every request under the api namespace
 has the fixed shape `/{apiPrefix}/{apiname}/{version}/...` — easy for proxies to inspect
@@ -494,11 +538,11 @@ post: {
     text: s.$string, // required; missing or wrong type → 400
     attachment: s.$uint8Array.optional // json clients send base64, lib0 clients send bytes
   },
-  handler: async req => { await saveComment(req.room, req.authInfo.userid, req.body) }
+  handler: async req => { await saveComment(req.docRef, req.authInfo.userid, req.body) }
 }
 ```
 
-Handlers are typed by `scope`: doc-scoped handlers receive a non-null `req.room`, org-scoped
+Handlers are typed by `scope`: doc-scoped handlers receive a non-null `req.docRef`, org-scoped
 handlers receive `req.org` only, global handlers neither. Plain object literals inside `api: [...]`
 get these typings automatically. For endpoints defined in separate modules (where contextual typing
 can't reach), use the `createApiEndpoint` helper — it also preserves the literal endpoint name for
@@ -512,50 +556,172 @@ import { createApiEndpoint } from '@y/hub'
 export const comments = createApiEndpoint('comments', {
   get: {
     $query: { limit: s.$number.optional },
-    // req.room: Room (non-null), req.query.limit: number|undefined (coerced from the url string)
-    handler: async req => ({ comments: await readComments(req.room, { limit: req.query.limit ?? 50 }) })
+    // req.docRef: DocRef (non-null), req.query.limit: number|undefined (coerced from the url string)
+    handler: async req => ({ comments: await readComments(req.docRef, { limit: req.query.limit ?? 50 }) })
   }
 })
 ```
 
-#### Authorization and `purpose`
+### Permissions
 
-Access requirements are automatic: `get` requires `'r'`, all other methods require `'rw'`. The
-customization point is the endpoint's `accessPurpose`, which the auth callbacks receive as the
-trailing `purpose` argument:
+The auth plugin (`server.auth`) has two callbacks: `authenticate` establishes *who* is asking,
+`authorize` answers *what they may do* with one resource — a typed permission object per scope.
+Every gate — REST and websocket alike — consumes that object; there is no separate access
+vocabulary. The full design rationale lives in
+[proposals/permissions.md](proposals/permissions.md).
 
 ```js
+import { createAuthPlugin, createAuthorize } from '@y/hub'
+
 createAuthPlugin({
-  async readAuthInfo (req) { /* unchanged */ },
-  // purpose is the accessPurpose of a custom api endpoint (null when unset). Built-in endpoints
-  // and websocket connections don't supply it - treat `purpose == null` (loose) as "no purpose".
-  async getAccessType (authInfo, room, purpose) {
-    if (purpose === 'comments') return 'rw' // e.g. allow commenting on read-only docs
-    if (purpose === 'moderation') return isAdmin(authInfo) ? 'rw' : null // admin-only endpoint
-    return lookupDocAccess(authInfo, room)
+  // identity: return { userid, ...anything }, or null for an anonymous caller. Throw a branded
+  // apiError(401, ...) to reject a presented credential, apiError(503, ...) to signal a
+  // temporary auth-backend outage; any other throw answers 503.
+  async authenticate (req) {
+    return await verifySession(req.getHeader('authorization'))
   },
-  // authorize org-scoped custom endpoints. When missing, org-scoped endpoints deny all access.
-  async getOrgAccessType (authInfo, org, purpose) { return lookupOrgAccess(authInfo, org) },
-  // authorize global-scoped custom endpoints. When missing, global-scoped endpoints deny all access.
-  async getGlobalAccessType (authInfo, purpose) { return 'r' }
+  // permissions of `user` (null when anonymous) on one resource - one handler per scope, scopes
+  // without a handler deny. Each handler receives its scope's resourceId shape ('document' →
+  // { org, docid, branch }, 'branch' → { org, branch }, 'org' → { org }, 'global' → {}) and
+  // returns that scope's permission object, or null to deny. Denial is a value, never a throw -
+  // a throw is an infrastructure failure (rest and upgrade 503 / branded status, websocket
+  // re-check 1013).
+  authorize: createAuthorize({
+    document: async (docRef, user) => user === null ? await publicDocPermissions(docRef) : await lookupDocPermissions(user, docRef)
+  })
 })
 ```
 
-Note that `purpose` is advisory: a `getAccessType` implementation that ignores it simply applies
-the user's plain doc access to every doc-scoped endpoint. An endpoint's `accessPurpose` broadens or
-narrows access only when the auth plugin acts on it.
+`authorize` is typed so the returned object is forced to match the scope
+(`ToPermissionType<Scope>` from `@y/hub/permissions`). `createAuthorize` is the shape TypeScript
+can verify completely: per-scope `resourceId` parameters, per-scope return types, deny-by-default
+for unlisted scopes. A hand-rolled `authorize (type, resourceId, user)` function stays possible —
+but a single function body cannot correlate a runtime check of `type` with its return type, so
+it needs one cast at the return. Independent of typing, every answer is validated against its
+scope's permission schema at runtime: an invalid or wrong-scope object is a loud `500` (logged),
+never a silent denial.
 
-A single method can override it, which is how a destructive method is gated more tightly than the
-reads next to it — setting it on the endpoint instead would silently change the purpose that every
-existing caller of the other methods is authorized against. The built-in `ydoc` endpoint does
-exactly this, declaring `accessPurpose: 'delete'` on its `delete` method only:
+#### Permission objects
+
+A **document** permission object carries the full facet vocabulary; the coarser scopes
+(**branch**, **org**, **global**) are endpoint-only in v1. Facets are absent (grants nothing),
+`false` (explicit denial), or their value:
 
 ```js
-createApiEndpoint('report', {
-  get: { handler: async req => renderReport(req.room) },
-  delete: { accessPurpose: 'admin', handler: async req => dropReport(req.room) }
-})
+{
+  type: 'permissions:document:v1',
+  ydoc: 'cru-',                    // positional crud mask over the document content
+  awareness: '-ru-',               // presence: r = receive, u = broadcast own
+  history: { from: 0, rollback: true, prune: false }, // attributed history from `from` (unix ms, 0 = full)
+  delete: ['soft'],                // deletion kinds - never implied by a write mask
+  endpoint: { '*': '-r--', comments: 'crud' } // custom endpoints; '*' is the fallback entry
+}
+// endpoint-only scopes:
+{ type: 'permissions:org:v1', endpoint: { docs: '-r--' } }       // likewise :branch: / :global:
 ```
+
+Access values are **positional CRUD masks** — a 4-char string with a fixed position per verb
+(`create`/`read`/`update`/`delete`), `-` denying: `'crud'`, `'cru-'`, `'-r--'`, `'----'`. Checks
+are single char compares — `perms.ydoc[1] === 'r'` — and every value has exactly one spelling.
+On `ydoc`, `r` grants read/sync and `u` grants submitting updates (`c`/`d` are reserved). What
+each facet gates:
+
+| Facet | Gates |
+|---|---|
+| `ydoc` `r` | ws upgrade + sync, `GET /ydoc`, changeset/activity `?ydoc=`/`?delta=` |
+| `ydoc` `u` | ws doc updates, `PATCH /ydoc` `update` (creates the document when absent) — needs an identity, see [Anonymous callers](#contracts) |
+| `awareness` `r` / `u` | receiving / broadcasting presence (ws and `GET`/`PATCH /ydoc`) |
+| `history.from` | changeset/activity, clamped to the ray; `gc=false` needs `from: 0` |
+| `history.rollback` / `.prune` | `POST /rollback` / `POST /prune`, with range containment — rollback needs an identity |
+| `delete` `['soft'\|'hard']` | `DELETE /ydoc` by kind |
+| `endpoint` | custom endpoints by name, `'*'` as fallback (an explicit `'----'` blocks it) |
+
+Every rest endpoint — builtin and custom alike — checks the mask position matching its HTTP
+verb (`get`→`r`, `post`→`c`, `put`/`patch`→`u`, `delete`→`d`) before the handler runs — crud
+maps onto the REST verbs exactly, so append-only grants (`'c---'`: may post new comments, not
+read or edit them) work day one. The semantic facets are then the handler's business, and there
+is one primitive for stating them: **`checkPermissions(req.permissions, required)`** (exported
+from `@y/hub`) throws the uniform `missing-permission` 403 unless the granted permissions
+contain `required` — an input-form permission object of the route's scope, written with the
+creators `createDocumentPermissions` / `createOrgPermissions` / `createGlobalPermissions` (also
+exported from `@y/hub`; prototype-free, `type` filled in), e.g.
+`checkPermissions(req.permissions, createDocumentPermissions({ ydoc: '-r--' }))` at the top of a
+handler that reads the document. The builtins state their access lines above exactly this way,
+and the endpoint-facet gate is the same call with `{ endpoint: { name: mask } }`. The boolean
+behind it, `hasPermissions(permissions, required)` (in `@y/hub/permissions`), takes the
+*normalized* view — what `req.permissions` holds; normalize a composed grant with
+`normalizeDocumentPermissions` first — or `null`, which contains nothing (a `null` answer from
+the plugin fails every requirement with the same `missing-permission` 403). It decides the
+containment `required ⊆ granted` in the merge algebra — the intersection of the two normalizes
+to exactly the requirement — so crud masks are positional subsets, a `history.from` requirement
+is satisfied by any granted ray reaching at least as far back (changeset/activity first limit
+the query's `from` to the granted ray and then require exactly that `history: { from }`),
+`delete` kinds are a subset check, and endpoint names resolve through the `'*'` fallback on
+both sides. Requiring `history.rollback`/`prune` implicitly also requires ydoc `u` (the write
+they ride on). The requirement is validated as a caller contract — a wrong scope, an unknown
+facet (at any depth), an invalid value, or a pure denial (`false`, `'----'`, an empty `delete`)
+throws rather than silently weakening the check — and its type follows the scope, so
+`checkPermissions(orgPermissions, createDocumentPermissions({ ydoc: '-r--' }))` is a compile
+error (org permissions carry only `endpoint`).
+
+Deny-by-default falls out of absence: an empty answer grants nothing, `null` denies outright, and
+destructive rights (`rollback`, `prune`, `delete`) are granted only by name — a write mask never
+implies them. "All custom endpoints open" is one entry: `endpoint: { '*': 'crud' }`.
+
+The `@y/hub/permissions` module exports the schemas (`$permissions`, `$documentPermissionsV1`, ...),
+the creators `createPermissions(scope, facets)` / `createDocumentPermissions` /
+`createBranchPermissions` / `createOrgPermissions` / `createGlobalPermissions` (input-form
+objects without a prototype — the one spelling for hand-written answers and requirements),
+`sanitizePermissions` (the mandatory boundary for permission objects read from *external* input —
+json bodies, tokens — which rebuilds them prototype-free), the merge algebra
+`documentPermissionsUnion` / `documentPermissionsIntersect` (compose defaults, role grants, and per-doc
+grants *inside* your plugin), the containment check `hasPermissions(permissions, required)`, the
+normalizers (`normalizeDocumentPermissions`, ...), and `endpointPermission(normalized, name)` — the
+one lookup that isn't a single char compare.
+
+#### Contracts
+
+* **Determinism**: `authorize` must answer deterministically per `(type, resourceId, user)`
+  between a websocket upgrade and its re-checks — a wall-clock-relative grant
+  (`from: Date.now() - 30d`) makes every [`recheckAuth`](#yhubrecheckauthdocref-opts) compare
+  unequal and flap connections. Compute such bounds when the grant is *stored*.
+* **Revocation**: a plugin deriving permissions purely from the frozen `user` object (token
+  claims) re-derives the same answer on every re-check — revoke via
+  `recheckAuth({ forceDisconnect: true })` plus short token lifetimes, or consult a revocation
+  list inside `authorize`.
+* **Failure**: every answer is checked against its scope's permission schema — an invalid or
+  wrong-scope object is a loud error (rest `500`, logged), an unknown future `type` version is
+  denied with a warning, and an unbranded throw from either hook is an infrastructure failure —
+  `503` on rest requests and the websocket upgrade, `1013` on a websocket re-check — never
+  throw to deny. A branded `apiError` passes its status through: `apiError(401, ...)` from
+  `authenticate` rejects a credential, `apiError(503, ...)` from either hook signals an outage.
+* **Anonymous callers**: `authenticate` answering `null` is not a rejection — it is an anonymous
+  caller, and `authorize` is asked with `user: null` like for anyone else (public documents are a
+  `document` handler that grants on `null`). yhub itself never answers `401` for missing
+  credentials; a custom handler that needs an identity checks `req.authInfo` and throws its own
+  `apiError(401, ...)`. The one built-in exception: **writing the document needs an identity**,
+  because attributions carry the userid — an anonymous caller *holding* ydoc `u` gets
+  `401 { code: 'unauthenticated' }` from `PATCH /ydoc` (with an `update`), `POST /rollback`, and
+  at the websocket upgrade, always *after* the permission check (without `u` it is the ordinary
+  `403`). Reads, presence (including an awareness-only `PATCH`), changeset/activity, prune, and
+  delete (recorded with `by: null`) work anonymously when granted.
+
+#### Migrating from `AccessType`
+
+The retired `'r' | 'rw' | null` vocabulary maps directly onto permission objects — write the
+mapping where `authorize` replaces `getAccessType`:
+
+| Old answer | Document scope | Branch/org/global scope |
+|---|---|---|
+| `'rw'` | `{ type: 'permissions:document:v1', ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } }` | `{ type: 'permissions:<scope>:v1', endpoint: { '*': 'crud' } }` |
+| `'r'` | the same with `ydoc: '-r--'` **and** `endpoint: { '*': '-r--' }` | `{ type: 'permissions:<scope>:v1', endpoint: { '*': '-r--' } }` |
+| `null` | `null` | `null` |
+
+The `'r'` rows grant only the GET verb class on endpoints — exactly the old rule (non-GET
+required `'rw'`). Deliberately excluded: `rollback`, `prune`, `delete` — the old implicit
+"`rw` ⇒ rollback/delete" is gone; grant them by name (compose with `documentPermissionsUnion`). And
+deliberately included: awareness `'-ru-'` in the `'r'` row — read-only connections now broadcast
+presence, where the old blanket write gate silently swallowed their cursors.
 
 #### The request object
 
@@ -564,16 +730,16 @@ any time, also after `await`s:
 
 | Property | Type | Description |
 |---|---|---|
-| `yhub` | `YHub` | the yhub instance — query documents via `yhub.getDoc(req.room, ...)`, access `stream`, `persistence`, `computePool`, `agentTask` |
+| `yhub` | `YHub` | the yhub instance — query documents via `yhub.getDoc(req.docRef, ...)`, access `stream`, `persistence`, `computePool`, `agentTask` |
 | `method` | `string` | `'get' \| 'post' \| 'put' \| 'patch' \| 'delete'` |
 | `path` | `string` | the request path, e.g. `/api/comments/v1/acme/readme` |
 | `org` | `string \| null` | `null` for global scope |
-| `docid`, `branch`, `room` | | only set for doc scope; `branch` from `?branch=` (default `'main'`) |
+| `docid`, `branch`, `docRef` | | only set for doc scope; `branch` from `?branch=` (default `'main'`) |
 | `params` | `{ [name]: string }` | the named path segments declared via `path` |
 | `query` | `{ [name]: any }` | the url query attributes as a plain object. Attributes declared in the method's `$query` are coerced & validated (and typed via `createApiEndpoint`); all others are raw strings. Repeated keys: last wins. |
 | `headers` | `{ [name]: string }` | lowercased request headers |
-| `authInfo` | | whatever `readAuthInfo` returned |
-| `accessType` | `'r' \| 'rw'` | the granted access |
+| `authInfo` | | whatever `authenticate` returned — `null` for an anonymous caller |
+| `permissions` | | the normalized permission view of the route's scope (see [Permissions](#permissions)), or `null` when the auth plugin answered `null` — state facet requirements via `checkPermissions(req.permissions, createDocumentPermissions({...}))` (which handles `null`), or check positionally (`req.permissions?.ydoc[2] === 'u'`) |
 | `aborted` | `boolean` | becomes `true` when the client disconnects — check between expensive steps and return early |
 | `body` | | the decoded & validated request body when the method declares `$body`; `undefined` otherwise |
 | `bytes()` | `() => Promise<Uint8Array>` | the raw request body |
@@ -773,7 +939,7 @@ them CORS-shaped: session cookies must be `SameSite=None; Secure`, or the browse
 withholds them from cross-site fetches *and* from the WebSocket handshake — the symptom is a
 `401` from the auth plugin, not a CORS error. And browsers cannot attach an `Authorization`
 header to a WebSocket: token-auth clients pass the token via the url or
-`Sec-WebSocket-Protocol` for `readAuthInfo` to pick up.
+`Sec-WebSocket-Protocol` for `authenticate` to pick up.
 
 ### YHub Import API
 
@@ -797,11 +963,11 @@ const yhub = await createYHub(config)
 | `redis.socket` | `object` | no | Custom socket options merged into the Redis client socket config. See [node-redis socket options](https://github.com/redis/node-redis/blob/master/docs/client-configuration.md#socket-options) for available options. |
 | `postgres` | `string` | yes | PostgreSQL connection string |
 | `persistence` | `PersistencePlugin[]` | yes | One or more storage plugins (e.g. `S3PersistenceV1`). At least one is required. |
-| `maxTaskDuration` | `number` | no | Milliseconds a single task may run. A compute task that exceeds it has its worker thread killed (compute can't be cancelled cooperatively), which rejects the task so its caller can retry. A compaction task that exceeds it outside of compute — a wedged S3 or PostgreSQL socket — is abandoned by the worker so its room is reclaimed by another worker instead of staying leased forever. Default: 1 800 000 (30 minutes) |
+| `maxTaskDuration` | `number` | no | Milliseconds a single task may run. A compute task that exceeds it has its worker thread killed (compute can't be cancelled cooperatively), which rejects the task so its caller can retry. A compaction task that exceeds it outside of compute — a wedged S3 or PostgreSQL socket — is abandoned by the worker so its document is reclaimed by another worker instead of staying leased forever. Default: 1 800 000 (30 minutes) |
 | `computePoolSize` | `number` | no | Worker threads in the compute pool for CPU-intensive Yjs work (merging, state vectors, changesets). Default: number of cpus - 1. Set this explicitly when the process is restricted to a subset of cores — `os.cpus().length` does not reflect `taskset` or cgroup limits. |
 | `server` | `object \| null` | no | HTTP/WebSocket server config. Set to `null` to run without a server (worker/script mode). |
 | `server.port` | `number` | yes* | Port to listen on |
-| `server.auth` | `AuthPlugin` | yes* | Auth plugin created with `createAuthPlugin`. `getAccessType(authInfo, room, purpose)` receives the `accessPurpose` of custom api endpoints as `purpose` (null-ish otherwise). The optional `getOrgAccessType(authInfo, org, purpose)` / `getGlobalAccessType(authInfo, purpose)` callbacks authorize org-/global-scoped custom endpoints — when missing, endpoints of that scope deny all access. |
+| `server.auth` | `AuthPlugin` | yes* | Auth plugin created with `createAuthPlugin`: `authenticate(req)` establishes identity, `authorize(scope, resourceId, user)` answers a typed permission object per scope — see [Permissions](#permissions). |
 | `server.api` | `ApiSpec[]` | no | Custom rest endpoints served under `/{apiPrefix}/{name}/{version}/...`, next to the built-in ones. See [Custom API endpoints](#custom-api-endpoints). |
 | `server.apiPrefix` | `string` | no | First path segment under which all endpoints are served — built-in and custom rest endpoints plus the websocket route `/{apiPrefix}/ws/v1/...` — e.g. `'collaboration'` → `/collaboration/{name}/{version}/...`. A single path segment. Default: `'api'` |
 | `server.maxDocSize` | `number` | no | Maximum Ydoc size in bytes, used for WebSocket payload limits. Default: 500 MB |
@@ -814,12 +980,12 @@ const yhub = await createYHub(config)
 | `server.cors.maxAge` | `number` | no | `Access-Control-Max-Age` in seconds (a non-negative integer; browsers cap it, e.g. Chrome at `7200`). Default: `3600` |
 | `worker` | `object \| null` | no | Background compaction worker config. Set to `null` to disable. |
 | `worker.taskConcurrency` | `number` | yes* | Maximum number of compaction tasks to process in parallel |
-| `worker.events.docUpdate` | `function` | no | Called after each compaction with the merged `DocTable` plus the `room` it belongs to |
+| `worker.events.docUpdate` | `function` | no | Called after each compaction with the merged `DocTable` plus the `docRef` it belongs to |
 
 **Example: full server setup**
 
 ```js
-import { createYHub, createAuthPlugin } from '@y/hub'
+import { createYHub, createAuthPlugin, createAuthorize } from '@y/hub'
 import { S3PersistenceV1 } from '@y/hub/plugins/s3'
 
 const yhub = await createYHub({
@@ -838,8 +1004,10 @@ const yhub = await createYHub({
   server: {
     port: 8080,
     auth: createAuthPlugin({
-      async readAuthInfo (req) { return { userid: req.getHeader('x-user-id') } },
-      async getAccessType (authInfo, room) { return 'rw' }
+      async authenticate (req) { return { userid: req.getHeader('x-user-id') } },
+      authorize: createAuthorize({
+        document: async () => ({ type: 'permissions:document:v1', ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } })
+      })
     })
   },
   worker: { taskConcurrency: 10 }
@@ -858,13 +1026,13 @@ const yhub = await createYHub({
 })
 ```
 
-#### `yhub.getDoc(room, include, opts?)`
+#### `yhub.getDoc(docRef, include, opts?)`
 
 Retrieve the current state of a document, merging any in-memory Redis updates with the persisted state.
 
 ```ts
 yhub.getDoc(
-  room: { org: string, docid: string, branch: string },
+  docRef: { org: string, docid: string, branch: string },
   include: {
     gc?: boolean,
     nongc?: boolean,
@@ -893,8 +1061,8 @@ Only fields listed in `include` with a truthy value are populated; the rest are 
 **`getDoc` does not refuse a deleted document; it reports one.** Deciding what that means belongs to the caller: the built-in endpoints throw `DocDeletedError` (exported from `@y/hub`), which `registerApi` answers with `404 { code: 'doc-deleted' }`; the WebSocket path closes with `4404`; the compact worker carries on, because it still has to trim the stream. A custom endpoint that reads a document is in the same position and should do the same:
 
 ```js
-const { gcDoc, tombstone } = await req.yhub.getDoc(req.room, { gc: true })
-if (tombstone != null) throw new DocDeletedError(req.room, tombstone)
+const { gcDoc, tombstone } = await req.yhub.getDoc(req.docRef, { gc: true })
+if (tombstone != null) throw new DocDeletedError(req.docRef, tombstone)
 ```
 
 **Example**
@@ -909,15 +1077,15 @@ const { gcDoc } = await yhub.getDoc(
 const ydoc = Y.createDocFromUpdate(gcDoc)
 ```
 
-#### `yhub.unsafePersistDoc(room, update, attributions)`
+#### `yhub.unsafePersistDoc(docRef, update, attributions)`
 
-Attribute and persist a Yjs update directly to the database, without distributing it via Redis or WebSocket. Multiple calls for the same room are merged on next retrieval.
+Attribute and persist a Yjs update directly to the database, without distributing it via Redis or WebSocket. Multiple calls for the same document are merged on next retrieval.
 
 > **Warning:** connected clients will not see the changes until they reconnect.
 
 ```ts
 yhub.unsafePersistDoc(
-  room: { org: string, docid: string, branch: string },
+  docRef: { org: string, docid: string, branch: string },
   update: Uint8Array,          // encoded Yjs update (e.g. Y.encodeStateAsUpdate)
   attributions: { by?: string } // optional author user-id
 ): Promise<void>
@@ -938,7 +1106,7 @@ await yhub.unsafePersistDoc(
 )
 ```
 
-#### `yhub.pruneDoc(room, filters)`
+#### `yhub.pruneDoc(docRef, filters)`
 
 Permanently prune *churned* history — content that was both inserted **and** deleted within the
 filtered range. The prune is distributed via the Redis stream and baked into persistence on the next
@@ -949,7 +1117,7 @@ compaction. This is the programmatic equivalent of `POST /api/prune/v1/{org}/{do
 
 ```ts
 yhub.pruneDoc(
-  room: { org: string, docid: string, branch: string },
+  docRef: { org: string, docid: string, branch: string },
   filters: {
     from?: number,
     to?: number,
@@ -965,30 +1133,33 @@ Provide at least one filter. If no churned content matches the filters, the call
 **Example**
 
 ```js
-const room = { org: 'my-org', docid: 'my-doc', branch: 'main' }
+const docRef = { org: 'my-org', docid: 'my-doc', branch: 'main' }
 
 // Compact all churn from the last hour
-await yhub.pruneDoc(room, { from: Date.now() - 60 * 60 * 1000, to: Date.now() })
+await yhub.pruneDoc(docRef, { from: Date.now() - 60 * 60 * 1000, to: Date.now() })
 
 // Compact the entire document history
-await yhub.pruneDoc(room, { from: 0, to: Number.MAX_SAFE_INTEGER })
+await yhub.pruneDoc(docRef, { from: 0, to: Number.MAX_SAFE_INTEGER })
 ```
 
-#### `yhub.recheckAuth(room, opts?)`
+#### `yhub.recheckAuth(docRef, opts?)`
 
-Force a permission re-check for the WebSocket connections of a room — use it when permissions on a
-document changed and connected clients should be affected immediately, not just on their next
-connect. The directive is distributed via the Redis stream, so it reaches connections on **all**
-servers. Each matching connection re-evaluates `auth.getAccessType(authInfo, room)` and is
-disconnected with close code `4401` (`'permission revoked'`) when its access type changed —
-including an `rw` → `r` downgrade (the client reconnects, re-authenticates, and resyncs at its new
-access level; a still-revoked client is rejected with `403 Forbidden` at upgrade). A failing auth
-plugin fails closed: the connection is disconnected, but with the transient close code `1013`
-(`'auth recheck failed'`) — clients keep reconnecting and recover once the auth backend does.
+Force a permission re-check for the WebSocket connections of a document — use it when permissions
+changed and connected clients should be affected immediately, not just on their next connect. The
+directive is distributed via the Redis stream, so it reaches connections on **all** servers. Each
+matching connection re-evaluates `auth.authorize('document', docRef, user)` and is disconnected
+with close code `4401` (`'permission revoked'`) when the permissions the socket consumes changed:
+the `ydoc` mask, the `awareness` mask, or — on `gc=false` connections — whether full history is
+still granted. Downgrades and upgrades alike bounce (the client reconnects, re-authenticates, and
+resyncs at its new access level; a still-revoked client is rejected with `403 Forbidden` at
+upgrade), while REST-only facets (`delete`, `history.rollback`/`prune`, `endpoint`) never bounce a
+live connection. A failing auth plugin fails closed: the connection is disconnected, but with the
+transient close code `1013` (`'auth recheck failed'`) — clients keep reconnecting and recover once
+the auth backend does.
 
 ```ts
 yhub.recheckAuth(
-  room: { org: string, docid: string, branch: string },
+  docRef: { org: string, docid: string, branch: string },
   opts?: {
     users?: Array<string | { [key: string]: any }> | null,  // default: null = every connection
     forceDisconnect?: boolean                               // default: false
@@ -996,11 +1167,12 @@ yhub.recheckAuth(
 ): Promise<void>
 ```
 
-**Matchers.** `users: null` matches every connection in the room. A string matches connections with
+**Matchers.** `users: null` matches every connection in the document. A string matches connections with
 that `userid`. A plain object matches a connection when each of its top-level properties deep-equals
 the corresponding property of the connection's authInfo — the authInfo may have additional
 properties, so `{ userid: 'X' }` matches the authInfo `{ userid: 'X', name: 'Kevin' }`, and `{}`
-matches everything. Properties are compared with deep equality as a whole (no recursive subset
+matches everything — anonymous connections (authInfo `null`) included, which nothing else
+matches. Properties are compared with deep equality as a whole (no recursive subset
 matching: `{ roles: ['editor'] }` does not match an authInfo with `roles: ['editor', 'admin']`).
 Matchers must be plain JSON-ish values from trusted code — values that don't survive lib0
 `encodeAny` are unsupported: functions never match, while a `Date` or `Map` decodes to the empty
@@ -1009,7 +1181,7 @@ object `{}` and therefore matches **every** connection.
 **`forceDisconnect: true`** disconnects matching connections *without* re-checking. This drops
 sessions, it does not revoke access: clients auto-reconnect and re-authenticate within
 milliseconds, so revoke in your auth backend first. Force-disconnecting every connection of a busy
-room causes a reconnect thundering herd — all clients re-run the upgrade auth and initial sync at
+document causes a reconnect thundering herd — all clients re-run the upgrade auth and initial sync at
 once.
 
 **Client handling.** `4401` is a permanent close code — stop auto-reconnecting and re-authenticate
@@ -1017,34 +1189,35 @@ once.
 without that handler a kicked, still-revoked client retries every ≤2.5s, hitting your auth backend
 with a `403` each time.
 
-**Auth plugin contract.** The re-check reuses the `authInfo` captured at connect (`readAuthInfo`
-cannot be re-run — the original HTTP request is gone). `getAccessType` must consult a live
-authority (database, permission service) for the re-check to be meaningful; if access is derived
-from claims embedded in the authInfo itself (e.g. rooms listed in a JWT payload), a re-check
-recomputes the same stale answer — rely on `forceDisconnect` plus short token TTLs instead.
+**Auth plugin contract.** The re-check reuses the `user` object captured at connect
+(`authenticate` cannot be re-run — the original HTTP request is gone). `authorize` must consult a
+live authority (database, permission service) for the re-check to be meaningful; if permissions
+are derived from claims embedded in the user object itself (e.g. permission objects listed in a
+JWT payload), a re-check recomputes the same stale answer — rely on `forceDisconnect` plus short
+token TTLs, or a revocation list inside `authorize`, instead.
 
 There is deliberately no built-in REST route: expose it as a [custom API endpoint](#custom-api-endpoints)
-guarded by your own `accessPurpose` if you need HTTP access:
+gated by a named `endpoint` grant if you need HTTP access:
 
 ```js
+// callable only by subjects whose permissions grant e.g. endpoint: { 'recheck-auth': 'c---' }
 createApiEndpoint('recheck-auth', {
-  accessPurpose: 'admin',
-  post: { handler: async req => { await req.yhub.recheckAuth(req.room, await req.any()) } }
+  post: { handler: async req => { await req.yhub.recheckAuth(req.docRef, await req.any()) } }
 })
 ```
 
 > **Rolling upgrades:** servers and workers running a version older than this feature fail reading
-> a room stream that contains an `auth:check:v1` entry (for up to `minMessageLifetime`). Deploy the
+> a document stream that contains an `auth:check:v1` entry (for up to `minMessageLifetime`). Deploy the
 > new version to all processes before the first `recheckAuth` call.
 
-#### `yhub.deleteDoc(room, opts?)`
+#### `yhub.deleteDoc(docRef, opts?)`
 
 Delete a document. **Deletion is per branch** — deleting a document with all of its branches means
 deleting each of them. Deleting a whole document or a whole organization at once is not supported yet.
 
 ```ts
 yhub.deleteDoc(
-  room: { org: string, docid: string, branch: string },
+  docRef: { org: string, docid: string, branch: string },
   opts?: { hard?: boolean, by?: string | null }  // default: { hard: false, by: null }
 ): Promise<{ org, docid, branch, deletedAt: number, hard: boolean, purgedAt: number|null, by: string|null }>
 ```
@@ -1052,12 +1225,12 @@ yhub.deleteDoc(
 A **soft** deletion (the default) only records that the document is gone. Reads report it as deleted,
 connected clients are disconnected, but its rows and S3 objects are left alone and **compaction
 keeps running** — so updates that were still on the Redis stream are persisted rather than trimmed
-away unpersisted, and [`restoreDoc`](#yhubrestoredocroom) brings the document back with its full
+away unpersisted, and [`restoreDoc`](#yhubrestoredocdocref) brings the document back with its full
 history. Erasing the content later is left to a retention task built on
 [`getTombstones`](#yhubgettombstonesorg-filters) — see [Retention](#retention).
 
 A **hard** deletion additionally clears the stream and erases every row and asset immediately, and
-cannot be undone. Compaction never persists a hard-deleted room again — the barrier lives inside
+cannot be undone. Compaction never persists a hard-deleted document again — the barrier lives inside
 the `INSERT` itself, so it also catches a compaction that was already merging when the deletion
 landed, and `unsafePersistDoc`, which bypasses both stream and API.
 
@@ -1078,7 +1251,7 @@ only offloads the `main` branch, so other branches' blobs live inline in `yhub_y
 row survives until autovacuum and lives on in WAL, replicas, and any earlier base backup.
 
 **Writes after a deletion** are not rejected at the Redis layer: a client that has not noticed yet can
-still push updates onto the stream. They are never persisted for a hard-deleted room, and are trimmed
+still push updates onto the stream. They are never persisted for a hard-deleted document, and are trimmed
 away with the rest of the stream.
 
 **Client handling.** Connected clients are disconnected with close code `4404`
@@ -1095,7 +1268,7 @@ provider.on('connection-close', event => {
 Without that, a local copy in IndexedDB outlives the deletion and re-syncs into any document later
 created under the same docid.
 
-#### `yhub.restoreDoc(room)`
+#### `yhub.restoreDoc(docRef)`
 
 Undo a soft deletion, making the document readable again. Its content was never touched, so it comes
 back with its full history. Refuses a hard deletion, and a soft one whose content was already purged
@@ -1140,13 +1313,13 @@ may defer (`S3PersistenceV1` does, to let concurrent readers finish). Rows are a
 the assets they point at, so an interrupted purge leaves an orphaned object, never a reference to a
 missing one.
 
-#### `yhub.agentTask(room, opts, handler)`
+#### `yhub.agentTask(docRef, opts, handler)`
 
-Run an LLM agent task against a room. The handler receives a freshly hydrated `Y.Doc` (snapshot of the room's current state) and a new `Awareness` instance bound to it. Edits made inside the handler are streamed to all connected clients in real time with attribution derived from the options. The returned promise resolves with the handler's return value **only after** the agent's awareness has been cleared.
+Run an LLM agent task against a document. The handler receives a freshly hydrated `Y.Doc` (snapshot of the document's current state) and a new `Awareness` instance bound to it. Edits made inside the handler are streamed to all connected clients in real time with attribution derived from the options. The returned promise resolves with the handler's return value **only after** the agent's awareness has been cleared.
 
 ```ts
 yhub.agentTask(
-  room: { org: string, docid: string, branch: string },
+  docRef: { org: string, docid: string, branch: string },
   opts: {
     author?: string,             // user-id recorded as `insert` / `delete`
     displayedAuthor?: string,    // awareness `user.name` (defaults to `author`)

@@ -68,6 +68,7 @@ Environment variables needed for tests: `REDIS`, `POSTGRES`, `S3_ENDPOINT`, `S3_
 - **Worker** (`src/index.js:YHub.startWorker`, `bin/worker.js`) — Background process that reads pending updates from Redis, merges them, persists to S3/PostgreSQL, and trims Redis streams. Uses Redis consumer groups for coordination.
 - **Stream** (`src/stream.js`) — Redis abstraction. Manages Redis streams for rooms (`{prefix}:room:{org}:{docid}:{branch}`), pub/sub, worker task queues.
 - **Persistence** (`src/persistence.js`) — PostgreSQL layer. Stores metadata (state vectors, content maps, S3 references) in `yhub_ydoc_v1` table.
+- **Permissions** (`src/permissions.js`, exported as `@y/hub/permissions`) — typed permission objects per scope (document/branch/org/global), positional CRUD masks, normalization, the union/intersect merge algebra, and the containment check `hasPermissions(granted, required)`; its throwing REST form `checkPermissions` (in `src/api.js`, exported from `@y/hub`) gates every rest handler. The auth plugin (`conf.server.auth`) is `{ authenticate, authorize }`; design docs in `proposals/permissions.md` + `proposals/naming.md`.
 - **Compute Pool** (`src/compute.js`, `src/compute-worker.js`) — Worker thread pool for CPU-intensive Yjs operations (merging updates, garbage collection, changesets).
 - **Plugins** (`src/plugins/`) — Pluggable storage backends. Currently only `s3.js` (S3PersistenceV1).
 
@@ -86,7 +87,7 @@ Environment variables needed for tests: `REDIS`, `POSTGRES`, `S3_ENDPOINT`, `S3_
 - Schemas defined with `lib0/schema` (`s.$object`, `s.$union`, `s.$literal`, etc.) for runtime validation.
 
 ### Data Flow
-1. Client connects via WebSocket → server authenticates via auth plugin callback
+1. Client connects via WebSocket → server authenticates via the auth plugin's `authenticate`, then authorizes per document via `authorize`
 2. Server sends initial sync (merged from PostgreSQL/S3 + Redis cache)
 3. Client updates flow: Client → Server → Redis stream → all subscribed servers → other clients
 4. Worker picks up tasks from Redis worker queue → merges updates → stores in S3 → updates PostgreSQL metadata → trims Redis

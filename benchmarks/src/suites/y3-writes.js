@@ -20,7 +20,7 @@ const MB = 1024 * 1024
  * @param {string} docid
  * @param {number} targetBytes
  */
-const seedRoom = async (cluster, docid, targetBytes) => {
+const seedDoc = async (cluster, docid, targetBytes) => {
   if (targetBytes === 0) return
   const { gcUpdate } = getFixture({ targetBytes })
   const writer = await new RawClient({ port: cluster.ports[0], docid }).connect()
@@ -60,7 +60,7 @@ export default {
         const n = config.scale.singleEdits
         for (const targetBytes of config.scale.docSizes) {
           const docid = `y31-${sizeLabel(targetBytes)}`
-          await seedRoom(cluster, docid, targetBytes)
+          await seedDoc(cluster, docid, targetBytes)
           const updates = makeCellUpdates(n).map(updateFrame)
           const writer = await new RawClient({ port: cluster.ports[0], docid }).connect()
           const observer = await new RawClient({ port: cluster.ports[0], docid }).connect()
@@ -157,7 +157,7 @@ export default {
             'workerTime p95 (ms)': stats(metrics.tasks.map(t => t.durationMs)).p95
           })
         }
-        report.note('Write throughput when load is spread over many rooms. Every write is its own room, so there is no fan-out: the expectation is that the worker binds before the server does, because each room is compacted independently.')
+        report.note('Write throughput when load is spread over many documents. Every write is its own document, so there is no fan-out: the expectation is that the worker binds before the server does, because each document is compacted independently.')
       }
     },
     {
@@ -195,7 +195,7 @@ export default {
           closeClients(writers)
           await cluster.drain()
         }
-        report.note('The same write load concentrated on one room, so every writer is also a subscriber. The gap against Y3.3 at equal M *is* the per-subscriber delivery cost — that is the number `messages × subscribers` is multiplied by.')
+        report.note('The same write load concentrated on one document, so every writer is also a subscriber. The gap against Y3.3 at equal M *is* the per-subscriber delivery cost — that is the number `messages × subscribers` is multiplied by.')
       }
     },
     {

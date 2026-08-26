@@ -64,7 +64,7 @@ storage technology.
 
 The y/hub **server component** (`/bin/server.js`) is responsible for accepting
 websocket-connections and distributing the updates via redis streams. Each
-"room" is represented as a redis stream. The server component assembles updates
+document is represented as a redis stream. The server component assembles updates
 stored redis and in the persistent storage (e.g. S3 or Postgres) for the initial
 sync. After the initial sync, the server doesn't keep any Yjs state in-memory.
 You can start as many server components as you need. It makes sense to put the
@@ -76,13 +76,15 @@ extracting data from the redis cache to a persistent database like S3 or
 Postgres. Once the data is persisted, the worker component cleans up stale data
 in redis. You can start as many worker components as you need. It is recommended
 to run at least one worker, so that the data is eventually persisted. The worker
-components coordinate which room needs to be persisted using a separate
+components coordinate which document needs to be persisted using a separate
 worker-queue (see `y:worker` stream in redis).
 
-You are responsible for providing a REST backend that y/hub will call to check
-whether a specific client (authenticated via a JWT token) has access to a
-specific room / document. Example servers can be found in
-`/bin/auth-server-example.js` and `/demos/auth-express/server.js`.
+Authorization runs in-process: you pass an auth plugin (an object with
+`authenticate` and `authorize` callbacks, built with `createAuthPlugin`) to the
+server configuration. `authenticate` establishes who is asking — e.g. by
+verifying a JWT your app issued — and `authorize` answers what that user may do
+with a specific document. See [GETTING-STARTED.md](./GETTING-STARTED.md) for
+examples.
 
 ## How Documents Are Stored
 
@@ -92,7 +94,7 @@ and durability.
 ### Real-time Layer (Redis)
 
 When a client sends an update:
-1. The update is published to a Redis stream (`{prefix}:room:{room}:{docid}:{branch}`)
+1. The update is published to a Redis stream (`{prefix}:room:{org}:{docid}:{branch}`)
 2. All connected clients receive the update immediately via pub/sub
 3. A task is queued for the worker to persist the update
 
@@ -126,7 +128,7 @@ CREATE TABLE yhub_ydoc_v1 (
     PRIMARY KEY (org, docid, branch, t)
 );
 
--- One row per deleted room. See `yhub.deleteDoc`.
+-- One row per deleted document. See `yhub.deleteDoc`.
 CREATE TABLE yhub_ydoc_tombstones_v1 (
     org         text,
     docid       text,
@@ -175,10 +177,6 @@ S3_YHUB_BUCKET=yhub               # Bucket for document storage
 
 # PostgreSQL connection
 POSTGRES=postgres://user:pass@localhost:5432/yhub
-
-# Authentication keys (generate with: npx 0ecdsa-generate-keypair --name auth)
-AUTH_PUBLIC_KEY={"kty":"EC",...}
-AUTH_PRIVATE_KEY={"kty":"EC",...}
 ```
 
 ### Optional Settings
@@ -207,7 +205,7 @@ REDIS_TASK_DEBOUNCE=10000         # Worker task debounce time (ms)
 
 ## Integration Guide
 
-### 1. Set Up Infrastructure
+### 1. Set up infrastructure
 
 ```bash
 npm run dev:up
@@ -217,37 +215,79 @@ This starts Valkey, PostgreSQL and MinIO in containers, creates the PostgreSQL
 tables and the S3 buckets, and writes the connection details to `.env`. Ports are
 allocated per checkout - see [Local Development](#local-development).
 
-### 2. Generate Authentication Keys
+### 2. Generate token signing keys
 
 ```bash
 npx 0ecdsa-generate-keypair --name auth
 ```
 
-Add the generated keys to your `.env` file as `AUTH_PUBLIC_KEY` and
-`AUTH_PRIVATE_KEY`.
+These keys are your application's JWT concern, not y/hub's: your app signs
+tokens with the private key (step 4) and your auth plugin verifies them with the
+public key (step 3). Store them wherever your app keeps its secrets — y/hub
+itself does not read them.
 
-### 3. Implement the Permission Callback
+### 3. Implement the auth plugin
 
-y/hub calls your backend to check if a user has access to a document. Implement
-this endpoint in your existing backend:
+Authorization runs in-process. Build an auth plugin with `createAuthPlugin` and
+pass it as `server.auth` to `createYHub()`. `authenticate` establishes who is
+asking — return anything identifying the user, or `null` for an anonymous
+caller (throw a branded `apiError(401, ...)` to reject a credential).
+`authorize` answers what that user — `null` when anonymous — may do in a given
+scope: return a permission object, or `null` to deny. Denial is a value, never a
+throw — a throw signals an infrastructure failure. Writing a document needs an
+identity (attributions carry the userid); everything else works anonymously
+when granted.
 
 ```javascript
-// Express example
-app.get('/auth/perm/:room/:userid', async (req, res) => {
-  const { room, userid } = req.params
+import { createAuthPlugin, createAuthorize } from '@y/hub'
+import * as jwt from 'lib0/crypto/jwt'
+import * as ecdsa from 'lib0/crypto/ecdsa'
 
-  // Check your database/business logic here
-  const hasAccess = await checkUserAccess(userid, room)
+const authPublicKey = await ecdsa.importKeyJwk(JSON.parse(process.env.AUTH_PUBLIC_KEY))
 
-  res.json({
-    yroom: room,
-    yaccess: hasAccess ? 'rw' : 'no-access',  // 'rw', 'read-only', or 'no-access'
-    yuserid: userid
+// The classic read-write / read-only access levels expressed as permission objects.
+const docPermissions = {
+  rw: {
+    type: 'permissions:document:v1',
+    ydoc: 'cru-',         // positional crud mask: create/read/update/delete, '-' denies
+    awareness: '-ru-',    // r = receive presence, u = broadcast own
+    history: { from: 0 }, // from-ray, unix ms; 0 grants the full history
+    endpoint: { '*': 'crud' } // custom endpoints, '*' = fallback
+  },
+  r: {
+    type: 'permissions:document:v1',
+    ydoc: '-r--',
+    awareness: '-ru-',
+    history: { from: 0 },
+    endpoint: { '*': '-r--' }
+  }
+}
+
+const auth = createAuthPlugin({
+  async authenticate (req) {
+    // Verify the JWT your app issued (step 4).
+    const token = req.getQuery('yauth')
+    const { payload } = await jwt.verifyJwt(authPublicKey, token)
+    return { userid: payload.yuserid }
+  },
+  // One handler per scope - scopes without a handler deny, and the handler's return type is
+  // forced to match its scope. docRef is the { org, docid, branch } triple.
+  authorize: createAuthorize({
+    document: async (docRef, user) => {
+      // Check your database / business logic here.
+      const access = await checkUserAccess(user.userid, docRef) // 'rw' | 'r' | null
+      return access === null ? null : docPermissions[access]
+    }
   })
 })
 ```
 
-### 4. Implement Token Generation
+Destructive rights (`delete`, `history.rollback`, `history.prune`) are granted
+by name and deliberately absent from a plain read/write mapping. The schemas and
+combinators live in `@y/hub/permissions`; see
+[GETTING-STARTED.md](./GETTING-STARTED.md) for complete examples.
+
+### 4. Implement token generation
 
 Clients need a JWT token to connect. Create an endpoint that generates tokens:
 
@@ -272,7 +312,7 @@ app.get('/auth/token', async (req, res) => {
 })
 ```
 
-### 5. Connect from the Client
+### 5. Connect from the client
 
 ```javascript
 import * as Y from 'yjs'
@@ -284,7 +324,7 @@ const authToken = await fetch('/auth/token').then(r => r.text())
 const ydoc = new Y.Doc()
 const provider = new WebsocketProvider(
   'ws://localhost:4400/api/ws/v1',
-  'my-document-room',
+  'my-document',
   ydoc,
   {
     params: { yauth: authToken },
@@ -306,7 +346,7 @@ ytext.insert(0, 'Hello, world!')
 The provider reconnects automatically on any disconnect. Stop it when the server closes with a
 permanent code (`4400`–`4499`, e.g. `4401` permission revoked) — see [API.md → Errors](API.md#errors).
 
-### 6. Start the Server
+### 6. Start the server
 
 ```bash
 # Start both server and worker
@@ -414,7 +454,7 @@ collaborating.
 
 > **Note:** The standalone container uses open authentication (any client can
 > read/write any document). It is intended for development and evaluation. For
-> production, use the full setup below with a proper auth callback.
+> production, use the full setup below with a proper auth plugin.
 
 # Local Development
 
@@ -459,13 +499,7 @@ terminals:
 npm run start:server
 # run a single worker in a separate terminal
 npm run start:worker
-# start the express server in a separate terminal
-cd demos/attributions
-npm i
-npm start
 ```
-
-Open [`http://localhost:5173`](http://localhost:5173) in a browser.
 
 To run y/hub itself in containers as well, use the `app` compose profile:
 
@@ -555,9 +589,12 @@ Minimal AWS IAM policy example:
 See [API.md](./API.md) for the REST API documentation including:
 
 - WebSocket endpoints
-- History and timestamps APIs
-- Rollback functionality
-- Webhook configuration
+- Permissions
+- History, changeset and activity APIs
+- Rollback & prune
+- Custom API endpoints
+- CORS
+- YHub import API
 
 ## Benchmarks
 

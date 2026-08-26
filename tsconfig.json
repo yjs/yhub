@@ -21,7 +21,6 @@
     }
   },
   "include": [
-    // "./demos/history/**/*.js",
     "tests/**/*.js",
     "src/**/*.js",
     "bin/**/*.js",

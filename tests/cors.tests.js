@@ -10,8 +10,10 @@ const otherOrigin = 'https://admin.example.com'
 const evilOrigin = 'https://evil.example'
 
 const auth = types.createAuthPlugin({
-  async readAuthInfo () { return { userid: 'corsUser' } },
-  async getAccessType () { return 'rw' }
+  async authenticate () { return { userid: 'corsUser' } },
+  authorize: types.createAuthorize({
+    document: async () => ({ type: 'permissions:document:v1', ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } })
+  })
 })
 
 /**

@@ -1,22 +1,6 @@
 import * as Y from '@y/y'
 import * as s from 'lib0/schema'
 
-export const $accessType = s.$union(s.$literal('r'), s.$literal('rw'), s.$null)
-
-/**
- * @typedef {s.Unwrap<typeof $accessType>} AccessType
- */
-
-/**
- * @param {AccessType} [accessType]
- */
-export const hasReadAccess = accessType => accessType === 'r' || accessType === 'rw'
-
-/**
- * @param {AccessType} [accessType]
- */
-export const hasWriteAccess = accessType => accessType === 'rw'
-
 /**
  * # Asset
  *
@@ -156,7 +140,7 @@ export const $pruneMessage = s.$({
 })
 
 /**
- * Directive to re-check permissions of the websocket connections of a room (see
+ * Directive to re-check permissions of the websocket connections of a document (see
  * `YHub.recheckAuth`). `users` is an array of authInfo matchers — `null` matches every
  * connection. `forceDisconnect` disconnects matching connections without re-checking access.
  */
@@ -186,14 +170,14 @@ export const $message = s.$union($updateMessage, $awarenessMessage, $pruneMessag
  * @typedef {s.Unwrap<typeof $message>} Message
  */
 
-export const $room = s.$object({ org: s.$string, docid: s.$string, branch: s.$string })
+export const $docRef = s.$object({ org: s.$string, docid: s.$string, branch: s.$string })
 
 /**
- * @typedef {s.Unwrap<typeof $room>} Room
+ * @typedef {s.Unwrap<typeof $docRef>} DocRef
  */
 
 /**
- * The record of a deleted room (table `yhub_ydoc_tombstones_v1`), keyed by room. `deletedAt` and
+ * The record of a deleted document (table `yhub_ydoc_tombstones_v1`), keyed by docRef. `deletedAt` and
  * `purgedAt` are unix milliseconds read from redis `TIME`, so they are free of server clock skew
  * and share the clock domain of `yhub_ydoc_v1.created`. `purgedAt` is null until the content has
  * actually been erased - immediately for a hard deletion, whenever the retention task runs for a
@@ -203,25 +187,25 @@ export const $room = s.$object({ org: s.$string, docid: s.$string, branch: s.$st
  */
 
 /**
- * Thrown at a callsite that read a deleted room (see `YHub.deleteDoc`). `getDoc` itself never
+ * Thrown at a callsite that read a deleted document (see `YHub.deleteDoc`). `getDoc` itself never
  * throws it - it reports the deletion as `tombstone` and each caller decides. Most refuse; the
  * compact worker is the one that carries on, because it still has to trim the stream.
  */
 export class DocDeletedError extends Error {
   /**
-   * @param {Room} room
+   * @param {DocRef} docRef
    * @param {Tombstone} tombstone
    */
-  constructor (room, tombstone) {
-    super(`document was deleted: ${room.org}/${room.docid}/${room.branch}`)
-    this.room = room
+  constructor (docRef, tombstone) {
+    super(`document was deleted: ${docRef.org}/${docRef.docid}/${docRef.branch}`)
+    this.docRef = docRef
     this.tombstone = tombstone
   }
 }
 
 export const $compactTask = s.$({
   type: s.$literal('compact'),
-  room: {
+  docRef: {
     org: s.$string,
     docid: s.$string,
     branch: s.$string
@@ -282,10 +266,8 @@ export const $persistencePlugin = s.$object({
 })
 
 export const $authPlugin = /** @type {s.Schema<AuthPlugin<any>>} */ (s.$object({
-  readAuthInfo: /** @type {any} */ (s.$function),
-  getAccessType: /** @type {any} */ (s.$function),
-  getOrgAccessType: /** @type {any} */ (s.$function).optional,
-  getGlobalAccessType: /** @type {any} */ (s.$function).optional
+  authenticate: /** @type {any} */ (s.$function),
+  authorize: /** @type {any} */ (s.$function)
 }))
 
 /**
@@ -293,18 +275,14 @@ export const $authPlugin = /** @type {s.Schema<AuthPlugin<any>>} */ (s.$object({
  */
 
 /**
- * `purpose` is the `accessPurpose` of a custom api endpoint — `null` when unset and for
- * built-in endpoints and websocket connections.
- *
- * `getOrgAccessType` / `getGlobalAccessType` authorize org-/global-scoped custom api endpoints.
- * When missing, requests to endpoints of that scope are denied.
+ * The auth plugin (`server.auth`): `authenticate` establishes who is asking, `authorize` answers
+ * what they may do with one resource - a typed permission object per scope (see
+ * `@y/hub/permissions` and proposals/permissions.md).
  *
  * @template {UserAuthInfo} AuthInfo
  * @typedef {object} AuthPlugin
- * @property {(req:import('uws').HttpRequest) => Promise<AuthInfo|null>} AuthPlugin.readAuthInfo - return null (or throw) to reject the request with 401. Throw an `apiError(503, ...)` (from `@y/hub`) to signal a temporary auth-backend outage - rest requests and the websocket upgrade respond with that status instead.
- * @property {(authInfo: AuthInfo, room: Room, purpose: string|null) => Promise<AccessType>} AuthPlugin.getAccessType - signal denial by returning null, not by throwing: an error thrown during a websocket recheck disconnects with the transient close code 1013, not the revoke code 4401.
- * @property {(authInfo: AuthInfo, org: string, purpose: string|null) => Promise<AccessType>} [AuthPlugin.getOrgAccessType]
- * @property {(authInfo: AuthInfo, purpose: string|null) => Promise<AccessType>} [AuthPlugin.getGlobalAccessType]
+ * @property {(req: import('uws').HttpRequest) => Promise<AuthInfo|null>} AuthPlugin.authenticate - establish who is asking: return the caller's identity (`{ userid, ... }`) or null for an anonymous caller - `authorize` is then asked with `user: null` and may still grant (public documents). Throw a branded `apiError(401, ...)` (from `@y/hub`) to reject a presented credential, `apiError(503, ...)` to signal a temporary auth-backend outage - rest requests and the websocket upgrade respond with that status. Any other throw is an infrastructure failure and answers 503.
+ * @property {<Scope extends import('./permissions.js').PermissionScope>(scope: Scope, resourceId: import('./permissions.js').PermissionResourceId<Scope>, user: AuthInfo|null) => Promise<import('./permissions.js').ToPermissionType<Scope> | null>} AuthPlugin.authorize - answer the input-form permissions of `user` (null: anonymous) on the addressed resource. `scope` names the tier ('document' → resourceId {org, docid, branch}, 'branch' → {org, branch}, 'org' → {org}, 'global' → {}) and the return type is forced to match it (`ToPermissionType<Scope>` from `@y/hub/permissions`) - implement via `createAuthorize` for full checking; a hand-rolled function body cannot correlate a runtime check of `scope` with its return type and needs a cast. Every answer is additionally validated against the scope's permission schema at runtime. Denial is a value: return null (or an object granting nothing) - never throw to deny. A throw is an infrastructure failure: rest requests and the websocket upgrade answer 503 (a branded apiError passes its status through), a websocket recheck disconnects 1013 (transient), never 4401. Must be deterministic per (scope, resourceId, user) between upgrade and recheck - wall-clock-relative grants (`from: now - 30d`) flap connections; compute such bounds when the grant is stored, not when it is read.
  */
 
 /**
@@ -312,6 +290,19 @@ export const $authPlugin = /** @type {s.Schema<AuthPlugin<any>>} */ (s.$object({
  * @param {AuthPlugin<AuthInfo>} authDef
  */
 export const createAuthPlugin = authDef => authDef
+
+/**
+ * Implement `authorize` as one handler per scope - the shape whose return type TypeScript can
+ * verify per scope (inside a single function body, a runtime check of `scope` cannot narrow the
+ * return type). Each handler receives the scope's resourceId shape and the caller (null when
+ * anonymous) and must return that scope's permission object (or null); scopes without a handler
+ * deny.
+ *
+ * @template {UserAuthInfo} AuthInfo
+ * @param {{ [Scope in import('./permissions.js').PermissionScope]?: (resourceId: import('./permissions.js').PermissionResourceId<Scope>, user: AuthInfo|null) => Promise<import('./permissions.js').ToPermissionType<Scope> | null> }} handlers
+ * @return {AuthPlugin<AuthInfo>['authorize']}
+ */
+export const createAuthorize = handlers => async (scope, resourceId, user) => (await handlers[scope]?.(resourceId, user)) ?? null
 
 /**
  * The type of `req.query` when the endpoint method declares no `$query` spec.
@@ -332,8 +323,7 @@ export const createAuthPlugin = authDef => authDef
  * @property {string} ApiRequestBase.path - the request path, e.g. '/api/comments/v1/acme/readme'
  * @property {{ [name: string]: string }} ApiRequestBase.params - the named path segments declared via `path`
  * @property {{ [name: string]: string }} ApiRequestBase.headers - lowercased request headers
- * @property {UserAuthInfo} ApiRequestBase.authInfo
- * @property {'r'|'rw'} ApiRequestBase.accessType
+ * @property {UserAuthInfo|null} ApiRequestBase.authInfo - what `authenticate` returned; null for an anonymous caller
  * @property {boolean} ApiRequestBase.aborted - true once the client disconnected. Check between expensive steps and return early.
  * @property {Query} ApiRequestBase.query - the url query attributes as a plain object. Coerced & validated by the method's `$query` spec when declared; raw strings otherwise. Attributes not declared in the spec pass through as raw strings.
  * @property {Body} ApiRequestBase.body - the request body, decoded by its content type and validated (json: coerced) against the method's `$body` spec when declared; `undefined` otherwise (use `bytes()`/`any()`)
@@ -344,20 +334,20 @@ export const createAuthPlugin = authDef => authDef
 /**
  * @template [Query=ApiQueryAny]
  * @template [Body=undefined]
- * @typedef {ApiRequestBase<Query, Body> & { org: string, docid: string, branch: string, room: Room }} ApiDocRequest
+ * @typedef {ApiRequestBase<Query, Body> & { org: string, docid: string, branch: string, docRef: DocRef, permissions: import('./permissions.js').DocumentPermissionsV1Normalized | null }} ApiDocumentRequest
  */
 /**
  * @template [Query=ApiQueryAny]
  * @template [Body=undefined]
- * @typedef {ApiRequestBase<Query, Body> & { org: string, docid: null, branch: null, room: null }} ApiOrgRequest
+ * @typedef {ApiRequestBase<Query, Body> & { org: string, docid: null, branch: null, docRef: null, permissions: import('./permissions.js').OrgPermissionsV1Normalized | null }} ApiOrgRequest
  */
 /**
  * @template [Query=ApiQueryAny]
  * @template [Body=undefined]
- * @typedef {ApiRequestBase<Query, Body> & { org: null, docid: null, branch: null, room: null }} ApiGlobalRequest
+ * @typedef {ApiRequestBase<Query, Body> & { org: null, docid: null, branch: null, docRef: null, permissions: import('./permissions.js').GlobalPermissionsV1Normalized | null }} ApiGlobalRequest
  */
 /**
- * @typedef {ApiDocRequest | ApiOrgRequest | ApiGlobalRequest} ApiRequest
+ * @typedef {ApiDocumentRequest | ApiOrgRequest | ApiGlobalRequest} ApiRequest
  */
 
 /**
@@ -372,16 +362,20 @@ export const createAuthPlugin = authDef => authDef
  * (binary fields arrive as base64 strings), lib0-any bodies express exact types and are validated
  * as-is - failing requests are answered 400 with `code: 'invalid-body'`.
  *
- * `accessPurpose` overrides the endpoint's `accessPurpose` for this method alone - a destructive
- * method usually deserves a stronger gate than its reads.
- *
  * @template Req
- * @typedef {{ $query?: { [key: string]: any }, $body?: { [key: string]: any }, accessPurpose?: string, handler: (req: Req) => any }} ApiMethodDef
+ * @typedef {{ $query?: { [key: string]: any }, $body?: { [key: string]: any }, handler: (req: Req) => any }} ApiMethodDef
  */
 
 /**
- * The method definitions of a custom api endpoint. `get` requires 'r' access, all other methods
- * require 'rw'. Handler return values: a `Response` is written as-is, `null`/`undefined`
+ * The method definitions of a custom api endpoint. Every method - builtin and custom alike - is
+ * gated by the `endpoint` facet of the request's permissions before the handler runs: the mask
+ * position follows the HTTP verb (`get`→`r`, `post`→`c`, `put`/`patch`→`u`, `delete`→`d`). The
+ * semantic facets are the handler's business: a handler that reads or writes the document states
+ * the facets it needs on `req.permissions` itself (`checkPermissions(req.permissions, createDocumentPermissions({ ydoc: '-r--' }))`
+ * before calling `yhub.getDoc`; `req.permissions` is null when the auth plugin answered null).
+ * Likewise identity: `req.authInfo` is null for an anonymous caller - a handler that needs one
+ * answers its own 401.
+ * Handler return values: a `Response` is written as-is, `null`/`undefined`
  * responds "204 No Content", a string responds as text/plain, a Uint8Array is sent raw
  * (application/octet-stream), `encodedAny(bytes)` sends pre-encoded lib0-any bytes
  * (application/x-lib0any), and anything else is lib0-any-encoded (application/x-lib0any). Object
@@ -402,23 +396,25 @@ export const createAuthPlugin = authDef => authDef
  * see `server.apiPrefix`) - see API.md. One name may serve
  * several routes with distinct url depths (e.g. a collection plus an item route via
  * `path: '/:commentId'`). Handlers are typed by `scope`: doc-scoped handlers receive a non-null
- * `room`, org-scoped handlers receive `org` only, global handlers neither.
+ * `docRef`, org-scoped handlers receive `org` only, global handlers neither.
  *
- * Fields: `version` (default: 'v1'), `scope` (default: 'doc'), `path` (additional named path
- * segments, e.g. '/:commentId'), `accessPurpose` (forwarded as `purpose` to the auth access
- * callback), `cors` (overrides `server.cors` for this endpoint - `null` disables cors on it).
- * Each method is defined as a `{ $query?, handler }` object - see `ApiMethodDef`.
+ * Fields: `version` (default: 'v1'), `scope` (default: 'document'), `path` (additional named path
+ * segments, e.g. '/:commentId'), `cors` (overrides `server.cors` for this endpoint - `null`
+ * disables cors on it). Each method is defined as a `{ $query?, handler }` object - see
+ * `ApiMethodDef`. Names of built-in endpoints (`ydoc`, `rollback`, `prune`, `changeset`,
+ * `activity`, `ws`) are reserved and refused in any version - one name in the `endpoint`
+ * permission facet must mean one route family.
  *
- * @typedef {{ name: string, version?: string, scope?: 'doc', path?: string, accessPurpose?: string, cors?: Partial<CorsConfig>|null } & ApiEndpointMethods<ApiDocRequest>} ApiDocEndpoint
+ * @typedef {{ name: string, version?: string, scope?: 'document', path?: string, cors?: Partial<CorsConfig>|null } & ApiEndpointMethods<ApiDocumentRequest>} ApiDocumentEndpoint
  */
 /**
- * @typedef {{ name: string, version?: string, scope: 'org', path?: string, accessPurpose?: string, cors?: Partial<CorsConfig>|null } & ApiEndpointMethods<ApiOrgRequest>} ApiOrgEndpoint
+ * @typedef {{ name: string, version?: string, scope: 'org', path?: string, cors?: Partial<CorsConfig>|null } & ApiEndpointMethods<ApiOrgRequest>} ApiOrgEndpoint
  */
 /**
- * @typedef {{ name: string, version?: string, scope: 'global', path?: string, accessPurpose?: string, cors?: Partial<CorsConfig>|null } & ApiEndpointMethods<ApiGlobalRequest>} ApiGlobalEndpoint
+ * @typedef {{ name: string, version?: string, scope: 'global', path?: string, cors?: Partial<CorsConfig>|null } & ApiEndpointMethods<ApiGlobalRequest>} ApiGlobalEndpoint
  */
 /**
- * @typedef {ApiDocEndpoint | ApiOrgEndpoint | ApiGlobalEndpoint} ApiEndpoint
+ * @typedef {ApiDocumentEndpoint | ApiOrgEndpoint | ApiGlobalEndpoint} ApiEndpoint
  */
 
 /**
@@ -434,10 +430,10 @@ export const createAuthPlugin = authDef => authDef
  * @typedef {[B] extends [undefined] ? undefined : s.ReadSchemaUnwrapped<B>} ApiBodyType
  */
 /**
- * @template {'doc'|'org'|'global'} Scope
+ * @template {'document'|'org'|'global'} Scope
  * @template Query
  * @template [Body=undefined]
- * @typedef {Scope extends 'doc' ? ApiDocRequest<Query, Body> : Scope extends 'org' ? ApiOrgRequest<Query, Body> : ApiGlobalRequest<Query, Body>} ApiScopedRequest
+ * @typedef {Scope extends 'document' ? ApiDocumentRequest<Query, Body> : Scope extends 'org' ? ApiOrgRequest<Query, Body> : ApiGlobalRequest<Query, Body>} ApiScopedRequest
  */
 
 /**
@@ -449,7 +445,7 @@ export const createAuthPlugin = authDef => authDef
  * types that method's `req.body`.
  *
  * @template {string} Name
- * @template {'doc'|'org'|'global'} [Scope='doc']
+ * @template {'document'|'org'|'global'} [Scope='document']
  * @template [QGet=undefined]
  * @template [QPost=undefined]
  * @template [QPut=undefined]
@@ -460,7 +456,7 @@ export const createAuthPlugin = authDef => authDef
  * @template [BPatch=undefined]
  * @template [BDelete=undefined]
  * @param {Name} name
- * @param {{ version?: string, scope?: Scope, path?: string, accessPurpose?: string, cors?: Partial<CorsConfig>|null, get?: { $query?: QGet, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QGet>>) => any }, post?: { $query?: QPost, $body?: BPost, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPost>, ApiBodyType<BPost>>) => any }, put?: { $query?: QPut, $body?: BPut, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPut>, ApiBodyType<BPut>>) => any }, patch?: { $query?: QPatch, $body?: BPatch, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPatch>, ApiBodyType<BPatch>>) => any }, delete?: { $query?: QDelete, $body?: BDelete, accessPurpose?: string, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QDelete>, ApiBodyType<BDelete>>) => any } }} opts
+ * @param {{ version?: string, scope?: Scope, path?: string, cors?: Partial<CorsConfig>|null, get?: { $query?: QGet, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QGet>>) => any }, post?: { $query?: QPost, $body?: BPost, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPost>, ApiBodyType<BPost>>) => any }, put?: { $query?: QPut, $body?: BPut, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPut>, ApiBodyType<BPut>>) => any }, patch?: { $query?: QPatch, $body?: BPatch, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QPatch>, ApiBodyType<BPatch>>) => any }, delete?: { $query?: QDelete, $body?: BDelete, handler: (req: ApiScopedRequest<Scope, ApiQueryType<QDelete>, ApiBodyType<BDelete>>) => any } }} opts
  * @return {ApiEndpoint & { name: Name }}
  */
 export const createApiEndpoint = (name, opts) => /** @type {any} */ ({ name, ...opts })
@@ -559,7 +555,7 @@ export const $config = s.$object({
    * Maximum time a single task may run. A compute task that exceeds it has its worker thread
    * killed - it can't be cancelled cooperatively - which rejects the task so its caller can
    * retry. A compaction task that exceeds it outside of compute is abandoned by the worker, so
-   * that its room is reclaimed by another worker instead of staying leased forever.
+   * that its document is reclaimed by another worker instead of staying leased forever.
    * (default: 30 minutes)
    */
   maxTaskDuration: s.$number.optional,
@@ -569,9 +565,9 @@ export const $config = s.$object({
   worker: s.$object({
     taskConcurrency: s.$number,
     events: s.$object({
-      docUpdate: /** @type {s.$Optional<s.Schema<(event:DocTable<{ gc: true, nongc: true, contentmap: true, contentids: true }> & { room: Room }) => void>>} */ (s.$function.optional),
-      taskStart: /** @type {s.$Optional<s.Schema<(event: { room: Room, timestamp: number }) => void>>} */ (s.$function.optional),
-      taskComplete: /** @type {s.$Optional<s.Schema<(event: { room: Room, duration: number, error: Error|null }) => void>>} */ (s.$function.optional)
+      docUpdate: /** @type {s.$Optional<s.Schema<(event:DocTable<{ gc: true, nongc: true, contentmap: true, contentids: true }> & { docRef: DocRef }) => void>>} */ (s.$function.optional),
+      taskStart: /** @type {s.$Optional<s.Schema<(event: { docRef: DocRef, timestamp: number }) => void>>} */ (s.$function.optional),
+      taskComplete: /** @type {s.$Optional<s.Schema<(event: { docRef: DocRef, duration: number, error: Error|null }) => void>>} */ (s.$function.optional)
     }).optional
   }).nullable.optional,
   server: s.$object({

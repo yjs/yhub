@@ -16,7 +16,7 @@ const log = logger.child({ module: 'stream' })
 
 /**
  * @typedef {object} StreamSubscriber
- * @property {(room: t.Room, ms:Array<t.Message & { redisClock: string }>)=>any} onStreamMessage
+ * @property {(docRef: t.DocRef, ms:Array<t.Message & { redisClock: string }>)=>any} onStreamMessage
  * @property {()=>void} destroy
  * @property {(code: number, message: string)=>void} closeWithError
  * @property {string} lastReceivedClock
@@ -27,11 +27,11 @@ const log = logger.child({ module: 'stream' })
  */
 
 /**
- * Percent-encode a room component for use inside a redis key.
+ * Percent-encode a docRef component for use inside a redis key.
  *
  * `encodeURIComponent` leaves `!'()*` unescaped, and `*` is a redis glob metacharacter - a docid
  * like `draft*` would otherwise widen any `KEYS`/`SCAN` pattern built from it to match foreign
- * rooms. The rest of redis' glob syntax (`?`, `[`, `]`, `\`, `^`) is already escaped;  `-` is
+ * documents. The rest of redis' glob syntax (`?`, `[`, `]`, `\`, `^`) is already escaped;  `-` is
  * only special inside `[..]`, which cannot occur once `[` is escaped. `:` is escaped too, so the
  * key's own separator stays unambiguous.
  *
@@ -51,11 +51,14 @@ export const uriEncode = str => encodeURIComponent(str).replace(
  */
 export const uriDecode = str => decodeURIComponent(str)
 
+// The ':room:'/'quarantine_room' redis key spellings — and these encode/decode function names,
+// which name that spelling — are deliberately kept during the room→docRef rename: changing the
+// on-wire key spelling is a rolling-upgrade concern and is deferred.
 /**
- * @param {t.Room} room
+ * @param {t.DocRef} docRef
  * @param {string} prefix
  */
-export const encodeRoomName = (room, prefix) => `${prefix}:room:${uriEncode(room.org)}:${uriEncode(room.docid)}:${uriEncode(room.branch)}`
+export const encodeRoomName = (docRef, prefix) => `${prefix}:room:${uriEncode(docRef.org)}:${uriEncode(docRef.docid)}:${uriEncode(docRef.branch)}`
 
 /**
  * @param {string} rediskey
@@ -70,11 +73,11 @@ export const decodeRoomName = (rediskey, expectedPrefix) => {
 }
 
 /**
- * @param {t.Room} room
+ * @param {t.DocRef} docRef
  * @param {string} prefix
  * @param {string} qid
  */
-export const encodeQuarantineName = (room, prefix, qid) => `${prefix}:quarantine_room:${uriEncode(room.org)}:${uriEncode(room.docid)}:${uriEncode(room.branch)}:${qid}`
+export const encodeQuarantineName = (docRef, prefix, qid) => `${prefix}:quarantine_room:${uriEncode(docRef.org)}:${uriEncode(docRef.docid)}:${uriEncode(docRef.branch)}:${qid}`
 
 /**
  * @param {string} a
@@ -203,7 +206,7 @@ export class Stream {
             -- late) and its trimMessages already ran — that invocation owns the stream's lifecycle.
             -- A late worker must not touch the stream: trimming/DELeting it here could delete the
             -- key while the successor task is still pending, so the next write would enqueue a
-            -- second compact task and spawn a concurrent task chain for the same room.
+            -- second compact task and spawn a concurrent task chain for the same document.
             if acked == 1 then
               local minidLifetime = (redis.call("TIME")[1] * 1000) - tonumber(ARGV[2])
               local minid = ARGV[1]
@@ -326,7 +329,7 @@ export class Stream {
         })
         this.subUpdates.clear()
         try {
-          const ms = await this.getMessages(array.from(this.subs.entries()).map(([room, s]) => ({ room, clock: s.lastReceivedClock })), { redisClient: redisSubscriptions, blocking: true })
+          const ms = await this.getMessages(array.from(this.subs.entries()).map(([docRef, s]) => ({ docRef, clock: s.lastReceivedClock })), { redisClient: redisSubscriptions, blocking: true })
           let nsubCounter = 0
           for (let i = 0; i < ms.length; i++) {
             const m = ms[i]
@@ -337,7 +340,7 @@ export class Stream {
                 if (filteredMessages.length > 0) {
                   nsubCounter++
                   try {
-                    s.onStreamMessage(m.room, filteredMessages)
+                    s.onStreamMessage(m.docRef, filteredMessages)
                     s.lastReceivedClock = m.lastClock
                   } catch (err) {
                     s.closeWithError(1011, 'unexpected error when sending stream data')
@@ -358,18 +361,18 @@ export class Stream {
   }
 
   /**
-   * @param {Array<{room: t.Room|string, clock: string}>} rooms room-clock pairs
+   * @param {Array<{docRef: t.DocRef|string, clock: string}>} docRefs docRef-clock pairs
    * @param {object} opts
    * @param {RedisReadClient} [opts.redisClient]
    * @param {boolean} [opts.blocking]
-   * @return {Promise<Array<{ room: t.Room, messages: Array<t.Message & { redisClock: string }>, lastClock: string, streamName: string }>>}
+   * @return {Promise<Array<{ docRef: t.DocRef, messages: Array<t.Message & { redisClock: string }>, lastClock: string, streamName: string }>>}
    */
-  async getMessages (rooms, { redisClient, blocking = false } = {}) {
-    if (rooms.length === 0) {
+  async getMessages (docRefs, { redisClient, blocking = false } = {}) {
+    if (docRefs.length === 0) {
       await promise.wait(50)
       return []
     }
-    const streams = rooms.map(asset => ({ key: s.$string.check(asset.room) ? asset.room : encodeRoomName(asset.room, this.prefix), id: asset.clock || '0' }))
+    const streams = docRefs.map(asset => ({ key: s.$string.check(asset.docRef) ? asset.docRef : encodeRoomName(asset.docRef, this.prefix), id: asset.clock || '0' }))
     log.debug({ streamCount: streams.length }, 'retrieving messages')
     const readClient = redisClient ?? this.redis
     const reads = /** @type {Array<{name: Buffer, messages: Array<{id: Buffer, message: Record<string, Buffer>}>}> | null} */ (await readClient.withTypeMapping({
@@ -379,13 +382,13 @@ export class Stream {
       blocking ? { BLOCK: 200, COUNT: 5000 } : {}
     ))
     /**
-     * @type {Array<{ room: t.Room, streamName: string, messages: Array<t.Message & { redisClock: string }>, lastClock: string }>}
+     * @type {Array<{ docRef: t.DocRef, streamName: string, messages: Array<t.Message & { redisClock: string }>, lastClock: string }>}
      */
     const res = []
     reads?.forEach(stream => {
       const streamName = stream.name.toString()
       res.push({
-        room: decodeRoomName(streamName, this.prefix),
+        docRef: decodeRoomName(streamName, this.prefix),
         streamName,
         lastClock: array.last(stream.messages).id.toString(),
         messages: stream.messages.filter(m => m.message.m != null).map(message => {
@@ -402,15 +405,15 @@ export class Stream {
   }
 
   /**
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {t.Message} m
    */
-  addMessage (room, m) {
-    return this.redis.addMessage(encodeRoomName(room, this.prefix), Buffer.from(buffer.encodeAny(m)))
+  addMessage (docRef, m) {
+    return this.redis.addMessage(encodeRoomName(docRef, this.prefix), Buffer.from(buffer.encodeAny(m)))
   }
 
   /**
-   * Move the live stream for `room` into a quarantine key with a fresh qid.
+   * Move the live stream for `docRef` into a quarantine key with a fresh qid.
    *
    * Atomically renames the live stream and inserts a NOP entry into the (now empty) live
    * key. The NOP uses field `nop` (not `m`), so every read path — which filters on
@@ -419,13 +422,13 @@ export class Stream {
    * after quarantine would otherwise see `EXISTS(live) == 0` and enqueue a second compact
    * task, causing two workers to persist the same `lastClock` concurrently (duplicate PK).
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @returns {Promise<string | null>} the qid of the created quarantine, or null if nothing to quarantine
    */
-  async quarantine (room) {
-    const live = encodeRoomName(room, this.prefix)
+  async quarantine (docRef) {
+    const live = encodeRoomName(docRef, this.prefix)
     const qid = random.uuidv4()
-    const quar = encodeQuarantineName(room, this.prefix, qid)
+    const quar = encodeQuarantineName(docRef, this.prefix, qid)
     try {
       await this.redis.multi()
         .rename(live, quar)
@@ -442,20 +445,20 @@ export class Stream {
       }
       throw e
     }
-    log.warn({ room, qid }, 'quarantined stream')
+    log.warn({ docRef, qid }, 'quarantined stream')
     return qid
   }
 
   /**
-   * List the qids of all quarantine streams for `room`.
+   * List the qids of all quarantine streams for `docRef`.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @returns {Promise<string[]>}
    */
-  async getQuarantineStreams (room) {
+  async getQuarantineStreams (docRef) {
     // safe to match on directly: `uriEncode` escapes every redis glob metacharacter, so no
-    // org/docid/branch can widen this pattern beyond its own room
-    const pattern = `${encodeQuarantineName(room, this.prefix, '')}*`
+    // org/docid/branch can widen this pattern beyond its own document
+    const pattern = `${encodeQuarantineName(docRef, this.prefix, '')}*`
     /**
      * @type {Array<string>}
      */
@@ -467,13 +470,13 @@ export class Stream {
   }
 
   /**
-   * List every quarantine stream across all rooms.
+   * List every quarantine stream across all documents.
    *
-   * @returns {Promise<Array<{ room: t.Room, qid: string }>>}
+   * @returns {Promise<Array<{ docRef: t.DocRef, qid: string }>>}
    */
   async getAllQuarantineStreams () {
     /**
-     * @type {Array<{ room: t.Room, qid: string }>}
+     * @type {Array<{ docRef: t.DocRef, qid: string }>}
      */
     const res = []
     // SCAN rather than KEYS - this is on the delete path, and KEYS walks the whole keyspace
@@ -482,7 +485,7 @@ export class Stream {
         const m = k.match(/^.*:quarantine_room:([^:]+):([^:]+):([^:]+):([^:]+)$/)
         if (m == null) throw new Error(`Malformed quarantine key: ${k}`)
         res.push({
-          room: { org: uriDecode(m[1]), docid: uriDecode(m[2]), branch: uriDecode(m[3]) },
+          docRef: { org: uriDecode(m[1]), docid: uriDecode(m[2]), branch: uriDecode(m[3]) },
           qid: m[4]
         })
       })
@@ -491,17 +494,17 @@ export class Stream {
   }
 
   /**
-   * Re-inject a quarantined stream back into the live stream for `room`, then delete the
+   * Re-inject a quarantined stream back into the live stream for `docRef`, then delete the
    * quarantine key. Each stored message is re-XADD'd to the live stream (with a fresh redis
    * clock), which re-enqueues the compact worker task if the live stream was empty.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {string} qid
    * @returns {Promise<number>} number of messages re-injected
    */
-  async unquarantine (room, qid) {
-    const quar = encodeQuarantineName(room, this.prefix, qid)
-    const live = encodeRoomName(room, this.prefix)
+  async unquarantine (docRef, qid) {
+    const quar = encodeQuarantineName(docRef, this.prefix, qid)
+    const live = encodeRoomName(docRef, this.prefix)
     // Quarantined streams are expected to be read-only after quarantine() — nothing in the
     // system writes to `quarantine_room:*` keys. We rely on that here: we XRANGE the full
     // contents, then DEL the key in a follow-up write. If a concurrent writer could add to
@@ -519,12 +522,12 @@ export class Stream {
     }
     multi.del(quar)
     await multi.exec()
-    log.info({ room, qid, count: entries.length }, 'unquarantined stream')
+    log.info({ docRef, qid, count: entries.length }, 'unquarantined stream')
     return entries.length
   }
 
   /**
-   * Drop every message from `room`'s stream, without removing the key.
+   * Drop every message from `docRef`'s stream, without removing the key.
    *
    * XTRIM, not DEL. DEL resets the stream's `last_id`, so the next entry can be assigned an id
    * that sorts *below* the clock a subscriber already advanced past within the same millisecond
@@ -534,70 +537,70 @@ export class Stream {
    * the same invariant `quarantine` protects with its NOP entry. Redis keeps a stream key alive
    * with zero entries, which is why `trimMessages` has to DEL explicitly.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    */
-  async clearMessages (room) {
-    await this.redis.xTrim(encodeRoomName(room, this.prefix), 'MAXLEN', 0)
-    log.info({ room }, 'cleared stream')
+  async clearMessages (docRef) {
+    await this.redis.xTrim(encodeRoomName(docRef, this.prefix), 'MAXLEN', 0)
+    log.info({ docRef }, 'cleared stream')
   }
 
   /**
-   * Delete every quarantined backlog of `room`. Nothing else ever removes these keys - they are
+   * Delete every quarantined backlog of `docRef`. Nothing else ever removes these keys - they are
    * not trimmed and not listed by `getActiveStreams` - so a purge that skipped them would leave
    * the document's content sitting in redis indefinitely.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @return {Promise<number>} the number of deleted quarantine streams
    */
-  async deleteQuarantineStreams (room) {
-    const qids = await this.getQuarantineStreams(room)
+  async deleteQuarantineStreams (docRef) {
+    const qids = await this.getQuarantineStreams(docRef)
     if (qids.length > 0) {
-      await this.redis.del(qids.map(qid => encodeQuarantineName(room, this.prefix, qid)))
-      log.info({ room, count: qids.length }, 'deleted quarantine streams')
+      await this.redis.del(qids.map(qid => encodeQuarantineName(docRef, this.prefix, qid)))
+      log.info({ docRef, count: qids.length }, 'deleted quarantine streams')
     }
     return qids.length
   }
 
   /**
-   * Stop workers from compacting `room`. Atomically removes the pending compact task from the
-   * worker queue and adds the room to the disabled set. While disabled, no new compact task is
-   * enqueued for the room (addMessage checks the set), so its stream is neither persisted nor
+   * Stop workers from compacting `docRef`. Atomically removes the pending compact task from the
+   * worker queue and adds the docRef to the disabled set. While disabled, no new compact task is
+   * enqueued for the document (addMessage checks the set), so its stream is neither persisted nor
    * trimmed until compaction is enabled again.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    */
-  async disableCompaction (room) {
-    await this.redis.disableCompaction(encodeRoomName(room, this.prefix))
-    log.warn({ room }, 'disabled compaction')
+  async disableCompaction (docRef) {
+    await this.redis.disableCompaction(encodeRoomName(docRef, this.prefix))
+    log.warn({ docRef }, 'disabled compaction')
   }
 
   /**
-   * Re-enable compaction for `room`. Removes the room from the disabled set and re-enqueues a
-   * compact task if its stream exists. No-op if the room wasn't disabled.
+   * Re-enable compaction for `docRef`. Removes the docRef from the disabled set and re-enqueues a
+   * compact task if its stream exists. No-op if the document wasn't disabled.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    */
-  async enableCompaction (room) {
-    await this.redis.enableCompaction(encodeRoomName(room, this.prefix))
-    log.info({ room }, 'enabled compaction')
+  async enableCompaction (docRef) {
+    await this.redis.enableCompaction(encodeRoomName(docRef, this.prefix))
+    log.info({ docRef }, 'enabled compaction')
   }
 
   /**
-   * List all rooms with disabled compaction.
+   * List all docRefs with disabled compaction.
    *
-   * @return {Promise<Array<t.Room>>}
+   * @return {Promise<Array<t.DocRef>>}
    */
-  async getDisabledCompactionRooms () {
+  async getDisabledCompactionDocRefs () {
     return (await this.redis.sMembers(this.compactionDisabledSetName)).map(k => decodeRoomName(k, this.prefix))
   }
 
   /**
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {StreamSubscriber} subscriber
    */
-  subscribe (room, subscriber) {
-    const streamName = encodeRoomName(room, this.prefix)
-    log.debug({ room, streamName }, 'subscribing')
+  subscribe (docRef, subscriber) {
+    const streamName = encodeRoomName(docRef, this.prefix)
+    log.debug({ docRef, streamName }, 'subscribing')
     const s = map.setIfUndefined(this.subUpdates, streamName, () => ({ lastReceivedClock: subscriber.lastReceivedClock, subs: /** @type {Set<StreamSubscriber>} */ (new Set()) }))
     s.lastReceivedClock = minRedisClock(s.lastReceivedClock, subscriber.lastReceivedClock)
     s.subs.add(subscriber)
@@ -605,11 +608,11 @@ export class Stream {
   }
 
   /**
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {StreamSubscriber} subscriber
    */
-  unsubscribe (room, subscriber) {
-    const streamName = encodeRoomName(room, this.prefix)
+  unsubscribe (docRef, subscriber) {
+    const streamName = encodeRoomName(docRef, this.prefix)
     const subUpdates = this.subUpdates.get(streamName)
     const subs = this.subs.get(streamName)
     subUpdates?.subs.delete(subscriber)
@@ -641,7 +644,7 @@ export class Stream {
       if (m?.message.compact != null) {
         return {
           type: /** @type {const} */ ('compact'),
-          room: decodeRoomName(m.message.compact, this.prefix),
+          docRef: decodeRoomName(m.message.compact, this.prefix),
           redisClock: m?.id
         }
       } else if (m === null) {
@@ -675,43 +678,43 @@ export class Stream {
   /**
    * Trim messages with minId. Also ensure that we only trim messages that are older than maxAgeMs.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {string} minId
    * @param {number} maxAgeMs
    * @param {string?} taskid
    */
-  async trimMessages (room, minId, maxAgeMs, taskid) {
-    await this.redis.trimMessages(encodeRoomName(room, this.prefix), minId, maxAgeMs, taskid || '')
+  async trimMessages (docRef, minId, maxAgeMs, taskid) {
+    await this.redis.trimMessages(encodeRoomName(docRef, this.prefix), minId, maxAgeMs, taskid || '')
   }
 
   /**
-   * Key prefix of every cached response of `room`, terminated by its separator so that it cannot
-   * also match a room whose docid merely starts with these characters.
+   * Key prefix of every cached response of `docRef`, terminated by its separator so that it cannot
+   * also match a document whose docid merely starts with these characters.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    */
-  _cachePrefix (room) {
-    return `${this.prefix}:cache:${uriEncode(room.org)}:${uriEncode(room.docid)}:${uriEncode(room.branch)}:`
+  _cachePrefix (docRef) {
+    return `${this.prefix}:cache:${uriEncode(docRef.org)}:${uriEncode(docRef.docid)}:${uriEncode(docRef.branch)}:`
   }
 
   /**
-   * Drop every cached response of `room`. A cache hit never reaches `getDoc`, so without this a
+   * Drop every cached response of `docRef`. A cache hit never reaches `getDoc`, so without this a
    * response cached just before a deletion would keep being served until it expired.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @return {Promise<number>} the number of dropped entries
    */
-  async deleteCachedResponses (room) {
+  async deleteCachedResponses (docRef) {
     /**
      * @type {Array<string>}
      */
     const keys = []
-    for await (const batch of this.redis.scanIterator({ MATCH: `${this._cachePrefix(room)}*`, COUNT: 1000 })) {
+    for await (const batch of this.redis.scanIterator({ MATCH: `${this._cachePrefix(docRef)}*`, COUNT: 1000 })) {
       keys.push(...batch)
     }
     if (keys.length > 0) {
       await this.redis.del(keys)
-      log.info({ room, count: keys.length }, 'dropped cached responses')
+      log.info({ docRef, count: keys.length }, 'dropped cached responses')
     }
     return keys.length
   }
@@ -719,18 +722,18 @@ export class Stream {
   /**
    * Cache results for `cacheTtl + computeTime * 2`.
    *
-   * The room leads the key so that `deleteCachedResponses` can drop everything cached for a room
-   * with an exact prefix match. Every component is `uriEncode`d: they are user-controlled, and a
+   * The docRef leads the key so that `deleteCachedResponses` can drop everything cached for a
+   * document with an exact prefix match. Every component is `uriEncode`d: they are user-controlled, and a
    * raw join would let org='a:b',docid='c' collide with org='a',docid='b:c'.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {string} endpoint
    * @param {Array<string>} args
    * @param {() => Promise<Uint8Array>} computeResult
    * @return {Promise<Uint8Array | Buffer>}
    */
-  async cachedGet (room, endpoint, args, computeResult) {
-    const key = `${this._cachePrefix(room)}${uriEncode(endpoint)}:${args.map(uriEncode).join(':')}`
+  async cachedGet (docRef, endpoint, args, computeResult) {
+    const key = `${this._cachePrefix(docRef)}${uriEncode(endpoint)}:${args.map(uriEncode).join(':')}`
     const cached = await /** @type {Promise<Buffer | null>} */ (this.redis.withTypeMapping({
       [redis.RESP_TYPES.BLOB_STRING]: Buffer
     }).get(key))

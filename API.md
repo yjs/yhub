@@ -32,14 +32,17 @@ version as well.
   * `branch=string`: Optionally, define a custom branch. Changes won't be automatically synced with other branches.
   * `customAttributions=string`: optional comma-separated `key:value` pairs (e.g. `source:ai,model:gpt4`). All updates sent through this connection will include these custom attributions in the contentmap, stored as `insert:<key>` / `delete:<key>` attribution attributes alongside the standard ones.
 
-Permissions on the socket (see [Permissions](#permissions)): the upgrade requires ydoc `r`, and
-`gc=false` additionally requires full history access (`history.from === 0`) — refused with `403`,
-never silently downgraded to `gc=true`. An anonymous caller (see [Anonymous callers](#contracts))
-may not hold ydoc `u` — attributions carry the userid — so that upgrade is refused with `401`
-after the permission check. After the upgrade each message is gated by its own facet:
-doc updates require ydoc `u` and presence broadcasts awareness `u` (each dropped independently —
-a read-only connection with awareness `u` still broadcasts cursors), and presence is only relayed
-to connections holding awareness `r`.
+Permissions on the socket (see [Permissions](#permissions)): the websocket route is the endpoint
+named `ws` in the `endpoint` facet (resolved through `'*'` like any other name). The upgrade
+requires ydoc `r` and `endpoint.ws` `r`, and `gc=false` additionally requires full history access
+(`history.from === 0`) — refused with `403`, never silently downgraded to `gc=true`. An anonymous
+caller (see [Anonymous callers](#contracts)) may not hold the write — ydoc `u` together with
+`endpoint.ws` `u` — because attributions carry the userid, so that upgrade is refused with `401`
+after the permission check. After the upgrade each message is gated by its own facets: doc
+updates require ydoc `u` and `endpoint.ws` `u`, presence broadcasts awareness `u` alone (each
+dropped independently — a read-only connection with awareness `u` still broadcasts cursors; note
+the awareness field of `PATCH /ydoc` sits behind that route's `u` instead), and presence is only
+relayed to connections holding awareness `r`.
 
 ### Errors
 
@@ -54,7 +57,7 @@ when codes are added:
 
 | Close code | Meaning | Reconnect? |
 |---|---|---|
-| `4400`–`4499` | permanent yhub errors — `4401` permission revoked: the permissions the socket consumes (the ydoc mask, the awareness mask, or `gc=false`'s full-history requirement) changed on a re-check (see [`yhub.recheckAuth`](#yhubrecheckauthdocref-opts); exported as `wsCloseAuthRevoked`), `4404` document deleted (see [`yhub.deleteDoc`](#yhubdeletedocdocref-opts); exported as `wsCloseDocDeleted`) | no — act first (e.g. re-authenticate, or drop the local copy), then reconnect deliberately |
+| `4400`–`4499` | permanent yhub errors — `4401` permission revoked: the permissions the socket consumes (the ydoc mask, the awareness mask, the effective `ws` endpoint mask, or `gc=false`'s full-history requirement) changed on a re-check (see [`yhub.recheckAuth`](#yhubrecheckauthdocref-opts); exported as `wsCloseAuthRevoked`), `4404` document deleted (see [`yhub.deleteDoc`](#yhubdeletedocdocref-opts); exported as `wsCloseDocDeleted`) | no — act first (e.g. re-authenticate, or drop the local copy), then reconnect deliberately |
 | `4500`–`4599` | reserved for transient yhub errors (none sent today) | yes |
 | `1011` | internal error — initial sync, message handling, or stream relay failed | yes |
 | `1013` | try again later — backpressure limit exceeded, or `authorize` threw during a re-check (the permission backend is down, not the grant revoked) | yes |
@@ -239,7 +242,7 @@ time, so their requested range is unbounded — refused with `403` for bounded r
 silently clamped.
 
 * `POST /api/rollback/v1/{org}/{docid}` body: `{ from?: number, to?: number, by?: string, contentIds?: Y.ContentIds, customAttributions?: Array<{ k: string, v: string }>, withCustomAttributions?: Array<{ k: string, v: string }> }`
-  * `from`/`to`: unix timestamp range filter
+  * `from`/`to`: unix timestamp range filter — non-negative integers (`400` otherwise); `to` is lifted to the clamped `from`, so it never lies below the granted ray
   * `by=string`: comma-separated list of user-ids that matches the attributions
   * `contentIds`: Changeset that describes the changes between two versions.
   * `customAttributions`: optional array of key-value pairs to attach as custom attributions to the rollback changes themselves (the undo operation).
@@ -265,7 +268,7 @@ rendered snapshot reconstructs the document from before any ray, so the ray boun
 *attributions*, never the content.
 
 * `GET /api/changeset/v1/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, ydoc?: boolean, contentIds?: Y.ContentIds, delta?: boolean, attributions?: boolean, withCustomAttributions?: string }`
-  * `from`/`to`: unix timestamp range filter
+  * `from`/`to`: unix timestamp range filter — non-negative integers (`400` otherwise); `to` is lifted to the clamped `from`, so it never lies below the granted ray
   * `by=string`: comma-separated list of user-ids that matches the attributions
   * `withCustomAttributions=string`: filter by custom attributions using `key:value` pairs, comma-separated (e.g. `source:import,tag:v2`). Only changes matching all specified attributions are included.
   * `contentIds`: Changeset that describes the changes between two versions. @todo not implemented
@@ -292,7 +295,7 @@ Access: the `history` facet, with the same clamping and ydoc-read rule as
 [changeset](#changeset).
 
 * `GET /api/activity/v1/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, groupMaxGap?: number, groupMaxDuration?: number, delta?: boolean, withCustomAttributions?: string, customAttributions?: boolean, contentIds?: string }`
-  * `from`/`to`: unix timestamp range filter
+  * `from`/`to`: unix timestamp range filter — non-negative integers (`400` otherwise); `to` is lifted to the clamped `from`, so it never lies below the granted ray
   * `by=string`: comma-separated list of user-ids to filter by
   * `withCustomAttributions=string`: filter by custom attributions using `key:value` pairs, comma-separated (e.g. `source:import,tag:v2`). Only changes matching all specified attributions are included.
   * `contentIds=string`: base64-encoded `Y.ContentIds` binary. When provided, only activity entries whose content intersects the given content set are returned. Encode via `buffer.toBase64(Y.encodeContentIds(contentIds))` (`import * as buffer from 'lib0/buffer'`).
@@ -362,7 +365,7 @@ range-containment rule as [rollback](#rollback) — bounded rays refuse requests
 them, never clamp.
 
 * `POST /api/prune/v1/{org}/{docid}` body: `{ from?: number, to?: number, by?: string, contentIds?: Y.ContentIds, withCustomAttributions?: Array<{ k: string, v: string }> }`
-  * `from`/`to`: unix timestamp range filter. Only content whose insertion **and** deletion *both* fall within `[from, to]` is pruned.
+  * `from`/`to`: unix timestamp range filter — non-negative integers (`400` otherwise); `to` is lifted to the clamped `from`, so it never lies below the granted ray. Only content whose insertion **and** deletion *both* fall within `[from, to]` is pruned.
   * `by=string`: comma-separated list of user-ids that matches the attributions
   * `contentIds`: restrict pruning to the changes described by a `Y.ContentIds`
   * `withCustomAttributions`: only prune content whose attributions match all specified key-value pairs
@@ -415,9 +418,9 @@ await prune({ from: activity[i].from, to: activity[j].to })
 Define your own rest endpoints — served from the same process and guarded by the same auth plugin
 as the built-in endpoints — via the `server.api` config section. Every endpoint — built-in and
 custom — lives under `/{apiPrefix}/{name}/{version}/...`. The built-in endpoint names (`ydoc`,
-`rollback`, `prune`, `changeset`, `activity`, plus `ws` for the websocket route) are **refused
-for custom endpoints in any version**: one name in the `endpoint` permission facet must mean one
-route family (see [Permissions](#permissions)), and a custom route squatting a builtin name
+`rollback`, `prune`, `changeset`, `activity`, plus `ws` — the websocket route's own entry in the
+facet) are **refused for custom endpoints in any version**: one name in the `endpoint` permission
+facet must mean one route family (see [Permissions](#permissions)), and a custom route squatting a builtin name
 would blur what an `endpoint: { ydoc: ... }` grant covers — registration throws at startup. The prefix defaults
 to `api` and can be renamed via `server.apiPrefix` (e.g. `apiPrefix: 'collaboration'` serves
 everything — built-ins included — under `/collaboration/{name}/{version}/...`). It must be a
@@ -614,7 +617,7 @@ A **document** permission object carries the full facet vocabulary; the coarser 
   awareness: '-ru-',               // presence: r = receive, u = broadcast own
   history: { from: 0, rollback: true, prune: false }, // attributed history from `from` (unix ms, 0 = full)
   delete: ['soft'],                // deletion kinds - never implied by a write mask
-  endpoint: { '*': '-r--', comments: 'crud' } // custom endpoints; '*' is the fallback entry
+  endpoint: { '*': '-r--', comments: 'crud' } // rest endpoints + the websocket route ('ws'); '*' is the fallback entry
 }
 // endpoint-only scopes:
 { type: 'permissions:org:v1', endpoint: { docs: '-r--' } }       // likewise :branch: / :global:
@@ -628,13 +631,14 @@ each facet gates:
 
 | Facet | Gates |
 |---|---|
-| `ydoc` `r` | ws upgrade + sync, `GET /ydoc`, changeset/activity `?ydoc=`/`?delta=` |
-| `ydoc` `u` | ws doc updates, `PATCH /ydoc` `update` (creates the document when absent) — needs an identity, see [Anonymous callers](#contracts) |
+| `ydoc` `r` | ws upgrade + sync (with `endpoint.ws` `r`), `GET /ydoc`, changeset/activity `?ydoc=`/`?delta=` |
+| `ydoc` `u` | ws doc updates (with `endpoint.ws` `u`), `PATCH /ydoc` `update` (creates the document when absent) — needs an identity, see [Anonymous callers](#contracts) |
 | `awareness` `r` / `u` | receiving / broadcasting presence (ws and `GET`/`PATCH /ydoc`) |
 | `history.from` | changeset/activity, clamped to the ray; `gc=false` needs `from: 0` |
 | `history.rollback` / `.prune` | `POST /rollback` / `POST /prune`, with range containment — rollback needs an identity |
 | `delete` `['soft'\|'hard']` | `DELETE /ydoc` by kind |
-| `endpoint` | custom endpoints by name, `'*'` as fallback (an explicit `'----'` blocks it) |
+| `endpoint` | rest endpoints — builtin and custom — and the websocket route (`ws`) by name, `'*'` as fallback (an explicit `'----'` blocks it) |
+| `endpoint.ws` `r` / `u` | the websocket route: `r` may connect, `u` may submit doc updates over it |
 
 Every rest endpoint — builtin and custom alike — checks the mask position matching its HTTP
 verb (`get`→`r`, `post`→`c`, `put`/`patch`→`u`, `delete`→`d`) before the handler runs — crud
@@ -718,7 +722,8 @@ mapping where `authorize` replaces `getAccessType`:
 | `null` | `null` | `null` |
 
 The `'r'` rows grant only the GET verb class on endpoints — exactly the old rule (non-GET
-required `'rw'`). Deliberately excluded: `rollback`, `prune`, `delete` — the old implicit
+required `'rw'`); the websocket route (`ws`) resolves through `'*'`, so both rows keep their
+socket — a read-only one for `'r'`. Deliberately excluded: `rollback`, `prune`, `delete` — the old implicit
 "`rw` ⇒ rollback/delete" is gone; grant them by name (compose with `documentPermissionsUnion`). And
 deliberately included: awareness `'-ru-'` in the `'r'` row — read-only connections now broadcast
 presence, where the old blanket write gate silently swallowed their cursors.
@@ -1149,11 +1154,11 @@ changed and connected clients should be affected immediately, not just on their 
 directive is distributed via the Redis stream, so it reaches connections on **all** servers. Each
 matching connection re-evaluates `auth.authorize('document', docRef, user)` and is disconnected
 with close code `4401` (`'permission revoked'`) when the permissions the socket consumes changed:
-the `ydoc` mask, the `awareness` mask, or — on `gc=false` connections — whether full history is
-still granted. Downgrades and upgrades alike bounce (the client reconnects, re-authenticates, and
-resyncs at its new access level; a still-revoked client is rejected with `403 Forbidden` at
-upgrade), while REST-only facets (`delete`, `history.rollback`/`prune`, `endpoint`) never bounce a
-live connection. A failing auth plugin fails closed: the connection is disconnected, but with the
+the `ydoc` mask, the `awareness` mask, the effective `ws` endpoint mask, or — on `gc=false`
+connections — whether full history is still granted. Downgrades and upgrades alike bounce (the
+client reconnects, re-authenticates, and resyncs at its new access level; a still-revoked client
+is rejected with `403 Forbidden` at upgrade), while REST-only facets (`delete`,
+`history.rollback`/`prune`, the other `endpoint` entries) never bounce a live connection. A failing auth plugin fails closed: the connection is disconnected, but with the
 transient close code `1013` (`'auth recheck failed'`) — clients keep reconnecting and recover once
 the auth backend does.
 

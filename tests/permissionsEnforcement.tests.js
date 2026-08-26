@@ -103,8 +103,8 @@ const recordCloseCodes = (provider, closeCodes) => {
  */
 export const testWsReadOnlyBroadcastsAwareness = async tc => {
   resetPermTable()
-  permTable.writer = { document: docPerms({ ydoc: 'cru-', awareness: '-ru-', history: { from: 0 } }) }
-  permTable.viewer = { document: docPerms({ ydoc: '-r--', awareness: '-ru-', history: { from: 0 } }) }
+  permTable.writer = { document: docPerms({ ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } }) }
+  permTable.viewer = { document: docPerms({ ydoc: '-r--', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } }) }
   const { createWsClient } = await utils.createTestCase(tc)
   const writer = await createWsClient({ waitForSync: true, wsUrl: enfWsUrl, wsParams: { user: 'writer' } })
   writer.ydoc.get().setAttr('a', 42)
@@ -127,9 +127,9 @@ export const testWsReadOnlyBroadcastsAwareness = async tc => {
  */
 export const testWsAwarenessGates = async tc => {
   resetPermTable()
-  permTable.bob = { document: docPerms({ ydoc: 'cru-', awareness: '-ru-', history: { from: 0 } }) }
-  permTable.carol = { document: docPerms({ ydoc: 'cru-', awareness: '-r--', history: { from: 0 } }) }
-  permTable.dave = { document: docPerms({ ydoc: '-r--', awareness: '--u-', history: { from: 0 } }) }
+  permTable.bob = { document: docPerms({ ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } }) }
+  permTable.carol = { document: docPerms({ ydoc: 'cru-', awareness: '-r--', history: { from: 0 }, endpoint: { '*': 'crud' } }) }
+  permTable.dave = { document: docPerms({ ydoc: '-r--', awareness: '--u-', history: { from: 0 }, endpoint: { '*': 'crud' } }) }
   const { createWsClient } = await utils.createTestCase(tc)
   const bob = await createWsClient({ waitForSync: true, wsUrl: enfWsUrl, wsParams: { user: 'bob' } })
   bob.provider.awareness.setLocalStateField('user', { name: 'bob' })
@@ -151,18 +151,22 @@ export const testWsAwarenessGates = async tc => {
 }
 
 /**
- * Upgrade refusals: no grant, a grant without ydoc read, and `gc=false` without full history
- * (§9.2 - the nongc doc is the full history, so a bounded ray refuses instead of silently
- * downgrading).
+ * Upgrade refusals: no grant, a grant without ydoc read, a grant without read on the `ws`
+ * endpoint entry (no `endpoint` at all, `ws` write-only, `ws` blocked under a `'*'` fallback),
+ * and `gc=false` without full history (§9.2 - the nongc doc is the full history, so a bounded
+ * ray refuses instead of silently downgrading).
  *
  * @param {t.TestCase} tc
  */
 export const testWsUpgradeRefusals = async tc => {
   resetPermTable()
-  permTable.writer = { document: docPerms({ ydoc: 'cru-', awareness: '-ru-', history: { from: 0 } }) }
-  permTable.writeonly = { document: docPerms({ ydoc: '--u-', history: { from: 0 } }) }
-  permTable.bounded = { document: docPerms({ ydoc: 'cru-', history: { from: 5 } }) }
-  permTable.full = { document: docPerms({ ydoc: '-r--', history: { from: 0 } }) }
+  permTable.writer = { document: docPerms({ ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } }) }
+  permTable.writeonly = { document: docPerms({ ydoc: '--u-', history: { from: 0 }, endpoint: { '*': 'crud' } }) }
+  permTable.noroute = { document: docPerms({ ydoc: 'cru-', history: { from: 0 } }) }
+  permTable.wsWriteOnly = { document: docPerms({ ydoc: 'cru-', history: { from: 0 }, endpoint: { '*': 'crud', ws: '--u-' } }) }
+  permTable.wsBlocked = { document: docPerms({ ydoc: 'cru-', history: { from: 0 }, endpoint: { '*': 'crud', ws: false } }) }
+  permTable.bounded = { document: docPerms({ ydoc: 'cru-', history: { from: 5 }, endpoint: { '*': 'crud' } }) }
+  permTable.full = { document: docPerms({ ydoc: '-r--', history: { from: 0 }, endpoint: { '*': 'crud' } }) }
   const { createWsClient } = await utils.createTestCase(tc)
   const writer = await createWsClient({ waitForSync: true, wsUrl: enfWsUrl, wsParams: { user: 'writer' } })
   writer.ydoc.get().setAttr('a', 42)
@@ -174,6 +178,9 @@ export const testWsUpgradeRefusals = async tc => {
   }
   await refused({ wsParams: { user: 'nobody' } })
   await refused({ wsParams: { user: 'writeonly' } })
+  await refused({ wsParams: { user: 'noroute' } })
+  await refused({ wsParams: { user: 'wsWriteOnly' } })
+  await refused({ wsParams: { user: 'wsBlocked' } })
   await refused({ gc: false, wsParams: { user: 'bounded' } })
   // the same bounded ray syncs on a gc=true connection, and full history syncs on gc=false
   await createWsClient({ waitForSync: true, wsUrl: enfWsUrl, wsParams: { user: 'bounded' } })
@@ -181,10 +188,36 @@ export const testWsUpgradeRefusals = async tc => {
 }
 
 /**
+ * The `ws` endpoint entry's `u` gates doc updates over the socket next to ydoc `u`: a connection
+ * granted ydoc `u` but only `ws: '-r--'` syncs and stays open while its edits are dropped; with
+ * `ws: '-ru-'` they flow.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testWsEndpointWriteGate = async tc => {
+  resetPermTable()
+  permTable.writer = { document: docPerms({ ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } }) }
+  permTable.routeReader = { document: docPerms({ ydoc: 'cru-', history: { from: 0 }, endpoint: { ws: '-r--' } }) }
+  permTable.routeWriter = { document: docPerms({ ydoc: 'cru-', history: { from: 0 }, endpoint: { ws: '-ru-' } }) }
+  const { createWsClient } = await utils.createTestCase(tc)
+  const writer = await createWsClient({ waitForSync: true, wsUrl: enfWsUrl, wsParams: { user: 'writer' } })
+  writer.ydoc.get().setAttr('a', 42)
+  const reader = await createWsClient({ waitForSync: true, wsUrl: enfWsUrl, wsParams: { user: 'routeReader' } })
+  t.assert(reader.ydoc.get().getAttr('a') === 42, 'ws r opens the socket')
+  reader.ydoc.get().setAttr('hidden', '!')
+  await promise.wait(800)
+  t.assert(writer.ydoc.get().getAttr('hidden') == null, 'doc edits are dropped without ws u')
+  t.assert(reader.provider.wsconnected, 'a dropped write does not close the connection')
+  const routeWriter = await createWsClient({ waitForSync: true, wsUrl: enfWsUrl, wsParams: { user: 'routeWriter' } })
+  routeWriter.ydoc.get().setAttr('shown', '!')
+  await promise.until(5000, () => writer.ydoc.get().getAttr('shown') === '!')
+}
+
+/**
  * The recheck compares only the leaves the socket consumes (§9.6): REST-only facet changes
- * (delete/rollback/endpoint - and, on gc=true connections, the history ray) never bounce a live
- * connection; a changed ydoc or awareness mask closes 4401 (upgrades included); a failing
- * plugin closes 1013.
+ * (delete/rollback/other endpoint entries - and, on gc=true connections, the history ray) never
+ * bounce a live connection; a changed ydoc, awareness, or effective `ws` mask closes 4401
+ * (upgrades included); a failing plugin closes 1013.
  *
  * @param {t.TestCase} tc
  */
@@ -197,20 +230,27 @@ export const testWsRecheckComparesWsLeaves = async tc => {
   const closeCodes = []
   recordCloseCodes(eve.provider, closeCodes)
   await t.groupAsync('rest-only facet changes do not bounce the connection', async () => {
-    permTable.eve = { document: docPerms({ ydoc: 'cru-', awareness: '-ru-', history: { from: 5 } }) }
+    permTable.eve = { document: docPerms({ ydoc: 'cru-', awareness: '-ru-', history: { from: 5 }, endpoint: { '*': 'crud', comments: '-r--' } }) }
     await yhub.recheckAuth(defaultDocRef, { users: ['eve'] })
     await promise.wait(800)
-    t.assert(eve.provider.wsconnected && closeCodes.length === 0, 'delete/rollback/endpoint/bounded-ray changes are invisible to a gc=true socket')
+    t.assert(eve.provider.wsconnected && closeCodes.length === 0, 'delete/rollback/other-endpoint/bounded-ray changes are invisible to a gc=true socket')
   })
   await t.groupAsync('a changed awareness mask bounces 4401', async () => {
-    permTable.eve = { document: docPerms({ ydoc: 'cru-', awareness: '-r--', history: { from: 5 } }) }
+    permTable.eve = { document: docPerms({ ydoc: 'cru-', awareness: '-r--', history: { from: 5 }, endpoint: { '*': 'crud' } }) }
     await yhub.recheckAuth(defaultDocRef, { users: ['eve'] })
     await promise.until(5000, () => closeCodes.includes(wsCloseAuthRevoked))
   })
   await t.groupAsync('a ydoc mask upgrade bounces 4401 too', async () => {
     await promise.until(5000, () => eve.provider.wsconnected)
     closeCodes.length = 0
-    permTable.eve = { document: docPerms({ ydoc: 'crud', awareness: '-r--', history: { from: 5 } }) }
+    permTable.eve = { document: docPerms({ ydoc: 'crud', awareness: '-r--', history: { from: 5 }, endpoint: { '*': 'crud' } }) }
+    await yhub.recheckAuth(defaultDocRef, { users: ['eve'] })
+    await promise.until(5000, () => closeCodes.includes(wsCloseAuthRevoked))
+  })
+  await t.groupAsync('a changed ws endpoint entry bounces 4401', async () => {
+    await promise.until(5000, () => eve.provider.wsconnected)
+    closeCodes.length = 0
+    permTable.eve = { document: docPerms({ ydoc: 'crud', awareness: '-r--', history: { from: 5 }, endpoint: { '*': 'crud', ws: '-r--' } }) }
     await yhub.recheckAuth(defaultDocRef, { users: ['eve'] })
     await promise.until(5000, () => closeCodes.includes(wsCloseAuthRevoked))
   })
@@ -221,7 +261,7 @@ export const testWsRecheckComparesWsLeaves = async tc => {
     await yhub.recheckAuth(defaultDocRef, { users: ['eve'] })
     await promise.until(5000, () => closeCodes.includes(1013))
     t.assert(!closeCodes.includes(wsCloseAuthRevoked))
-    permTable.eve = { document: docPerms({ ydoc: 'crud', awareness: '-r--', history: { from: 5 } }) }
+    permTable.eve = { document: docPerms({ ydoc: 'crud', awareness: '-r--', history: { from: 5 }, endpoint: { '*': 'crud' } }) }
     await promise.until(5000, () => eve.provider.wsconnected)
   })
 }
@@ -234,13 +274,13 @@ export const testWsRecheckComparesWsLeaves = async tc => {
  */
 export const testWsRecheckFullHistoryBit = async tc => {
   resetPermTable()
-  permTable.hist = { document: docPerms({ ydoc: 'cru-', history: { from: 0 } }) }
+  permTable.hist = { document: docPerms({ ydoc: 'cru-', history: { from: 0 }, endpoint: { '*': 'crud' } }) }
   const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
   const hist = await createWsClient({ waitForSync: true, gc: false, wsUrl: enfWsUrl, wsParams: { user: 'hist' } })
   /** @type {Array<number>} */
   const closeCodes = []
   recordCloseCodes(hist.provider, closeCodes)
-  permTable.hist = { document: docPerms({ ydoc: 'cru-', history: { from: 5 } }) }
+  permTable.hist = { document: docPerms({ ydoc: 'cru-', history: { from: 5 }, endpoint: { '*': 'crud' } }) }
   await yhub.recheckAuth(defaultDocRef, { users: ['hist'] })
   await promise.until(5000, () => closeCodes.includes(wsCloseAuthRevoked))
 }
@@ -384,7 +424,7 @@ export const testRollbackPruneRayContainment = async tc => {
  */
 export const testHistoryClampAndContentLeak = async tc => {
   resetPermTable()
-  permTable.writer = { document: docPerms({ ydoc: 'cru-', awareness: '-ru-', history: { from: 0 } }) }
+  permTable.writer = { document: docPerms({ ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } }) }
   const { org, createWsClient } = await utils.createTestCase(tc)
   const writer = await createWsClient({ waitForSync: true, wsUrl: enfWsUrl, wsParams: { user: 'writer' } })
   writer.ydoc.get().setAttr('early', 1)
@@ -428,7 +468,8 @@ export const testHistoryClampAndContentLeak = async tc => {
  * history and deletion work on a grant, and a missing grant is 403 - never 401. Writing the
  * document is the exception - attributions carry the userid - and it is refused with 401 only
  * *after* the permission check: an anonymous caller holding ydoc `u` gets 401 from PATCH/rollback
- * and at the ws upgrade, one without `u` gets the ordinary 403.
+ * and at the ws upgrade (the write there is ydoc `u` with ws `u` - without the route's `u` the
+ * socket opens read-only), one without `u` gets the ordinary 403.
  *
  * @param {t.TestCase} tc
  */
@@ -479,7 +520,12 @@ export const testAnonymousAccess = async tc => {
     const client = createWsClient({ wsUrl: enfWsUrl })
     await promise.wait(1000)
     t.assert(client.ydoc.get().getAttr('a') == null, 'an anonymous socket may not hold ydoc u - the upgrade is refused')
-    // the same grant with an identity writes
+    // the write is ydoc `u` together with ws `u`: without the route's `u` the same grant opens
+    // a read-only anonymous socket
+    permTable.anonymous = { document: docPerms({ ydoc: 'cru-', awareness: '-ru-', history: { from: 0, rollback: true }, endpoint: { '*': 'crud', ws: '-r--' } }) }
+    const readOnly = await createWsClient({ waitForSync: true, wsUrl: enfWsUrl })
+    t.assert(readOnly.ydoc.get().getAttr('a') === 42, 'the anonymous socket syncs when it cannot write')
+    // the same grant with an identity writes (over rest - the socket stays read-only)
     permTable.named = permTable.anonymous
     t.assert((await fetch(`http://${enfHost}/api${doc}`, { ...patchBody({ update: Y.encodeStateAsUpdate(update) }), headers: { 'x-user': 'named', 'content-type': 'application/octet-stream' } })).status === 200)
     await promise.until(5000, () => writer.ydoc.get().getAttr('anon') === true)

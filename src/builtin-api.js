@@ -153,8 +153,9 @@ const changesetEndpoint = createApiEndpoint('changeset', {
   get: {
     $query: {
       by: s.$string.optional,
-      from: s.$number.optional,
-      to: s.$number.optional,
+      // unix ms - validated as uints here so a bad bound is a 400, never a requirement error
+      from: s.$uint.optional,
+      to: s.$uint.optional,
       ydoc: s.$boolean.optional,
       delta: s.$boolean.optional,
       attributions: s.$boolean.optional,
@@ -174,7 +175,8 @@ const changesetEndpoint = createApiEndpoint('changeset', {
       const h = req.permissions?.history
       const from = math.max(query.from ?? 0, h ? h.from : 0)
       checkPermissions(req.permissions, createDocumentPermissions({ history: { from }, ...((includeYdoc || includeDelta) && { ydoc: '-r--' }) }))
-      const to = query.to ?? number.MAX_SAFE_INTEGER
+      // lifted to the clamped `from`, so a `to` below the ray never inverts the window
+      const to = math.max(query.to ?? number.MAX_SAFE_INTEGER, from)
       const by = query.by || ''
       const includeAttributions = query.attributions ?? false
       const withCustomAttributions = query.withCustomAttributions ? parseCustomAttributionsParam(query.withCustomAttributions) : null
@@ -202,8 +204,9 @@ const activityEndpoint = createApiEndpoint('activity', {
   get: {
     $query: {
       by: s.$string.optional,
-      from: s.$number.optional,
-      to: s.$number.optional,
+      // see changeset
+      from: s.$uint.optional,
+      to: s.$uint.optional,
       delta: s.$boolean.optional,
       ydoc: s.$boolean.optional,
       attributions: s.$boolean.optional,
@@ -228,7 +231,7 @@ const activityEndpoint = createApiEndpoint('activity', {
       const from = math.max(query.from ?? 0, h ? h.from : 0)
       checkPermissions(req.permissions, createDocumentPermissions({ history: { from }, ...((includeYdoc || includeDelta) && { ydoc: '-r--' }) }))
       const by = query.by || ''
-      const to = math.min(query.to ?? number.MAX_SAFE_INTEGER, from)
+      const to = math.max(query.to ?? number.MAX_SAFE_INTEGER, from) // see changeset
       const includeAttributions = query.attributions ?? false
       const limit = query.limit ?? number.MAX_SAFE_INTEGER
       const reverse = query.order === 'desc'

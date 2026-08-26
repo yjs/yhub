@@ -255,8 +255,9 @@ export const registerApi = (yhub, app) => {
   registered.add('ws/v1/2')
   // builtin endpoint names are reserved: one name in the `endpoint` permission facet must mean
   // one route family, and a custom route squatting e.g. `ydoc` (in any version) would blur what
-  // an `endpoint: { ydoc: ... }` grant covers. 'ws' reserves the websocket route's name beyond
-  // the depth-keyed entry above.
+  // an `endpoint: { ydoc: ... }` grant covers. 'ws' is the websocket route's own entry in the
+  // facet (`r` opens the socket, `u` admits doc updates - see server.js), reserved beyond the
+  // depth-keyed entry above.
   const builtinNames = new Set([...builtinApi.map(e => e.name), 'ws'])
   ;[...builtinApi, ...(yhub.conf.server?.api ?? [])].forEach(endpoint => {
     const builtin = builtinApi.includes(endpoint)

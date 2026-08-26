@@ -329,8 +329,9 @@ export class YHub {
    * redis stream to all servers. Each matching connection re-evaluates
    * `auth.authorize('document', docRef, user)` and is disconnected (close code 4401
    * 'permission revoked') when the permissions the socket consumes changed - the `ydoc` mask,
-   * the `awareness` mask, or (on `gc=false` connections) whether full history is still granted;
-   * REST-only facets (`delete`, `history.rollback`/`prune`, `endpoint`) never bounce a live
+   * the `awareness` mask, the effective `ws` endpoint mask, or (on `gc=false` connections)
+   * whether full history is still granted; REST-only facets (`delete`,
+   * `history.rollback`/`prune`, the other `endpoint` entries) never bounce a live
    * connection. The client then reconnects, re-authenticates, and resyncs at its new access
    * level. A failing auth plugin fails closed with the transient close code 1013 ('auth recheck
    * failed'), so clients reconnect once the auth backend recovers. With `forceDisconnect: true`,

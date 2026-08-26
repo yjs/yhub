@@ -13,6 +13,7 @@ import { mergeUpdates } from './y-utils.js'
 import { registerApi, resolveApiPrefix, resolvePermissions, normalizeAuthorizeAnswer, apiError, isApiError, statusLine } from './api.js'
 import { originAllowed, resolveCors } from './cors.js'
 import { parseCustomAttributionsParam } from './builtin-api.js'
+import { endpointPermission } from './permissions.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'ws' })
@@ -182,7 +183,7 @@ class WSUser {
     this.isClosed = false
     this.isDestroyed = false
     this.lastReceivedClock = '0'
-    this.log = log.child({ clientId: this.id, userid: this.userid, gc, ydoc: permissions.ydoc, awareness: permissions.awareness, docRef })
+    this.log = log.child({ clientId: this.id, userid: this.userid, gc, ydoc: permissions.ydoc, awareness: permissions.awareness, ws: endpointPermission(permissions, 'ws'), docRef })
   }
 
   /**
@@ -260,15 +261,15 @@ class WSUser {
 
   /**
    * Re-evaluate this connection's permissions via the auth plugin (see `YHub.recheckAuth`) and
-   * compare the leaves the socket consumes: the `ydoc` mask, the `awareness` mask, and - for
-   * `gc=false` connections - whether full history is still granted (the nongc doc *is* the full
-   * history). Any difference disconnects, downgrades and upgrades alike - the client
-   * reconnects, re-authenticates, and resyncs at its new access level (updating the gates in
-   * place would silently drop a downgraded client's updates and diverge it from the server).
-   * REST-only facets (`delete`, `history.rollback`/`prune`, `endpoint`) never bounce a live
-   * connection. Fails closed: an auth plugin error also disconnects, but with the transient
-   * code 1013 instead of 4401 - the client keeps reconnecting and is re-checked at upgrade, so
-   * it recovers once the auth backend does.
+   * compare the leaves the socket consumes: the `ydoc` mask, the `awareness` mask, the effective
+   * `ws` endpoint mask, and - for `gc=false` connections - whether full history is still granted
+   * (the nongc doc *is* the full history). Any difference disconnects, downgrades and upgrades
+   * alike - the client reconnects, re-authenticates, and resyncs at its new access level
+   * (updating the gates in place would silently drop a downgraded client's updates and diverge
+   * it from the server). REST-only facets (`delete`, `history.rollback`/`prune`, the other
+   * `endpoint` entries) never bounce a live connection. Fails closed: an auth plugin error also
+   * disconnects, but with the transient code 1013 instead of 4401 - the client keeps
+   * reconnecting and is re-checked at upgrade, so it recovers once the auth backend does.
    */
   async recheckAuth () {
     try {
@@ -276,8 +277,8 @@ class WSUser {
       if (this.isDestroyed) return
       const p = normalizeAuthorizeAnswer('document', answer)
       const cur = this.permissions
-      if (p === null || p.ydoc !== cur.ydoc || p.awareness !== cur.awareness || (!this.gc && !(p.history !== false && p.history.from === 0))) {
-        this.log.info({ ydoc: p?.ydoc, awareness: p?.awareness }, 'permissions changed, disconnecting')
+      if (p === null || p.ydoc !== cur.ydoc || p.awareness !== cur.awareness || endpointPermission(p, 'ws') !== endpointPermission(cur, 'ws') || (!this.gc && !(p.history !== false && p.history.from === 0))) {
+        this.log.info({ ydoc: p?.ydoc, awareness: p?.awareness, ws: p && endpointPermission(p, 'ws') }, 'permissions changed, disconnecting')
         this.close(wsCloseAuthRevoked, 'permission revoked')
       } else {
         this.permissions = p
@@ -374,10 +375,12 @@ const registerWebsocketServer = (yhub, app, prefix, cors) => {
         const customAttributions = parseCustomAttributionsParam(req.getQuery('customAttributions'))
         const { authInfo, permissions } = await resolvePermissions(yhub, req, 'document', docRef)
         const userid = authInfo?.userid ?? null
-        if (permissions === null || permissions.ydoc[1] !== 'r') throw apiError(403, 'insufficient access', { userid })
-        // attributions carry the userid: an anonymous caller may hold ydoc `u` but cannot use it,
-        // and a socket that could never write is refused up front - authenticate, then reconnect
-        if (authInfo == null && permissions.ydoc[2] === 'u') throw apiError(401, 'unauthenticated')
+        // the websocket route is the endpoint named `ws`: its `r` opens the socket, its `u`
+        // (with ydoc `u`) admits doc updates - see the `message` handler
+        if (permissions === null || permissions.ydoc[1] !== 'r' || endpointPermission(permissions, 'ws')[1] !== 'r') throw apiError(403, 'insufficient access', { userid })
+        // attributions carry the userid: an anonymous caller may hold the write but cannot use
+        // it, and a socket that could never write is refused up front - authenticate, then reconnect
+        if (authInfo == null && permissions.ydoc[2] === 'u' && endpointPermission(permissions, 'ws')[2] === 'u') throw apiError(401, 'unauthenticated')
         // the nongc doc *is* the full history - a bounded history ray is unenforceable on it, so
         // gc=false demands the full ray explicitly rather than silently downgrading to gc=true
         if (!gc && !(permissions.history !== false && permissions.history.from === 0)) throw apiError(403, 'gc=false requires full history access', { userid })
@@ -462,14 +465,16 @@ const registerWebsocketServer = (yhub, app, prefix, cors) => {
         const decoder = decoding.createDecoder(message)
         switch (decoding.readVarUint(decoder)) {
           case 0: { // sync message
-            // silently dropped without update access - same treatment as the old blanket gate
-            if (user.permissions.ydoc[2] !== 'u') return
+            // silently dropped without update access on both the data (ydoc `u`) and the route
+            // (endpoint `ws` `u`) - same treatment as the old blanket gate
+            if (user.permissions.ydoc[2] !== 'u' || endpointPermission(user.permissions, 'ws')[2] !== 'u') return
             const syncMessageType = decoding.readVarUint(decoder)
             if (syncMessageType === protocol.messageSyncUpdate || syncMessageType === protocol.messageSyncStep2) {
               const update = decoding.readVarUint8Array(decoder)
               if (update.byteLength > 3) {
-                // an anonymous socket never holds ydoc `u` (upgrade invariant, kept by recheckAuth:
-                // a newly granted `u` differs from the stored mask and closes the connection)
+                // an anonymous socket never holds ydoc `u` and ws `u` together (upgrade invariant,
+                // kept by recheckAuth: a newly granted mask differs from the stored one and closes
+                // the connection)
                 const contentmap = createContentMapFromParams(Y.createContentIdsFromUpdate(update), /** @type {string} */ (user.userid), user.customAttributions)
                 yhub.stream.addMessage(user.docRef, { type: 'ydoc:update:v1', contentmap, update }).catch(handleErr)
               }

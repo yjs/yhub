@@ -148,6 +148,7 @@ Facet semantics and the exact gate each one owns:
 | `history.prune` | destroy history permanently | `POST /prune`; same containment rule |
 | `delete` contains `'soft'` / `'hard'` | `DELETE /ydoc` (`?hard=true` requires `'hard'`) — this document on this branch | replaces `accessPurpose: 'delete'` — enforced, not advisory. `hard` was previously programmatic-only; granting it over REST is now an explicit permission |
 | `endpointPermission(perms, name)` | call rest endpoints - builtin and custom (§8) | `createApiHandler` |
+| `endpointPermission(perms, 'ws')` | `r`: open the websocket (with ydoc `r`); `u`: submit doc updates over it (with ydoc `u`) | `server.js` upgrade; ws `message` case 0 |
 
 Creation is **not** a document facet — the document does not exist yet on that branch, so the
 object describing it cannot carry its own creation right. V1 therefore keeps today's creation
@@ -341,7 +342,11 @@ semantic facets answer "may it touch this data" — checked *inside* the handler
 the facets they use; a custom handler that reads or writes the document checks `req.permissions`
 itself). Registration **refuses custom endpoints reusing a builtin name** in any version — one
 name in the facet must mean one route family; the previously blessed custom
-`name: 'ydoc', version: 'v2'` pattern is withdrawn (breaking; amend API.md).
+`name: 'ydoc', version: 'v2'` pattern is withdrawn (breaking; amend API.md). The websocket route
+is the endpoint named `ws`: its `r` opens the socket (next to ydoc `r`), its `u` admits doc
+updates over it (next to ydoc `u`) — resolved through `'*'` like any name, so a grant without any
+`endpoint` entry opens no socket. Presence broadcasts stay on awareness `u` alone (unlike the
+awareness field of `PATCH /ydoc`, which sits behind that route's `u`).
 
 An entry is a plain CRUD mask:
 
@@ -432,15 +437,16 @@ These are the rules that keep the granular model sound; each has a concrete expl
    checking would half-apply). Partial permission ⇒ whole request 403. Same invariant documented
    for custom handlers: all checks before the first side effect.
 5. **Per-type ws gates.** The blanket `if (!user.hasWriteAccess) return` in `message` splits:
-   case 0 needs ydoc `u`, case 1 needs awareness `u` — read-only connections can finally
-   broadcast cursors when granted. Fan-out: awareness relayed only when awareness has `r` (one
+   case 0 needs ydoc `u` and endpoint `ws` `u`, case 1 needs awareness `u` — read-only
+   connections can finally broadcast cursors when granted. Fan-out: awareness relayed only when awareness has `r` (one
    char compare per batch in `onStreamMessage`, plus the initial awareness send in `open`).
 6. **Recheck compares the ws-relevant leaves only.** The connection stores its normalized view
    (on the `WSUser`, next to `userid`); recheck recomputes and compares exactly the leaves the
-   socket consumes: the `ydoc` mask, the `awareness` mask, and — for `gc=false` connections —
-   whether `history.from === 0` still holds. Any difference ⇒ close 4401 (downgrades *and*
-   upgrades: the frozen view must not silently widen), plugin throw ⇒ 1013. REST-only facets
-   (`delete`, `rollback`, `prune`, `endpoint`) never bounce live connections; bounded-ray tweaks
+   socket consumes: the `ydoc` mask, the `awareness` mask, the effective `ws` endpoint mask, and
+   — for `gc=false` connections — whether `history.from === 0` still holds. Any difference ⇒
+   close 4401 (downgrades *and* upgrades: the frozen view must not silently widen), plugin throw
+   ⇒ 1013. REST-only facets (`delete`, `rollback`, `prune`, the other `endpoint` entries) never
+   bounce live connections; bounded-ray tweaks
    never bounce `gc=true` connections. (An interned ws projection was designed and dropped — the
    per-connection view is small and a plain three-leaf compare is simpler than any sharing
    scheme.)

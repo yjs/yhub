@@ -403,7 +403,8 @@ export const createAuthorize = handlers => async (scope, resourceId, user) => (a
  * disables cors on it). Each method is defined as a `{ $query?, handler }` object - see
  * `ApiMethodDef`. Names of built-in endpoints (`ydoc`, `rollback`, `prune`, `changeset`,
  * `activity`, `ws`) are reserved and refused in any version - one name in the `endpoint`
- * permission facet must mean one route family.
+ * permission facet must mean one route family (`ws` is the websocket route's entry: `r` opens
+ * the socket, `u` admits doc updates over it).
  *
  * @typedef {{ name: string, version?: string, scope?: 'document', path?: string, cors?: Partial<CorsConfig>|null } & ApiEndpointMethods<ApiDocumentRequest>} ApiDocumentEndpoint
  */

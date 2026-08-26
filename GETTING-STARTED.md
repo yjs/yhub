@@ -37,7 +37,7 @@ const yhub = await createYHub({
           awareness: '-ru-', // r = receive presence, u = broadcast own
           history: { from: 0, rollback: true, prune: false }, // from = 0 grants full history
           delete: ['soft'],  // destructive rights are opted into by name — never implied by a write mask
-          endpoint: { '*': '-r--', comments: 'crud' } // custom endpoints, '*' = fallback
+          endpoint: { '*': '-r--', comments: 'crud' } // rest endpoints + the websocket route ('ws'), '*' = fallback
         })
       })
     })

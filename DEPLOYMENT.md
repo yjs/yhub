@@ -139,7 +139,7 @@ const auth = createAuthPlugin({
         awareness: '-ru-',                    // r = receive presence, u = broadcast own
         history: { from: 0 },                 // from-ray, unix ms; 0 = full history
         delete: [],                           // deletion kinds granted by name, e.g. ['soft']
-        endpoint: { '*': access.write ? 'crud' : '-r--' }  // custom endpoints, '*' = fallback
+        endpoint: { '*': access.write ? 'crud' : '-r--' }  // rest endpoints + the websocket route ('ws'), '*' = fallback
       }
     }
   })

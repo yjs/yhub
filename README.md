@@ -252,7 +252,7 @@ const docPermissions = {
     ydoc: 'cru-',         // positional crud mask: create/read/update/delete, '-' denies
     awareness: '-ru-',    // r = receive presence, u = broadcast own
     history: { from: 0 }, // from-ray, unix ms; 0 grants the full history
-    endpoint: { '*': 'crud' } // custom endpoints, '*' = fallback
+    endpoint: { '*': 'crud' } // rest endpoints + the websocket route ('ws'), '*' = fallback
   },
   r: {
     type: 'permissions:document:v1',

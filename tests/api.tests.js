@@ -126,6 +126,15 @@ export const testActivityYdocRoundTrip = async tc => {
   await promise.wait(3000)
   const all = (await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false`)).activity
   t.assert(all.length === 3)
+  // `from` alone keeps everything at or after it (the window once collapsed to `[from, from]`),
+  // and a `to` below `from` is lifted to it
+  t.assert((await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false&from=${all[1].from}`)).activity.length === 2)
+  t.assert((await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false&from=${all[1].from}&to=1`)).activity.length === 1)
+  // bounds are validated as uints by the query validator - never a requirement error (500)
+  for (const path of [`/api/activity/v1/${org}/${ydoc.guid}?from=1.5`, `/api/activity/v1/${org}/${ydoc.guid}?to=-1`, `/api/changeset/v1/${org}/${ydoc.guid}?from=1.5`]) {
+    const bad = await fetch(`http://${utils.yhubHost}${path}`, { headers: { accept: 'application/json' } })
+    t.assert(bad.status === 400 && (await bad.json()).code === 'invalid-query', `${path} is a 400`)
+  }
   const res = await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false&from=${all[2].from}&ydoc=true&delta=true&attributions=true`)
   t.assert(res.ydoc != null && Array.isArray(res.activity) && res.activity.length === 1, 'ydoc=true wraps { ydoc, activity }')
   const shared = new Y.Doc({ gc: false })

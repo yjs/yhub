@@ -172,7 +172,7 @@ export class Cluster {
     const tasks = worker.flatMap(/** @param {any} w */ w => w.tasks)
     const failed = tasks.filter(/** @param {any} t */ t => t.error).length
     // A failing compaction (a full S3 backend is the usual cause) leaves the
-    // room uncompacted and re-triggers forever, so every downstream number is
+    // document uncompacted and re-triggers forever, so every downstream number is
     // wrong. Shout about it, and record it so the written report carries the
     // caveat too — a warning that only ever reached the console would let a
     // committed RESULTS.md present broken rows as measurements.
@@ -189,25 +189,25 @@ export class Cluster {
   }
 
   /**
-   * `XLEN` of a room's stream. Growth over time means compaction is not keeping
+   * `XLEN` of a document's stream. Growth over time means compaction is not keeping
    * up, and every sync is getting more expensive as a result.
-   * @param {{ org?: string, docid: string, branch?: string }} room
+   * @param {{ org?: string, docid: string, branch?: string }} docRef
    */
-  async streamLen (room) {
+  async streamLen (docRef) {
     const enc = encodeURIComponent
-    const key = `${config.dbs.redisPrefix}:room:${enc(room.org ?? config.hub.org)}:${enc(room.docid)}:${enc(room.branch ?? 'main')}`
+    const key = `${config.dbs.redisPrefix}:room:${enc(docRef.org ?? config.hub.org)}:${enc(docRef.docid)}:${enc(docRef.branch ?? 'main')}`
     try { return await this.redis.xLen(key) } catch (_) { return 0 }
   }
 
   /**
-   * Rows in `yhub_ydoc_v1`, for one room or for the whole table. Every
-   * uncompacted row of a room is an extra S3 GET on every sync of that room.
-   * @param {{ org?: string, docid: string, branch?: string }} [room]
+   * Rows in `yhub_ydoc_v1`, for one document or for the whole table. Every
+   * uncompacted row of a document is an extra S3 GET on every sync of that document.
+   * @param {{ org?: string, docid: string, branch?: string }} [docRef]
    */
-  async pgRows (room) {
-    const rows = room == null
+  async pgRows (docRef) {
+    const rows = docRef == null
       ? await this.sql`SELECT count(*)::int AS n FROM yhub_ydoc_v1`
-      : await this.sql`SELECT count(*)::int AS n FROM yhub_ydoc_v1 WHERE org = ${room.org ?? config.hub.org} AND docid = ${room.docid} AND branch = ${room.branch ?? 'main'}`
+      : await this.sql`SELECT count(*)::int AS n FROM yhub_ydoc_v1 WHERE org = ${docRef.org ?? config.hub.org} AND docid = ${docRef.docid} AND branch = ${docRef.branch ?? 'main'}`
     return rows[0].n
   }
 
@@ -222,20 +222,20 @@ export class Cluster {
    * immediately, and the compaction that follows is attributed to the next
    * benchmark instead of this one.
    *
-   * @param {{ org?: string, docid: string, branch?: string }} room
+   * @param {{ org?: string, docid: string, branch?: string }} docRef
    * @param {number} [timeoutMs]
    */
-  async awaitWrite (room, timeoutMs = 60000) {
+  async awaitWrite (docRef, timeoutMs = 60000) {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
-      if (await this.streamLen(room) > 0 || await this.pgRows(room) > 0) return true
+      if (await this.streamLen(docRef) > 0 || await this.pgRows(docRef) > 0) return true
       await promise.wait(50)
     }
     return false
   }
 
   /**
-   * Block until the worker has drained every pending task and no room stream is
+   * Block until the worker has drained every pending task and no document stream is
    * left, i.e. the system is quiescent and measurements are not racing a
    * background compaction.
    * @param {number} [timeoutMs]
@@ -317,7 +317,7 @@ export const stopCluster = async () => {
  * Benchmarks reuse a cluster when their settings match, so without this the
  * documents seeded by Y2.1 are still in S3 when Y6.6 runs. At 40 MB apiece that
  * is tens of GB over a full run, and a full backend makes compaction *fail*
- * rather than slow down. Every benchmark seeds its own uniquely-named rooms and
+ * rather than slow down. Every benchmark seeds its own uniquely-named documents and
  * drains before returning, so nothing downstream depends on what is dropped.
  */
 export const reclaimStorage = async () => {

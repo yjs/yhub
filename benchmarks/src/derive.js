@@ -39,7 +39,7 @@ export const derivedSection = report => {
   const awSmall = last(report, 'Y1.5', 'µs per state', r => r.state === 'small')
   const awLarge = last(report, 'Y1.5', 'µs per state', r => r.state === 'large')
   const cConn = last(report, 'Y2.2', 'MB per connection')
-  const cRoom = last(report, 'Y2.1', 'MB per room')
+  const cDoc = last(report, 'Y2.1', 'MB per doc')
   const kSync = last(report, 'Y2.4', 'peak MB per concurrent sync')
   const perObserver = last(report, 'Y4.1', 'µs cpu per update per observer')
   const perObserverAw = last(report, 'Y4.2', 'µs cpu per update per observer')
@@ -53,7 +53,7 @@ export const derivedSection = report => {
     { symbol: 't_aw (bare cursor)', meaning: 'awareness merge, per participant state, per subscriber', value: val(awSmall, 'µs'), from: 'Y1.5' },
     { symbol: 't_aw (full presence)', meaning: 'the same with a realistic presence payload', value: val(awLarge, 'µs'), from: 'Y1.5' },
     { symbol: 'c_conn', meaning: 'server memory per idle connection', value: val(cConn, 'MB', 4), from: 'Y2.2' },
-    { symbol: 'c_room', meaning: 'server memory per subscribed room', value: val(cRoom, 'MB', 4), from: 'Y2.1' },
+    { symbol: 'c_doc', meaning: 'server memory per subscribed document', value: val(cDoc, 'MB', 4), from: 'Y2.1' },
     { symbol: 'k_sync', meaning: 'peak server memory per concurrent sync, per MB of document', value: val(kSync, 'MB', 2), from: 'Y2.4' },
     { symbol: 'per-observer relay', meaning: 'server cpu per update per observer, documents only', value: val(perObserver, 'µs'), from: 'Y4.1' },
     { symbol: 'per-observer relay + presence', meaning: 'the same with awareness enabled', value: val(perObserverAw, 'µs'), from: 'Y4.2' },
@@ -86,7 +86,7 @@ export const derivedSection = report => {
 
   const tiers = [
     { '#': 1, operation: 'Websocket upgrade + auth', predicted: 'A', ...check(cConn, '%s MB per connection at the largest N', () => true), evidence: 'Y2.2' },
-    { '#': 2, operation: 'Room subscription', predicted: 'A', ...check(cRoom, '%s MB per room at the largest N', () => true), evidence: 'Y2.1 vs Y2.2' },
+    { '#': 2, operation: 'Document subscription', predicted: 'A', ...check(cDoc, '%s MB per doc at the largest N', () => true), evidence: 'Y2.1 vs Y2.2' },
     { '#': 3, operation: 'Idle connection', predicted: 'A', ...check(last(report, 'Y2.3', 'drift (MB)'), '%s MB drift while idle', d => Math.abs(d) < 10), evidence: 'Y2.3' },
     { '#': 4, operation: 'Write an update', predicted: 'B', ...check(spread('Y3.1', 'µs cpu per update'), 'cpu per update varies %s× across document sizes', v => v < 2), evidence: 'Y3.1' },
     { '#': 5, operation: 'Deliver a batch to one subscriber', predicted: 'B', ...check(spread('Y4.1', 'propagation p50 (ms)'), 'per-edit latency varies %s× as observers grow', v => v < 4), evidence: 'Y4.1' },
@@ -108,7 +108,7 @@ export const derivedSection = report => {
     renderTable(constants),
     '',
     '```',
-    'server_mem   ≈ B_srv + n_conn·c_conn + n_room·c_room + concurrent_syncs·k_sync·S',
+    'server_mem   ≈ B_srv + n_conn·c_conn + n_doc·c_doc + concurrent_syncs·k_sync·S',
     'server_cpu/s ≈ Σ_r [ u_r·n_r·(t_merge_small + t_encode) + a_r·n_r·t_aw(n_r) ]',
     '             + j·( t_fetch(S) + t_sv(S) + t_merge(S, n_pending) )',
     '             + (Σ_r u_r)·t_contentids',

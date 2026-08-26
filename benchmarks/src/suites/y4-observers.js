@@ -17,7 +17,7 @@ import { propagationRow } from './y3-writes.js'
 const EDITS = 50
 
 /**
- * Send `EDITS` updates into a room and report what the fan-out cost.
+ * Send `EDITS` updates into a document and report what the fan-out cost.
  *
  * @param {import('../cluster.js').Cluster} cluster
  * @param {RawClient} writer
@@ -162,7 +162,7 @@ export default {
           const cluster = await getCluster({ servers })
           const docid = `y44-${servers}`
           const writer = await new RawClient({ port: cluster.ports[0], docid }).connect()
-          // spread the observers evenly over the pods, all on the same room
+          // spread the observers evenly over the pods, all on the same document
           const observers = await connectClients({ count: n, target: i => ({ port: cluster.ports[i % servers], docid }) })
           const { elapsed, metrics } = await driveEdits(cluster, writer, observers)
           const prop = await measurePropagation({ writer, observers, count: 20 })
@@ -181,7 +181,7 @@ export default {
           writer.close()
           await cluster.drain()
         }
-        report.note('Confirms fan-out cost partitions across pods: total CPU should stay roughly flat while per-pod CPU and the worst pod\'s event-loop delay fall with the number of servers. This is what justifies "add a server" as the remedy for the awareness cost in Y4.2 and Y4.3. Note that all pods share one Redis, and the Redis read is shared across all rooms in a process (`src/stream.js:292`).')
+        report.note('Confirms fan-out cost partitions across pods: total CPU should stay roughly flat while per-pod CPU and the worst pod\'s event-loop delay fall with the number of servers. This is what justifies "add a server" as the remedy for the awareness cost in Y4.2 and Y4.3. Note that all pods share one Redis, and the Redis read is shared across all documents in a process (`src/stream.js:292`).')
       }
     }
   ]

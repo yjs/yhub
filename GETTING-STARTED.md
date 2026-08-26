@@ -9,7 +9,7 @@ npm install @y/hub
 ## Basic Setup
 
 ```javascript
-import { createYHub, createAuthPlugin } from '@y/hub'
+import { createYHub, createAuthPlugin, createAuthorize } from '@y/hub'
 import * as env from 'lib0/environment'
 
 const yhub = await createYHub({
@@ -22,12 +22,24 @@ const yhub = await createYHub({
   server: {
     port: 4400,
     auth: createAuthPlugin({
-      async readAuthInfo(req) {
+      async authenticate (req) {
+        // Return anything identifying the user, or null for an anonymous caller (authorize is
+        // then asked with user = null). Throw apiError(401, ...) to reject a credential.
         return { userid: 'anonymous' }
       },
-      async getAccessType(authInfo, room) {
-        return 'rw' // 'rw' | 'r' | null
-      }
+      // One handler per permission scope ('document' | 'branch' | 'org' | 'global') - scopes
+      // without a handler deny, and each handler's return type is forced to match its scope.
+      authorize: createAuthorize({
+        // docRef is the { org, docid, branch } triple. Return the permission object, or null to deny.
+        document: async (docRef, user) => ({
+          type: 'permissions:document:v1',
+          ydoc: 'cru-',      // positional crud mask: create/read/update/delete, '-' denies
+          awareness: '-ru-', // r = receive presence, u = broadcast own
+          history: { from: 0, rollback: true, prune: false }, // from = 0 grants full history
+          delete: ['soft'],  // destructive rights are opted into by name — never implied by a write mask
+          endpoint: { '*': '-r--', comments: 'crud' } // rest endpoints + the websocket route ('ws'), '*' = fallback
+        })
+      })
     })
   },
   worker: {
@@ -52,16 +64,25 @@ const yhub = await createYHub({
   server: {
     port: 4400,
     auth: createAuthPlugin({
-      async readAuthInfo(req) {
+      async authenticate (req) {
         const token = req.getQuery('yauth')
-        const payload = await jwt.decodeJwt(publicKey, token)
-        return { userid: payload.yuserid }
+        // Verify the token and return its payload — authorize receives it as `user`
+        const { payload } = await jwt.verifyJwt(publicKey, token)
+        return payload
       },
-      async getAccessType(authInfo, room) {
-        // Check permissions based on authInfo.userid and room
-        // room = { org: string, docid: string, branch: string }
-        return 'rw'
-      }
+      // Map the token's claims to a permission object, or return null to deny.
+      authorize: createAuthorize({
+        document: async (docRef, user) => {
+          const write = !user.readonly // e.g. a `readonly` claim issued at sign-in
+          return {
+            type: 'permissions:document:v1',
+            ydoc: write ? 'cru-' : '-r--',
+            awareness: '-ru-',
+            history: { from: 0 },
+            endpoint: { '*': write ? 'crud' : '-r--' }
+          }
+        }
+      })
     })
   },
   worker: { taskConcurrency: 5 }
@@ -83,15 +104,24 @@ const publicJwk = JSON.stringify(await ecdsa.exportKeyJwk(keypair.publicKey))
 
 ```javascript
 createAuthPlugin({
-  async readAuthInfo(req) {
+  async authenticate (req) {
     const cookies = parseCookies(req.getHeader('cookie'))
     const session = await validateSession(cookies.sessionId)
     return { userid: session.userId }
   },
-  async getAccessType(authInfo, room) {
-    const hasAccess = await checkUserPermission(authInfo.userid, room.org, room.docid)
-    return hasAccess ? 'rw' : null
-  }
+  authorize: createAuthorize({
+    document: async (docRef, user) => {
+      const hasAccess = await checkUserPermission(user.userid, docRef.org, docRef.docid)
+      if (!hasAccess) return null // denial is a value — throwing means infrastructure failure
+      return {
+        type: 'permissions:document:v1',
+        ydoc: 'cru-',
+        awareness: '-ru-',
+        history: { from: 0 },
+        endpoint: { '*': 'crud' }
+      }
+    }
+  })
 })
 ```
 
@@ -253,7 +283,7 @@ services:
     environment:
       REDIS: redis://redis:6379
       POSTGRES: postgres://yhub:yhub@postgres:5432/yhub
-      AUTH_PUBLIC_KEY: ${AUTH_PUBLIC_KEY}
+      AUTH_PUBLIC_KEY: ${AUTH_PUBLIC_KEY}  # the app's token verification key — consumed by your auth plugin, not by yhub
     ports: ["4400:4400"]
     depends_on: [redis, postgres]
     deploy:

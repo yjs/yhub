@@ -38,8 +38,8 @@ const log = logger.child({ module: 'agents' })
  */
 
 /**
- * Run an LLM agent task against `room`. The handler receives a freshly hydrated
- * `Y.Doc` (snapshot of the room's current state) and a new `Awareness` bound to
+ * Run an LLM agent task against `docRef`. The handler receives a freshly hydrated
+ * `Y.Doc` (snapshot of the document's current state) and a new `Awareness` bound to
  * it. Mutations to either are streamed to all connected clients in real time
  * with attributions derived from `author` / `promptBy`. After the handler
  * resolves the agent's awareness is cleared (immediately or after a delay), and
@@ -49,19 +49,19 @@ const log = logger.child({ module: 'agents' })
  *
  * @template R
  * @param {import('./index.js').YHub} yhub
- * @param {import('./types.js').Room} room
+ * @param {import('./types.js').DocRef} docRef
  * @param {AgentTaskOptions} opts
  * @param {(ydoc: Y.Doc, awareness: awarenessProtocol.Awareness) => Promise<R> | R} handler
  * @returns {Promise<R>}
  */
 export const agentTask = async (
   yhub,
-  room,
+  docRef,
   { clearAwareness = 0, author, displayedAuthor = author, promptBy, customAttributions = [] } = /** @type {AgentTaskOptions} */ ({}),
   handler
 ) => {
-  const doctable = await yhub.getDoc(room, { gc: true })
-  if (doctable.tombstone != null) throw new DocDeletedError(room, doctable.tombstone)
+  const doctable = await yhub.getDoc(docRef, { gc: true })
+  if (doctable.tombstone != null) throw new DocDeletedError(docRef, doctable.tombstone)
   const ydoc = new Y.Doc()
   if (doctable.gcDoc) Y.applyUpdate(ydoc, doctable.gcDoc)
   const awareness = new awarenessProtocol.Awareness(ydoc)
@@ -73,7 +73,7 @@ export const agentTask = async (
    * @param {string} ctx
    */
   const captureErr = (err, ctx) => {
-    log.error({ err, room }, ctx)
+    log.error({ err, docRef }, ctx)
     if (pendingError == null) pendingError = /** @type {Error} */ (err)
   }
 
@@ -96,7 +96,7 @@ export const agentTask = async (
       insertAttrs,
       deleteAttrs
     ))
-    yhub.stream.addMessage(room, { type: 'ydoc:update:v1', update, contentmap })
+    yhub.stream.addMessage(docRef, { type: 'ydoc:update:v1', update, contentmap })
       .catch(err => captureErr(err, 'failed to forward agent ydoc update'))
   }
 
@@ -107,7 +107,7 @@ export const agentTask = async (
     const clients = added.concat(updated, removed)
     if (clients.length === 0) return
     const update = /** @type {Uint8Array<ArrayBuffer>} */ (awarenessProtocol.encodeAwarenessUpdate(awareness, clients))
-    yhub.stream.addMessage(room, { type: 'awareness:v1', update })
+    yhub.stream.addMessage(docRef, { type: 'awareness:v1', update })
       .catch(err => captureErr(err, 'failed to forward agent awareness update'))
   }
 
@@ -139,7 +139,7 @@ export const agentTask = async (
     const meta = awareness.meta.get(awareness.clientID)
     const disconnect = protocol.encodeAwarenessUserDisconnected(awareness.clientID, meta?.clock ?? 0)
     try {
-      await yhub.stream.addMessage(room, { type: 'awareness:v1', update: disconnect })
+      await yhub.stream.addMessage(docRef, { type: 'awareness:v1', update: disconnect })
     } catch (err) {
       captureErr(err, 'failed to clear agent awareness')
     }

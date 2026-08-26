@@ -31,8 +31,8 @@ const skip = report => {
 }
 
 /**
- * Put the traced document into a room, compacted, exactly as a real deployment
- * would hold it.
+ * Seed the traced document, compacted, exactly as a real deployment would hold
+ * it.
  *
  * @param {import('../cluster.js').Cluster} cluster
  * @param {string} docid
@@ -279,7 +279,7 @@ export default {
             dropped: writers.filter(w => w.dropped).length
           })
         }
-        report.note('Everyone editing the same real document at once — writes and fan-out concentrated on one room, with a worker compacting ~51 MB behind them. `s3 written` against the bytes the clients actually sent is the amplification this document costs: each of these edits is a few hundred bytes and each compaction rewrites the whole thing.')
+        report.note('Everyone editing the same real document at once — writes and fan-out concentrated on one document, with a worker compacting ~51 MB behind them. `s3 written` against the bytes the clients actually sent is the amplification this document costs: each of these edits is a few hundred bytes and each compaction rewrites the whole thing.')
       }
     },
     {

@@ -2,17 +2,69 @@
 
 ## [Unreleased]
 
+> **Upgrading:** the auth plugin interface changed. Rewrite `server.auth` from
+> `{ readAuthInfo, getAccessType }` to `{ authenticate, authorize }` (migration table below), and in
+> custom endpoints replace `scope: 'doc'` with `'document'`, `req.room` with `req.docRef`,
+> `req.accessType` with `req.permissions`, and drop `accessPurpose`.
+
 ### Breaking Changes
 
-- **Proper CORS support replaces the hardcoded `Access-Control-Allow-Origin: *`, and cross-origin browser access is closed by default.** Api requests and WebSocket upgrades from a foreign `Origin` are rejected with `403` (rest denials carry a json `{ error, code: 'origin-not-allowed' }` body and are logged with `origin` and `host`) unless allowed by the new cors config; same-origin pages and non-browser clients keep working without any configuration. Same-origin follows Go 1.25's `http.CrossOriginProtection`: `Sec-Fetch-Site` when the browser sends it — an http page targeting the https api is denied — with the scheme-blind `Origin`/`Host` comparison as fallback, so TLS-terminating proxies keep working. To open the api to your app's origin(s), set `server.cors` (`createYHub`) or `CORS_ORIGIN` (CLI / docker image) — `'*'` restores the old wide-open behavior and logs a warning. ([API docs](API.md#cors), [`src/cors.js`](src/cors.js), [`src/api.js`](src/api.js), [`src/server.js`](src/server.js), [`bin/conf.js`](bin/conf.js))
+- **Permissions replace `AccessType`.** The auth plugin no longer answers `'r' | 'rw' | null`; it answers a typed permission object that states exactly what a subject may do with a document, and yhub enforces every part of it, on REST and on the websocket alike:
+
+  ```js
+  auth: createAuthPlugin({
+    // who is asking - or null for an anonymous caller (reject a bad credential with apiError(401, ..))
+    authenticate: async req => ({ userid: await verifyToken(req) }),
+    // what they may do - one handler per scope, scopes without a handler deny
+    authorize: createAuthorize({
+      document: async ({ org, docid, branch }, user) => ({
+        type: 'permissions:document:v1',
+        ydoc: 'cru-',              // crud mask: r = read/sync, u = write (c and d are reserved)
+        awareness: '-ru-',         // r = receive presence, u = broadcast it
+        history: { from: 0, rollback: true, prune: false }, // attributed history from `from` (unix ms, 0 = all)
+        delete: ['soft'],          // allowed forms of DELETE /ydoc: 'soft' and/or 'hard'
+        endpoint: { '*': 'crud' }  // rest routes by name ('*' = fallback), by verb: get→r, post→c, put/patch→u, delete→d
+      })
+    })
+  })
+  ```
+
+  What this changes for you:
+  - **Destructive rights are granted by name.** `rollback`, `prune` and `delete` are no longer implied by write access. `DELETE /ydoc?hard=true` becomes possible over REST once `'hard'` is granted (it was programmatic-only).
+  - **Every REST endpoint is gated by the `endpoint` facet** - builtin and custom, before the handler runs. The websocket is the endpoint named `ws` (`r` opens it, `u` allows sending updates). A grant without any `endpoint` entry opens nothing; `endpoint: { '*': 'crud' }` is the "everything" spelling.
+  - **History is a ray.** `changeset`/`activity` only show history from `history.from` on (the query's `from` is clamped up to it), `?ydoc=`/`?delta=` additionally need ydoc `r`, and `gc=false` needs `from: 0`. Rollback and prune requests reaching before the ray are refused with `403`, never clamped. `from`/`to` must be non-negative integers (`400` otherwise).
+  - **Anonymous callers exist.** `authenticate` returning `null` means "nobody", and `authorize` is still asked (public documents). yhub never answers `401` for a *missing* credential, with one exception: writing the document needs an identity because attributions carry the userid - `401 { code: 'unauthenticated' }` on `PATCH /ydoc`, `POST /rollback` and the websocket upgrade.
+  - **Read-only connections can broadcast presence** when granted awareness `u` (their cursors used to be dropped).
+  - **Denial is a value, a throw is an outage.** Return `null` to deny. A throw from either hook answers `503` (websocket re-check: close `1013`); a branded `apiError(status, ..)` passes through. An invalid or wrong-scope answer is a logged `500`, never a silent denial.
+  - **`403` bodies name what is missing:** `{ error, code: 'missing-permission', required }`, where `required` is the permission object the request needed.
+  - **Custom endpoints:** `req.permissions` (the normalized view, or `null`) replaces `req.accessType`; a handler checks the facets it touches with `checkPermissions(req.permissions, createDocumentPermissions({ ydoc: '-r--' }))`. `accessPurpose` is gone, and the built-in names (`ydoc`, `rollback`, `prune`, `changeset`, `activity`, `ws`) can no longer be reused by custom endpoints in any version.
+
+  Migrating from `AccessType`: `'rw'` → `{ type: 'permissions:document:v1', ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } }`; `'r'` → the same with `ydoc: '-r--'` and `endpoint: { '*': '-r--' }`; `null` → `null`. Org/global scopes: `{ type: 'permissions:org:v1', endpoint: { '*': 'crud' } }` (`'-r--'` for `'r'`). Add `rollback`, `prune` and `delete` deliberately. ([API docs](API.md#permissions), [migration](API.md#migrating-from-accesstype), [design](proposals/permissions.md))
+
+- **`Room` is now `DocRef`.** The `{ org, docid, branch }` triple is a `DocRef` throughout the API: `Room` → `DocRef`, `$room` → `$docRef`, `req.room` → `req.docRef`, `DocDeletedError.room` → `.docRef`, worker event payloads' `room` → `docRef`. Routes, query params, SQL columns and redis key spellings are unchanged. ([naming](proposals/naming.md))
+- **`demos/` and `bin/auth-server-example.js` are removed**, together with the unused `AUTH_PUBLIC_KEY`/`AUTH_PRIVATE_KEY` entries in `.env.template`. They showed a y-redis-era external-auth flow that yhub never calls; auth examples live in [GETTING-STARTED.md](GETTING-STARTED.md).
 
 ### New Features
 
-- **`server.cors` configures cross-origin access.** `origin` (`'*'`, one origin, or an allowlist — `https://*.example.com` wildcards included), `credentials`, `allowHeaders`, `exposeHeaders`, `maxAge`, and `trustSameOrigin`. Configuration mistakes — `'*'` with `credentials`, a bare `'*'` in `allowHeaders` (the Fetch wildcard never covers `Authorization`; write `['*', 'Authorization']`), malformed or non-string origins, a negative or fractional `maxAge`, unknown fields — throw at startup. `Vary: Origin` is sent on every response the origin gate makes origin-dependent, cors unset included. A custom endpoint can override the hub config with its own `cors` field (`cors: null` disables CORS for that endpoint entirely; explicit `undefined` fields inherit). ([API docs](API.md#cors), [`src/cors.js`](src/cors.js), [`src/api.js`](src/api.js))
+- **`@y/hub/permissions`** - the permission toolkit for plugins: the creators (`createDocumentPermissions`, `createOrgPermissions`, ..), `documentPermissionsUnion` / `documentPermissionsIntersect` to compose grants (union several role grants, intersect to attenuate a token), `sanitizePermissions` for objects read from tokens or HTTP, `hasPermissions(granted, required)`, and the schemas. `createAuthorize`, `checkPermissions` and the creators are also exported from `@y/hub`.
+
+### Fixes
+
+- **Prune drops cached `changeset`/`activity` responses**, so pruned content no longer lingers in the cache until it expires.
+
+## [0.7.0]
+
+### Breaking Changes
+
+- **Cross-origin browser access is closed by default.** The hardcoded `Access-Control-Allow-Origin: *` is gone: API requests and websocket upgrades from a foreign `Origin` are rejected with `403 { code: 'origin-not-allowed' }` unless `server.cors` allows them. Same-origin pages and non-browser clients keep working without configuration (same-origin is detected via `Sec-Fetch-Site` when the browser sends it, else a scheme-blind `Origin`/`Host` comparison, so TLS-terminating proxies are fine). ([API docs](API.md#cors))
+
+### New Features
+
+- **`server.cors`** (`CORS_ORIGIN` for the CLI / docker image) configures cross-origin access: `origin` (`'*'`, one origin, or an allowlist with `https://*.example.com` wildcards), `credentials`, `allowHeaders`, `exposeHeaders`, `maxAge`, `trustSameOrigin`. Misconfigurations (`'*'` with `credentials`, a bare `'*'` in `allowHeaders`, ..) fail at startup; `'*'` restores the old wide-open behavior and logs a warning. A custom endpoint can override it with its own `cors` field (`null` disables CORS for that endpoint). ([API docs](API.md#cors))
 
 ### Other
 
-- **uws bumped to v20.69.0, adding Node 26 support.** uws ships prebuilt binaries for exactly Node 22, 24, and 26 from this version on — Node 25 (and 20, already below yhub's floor) are no longer supported. `engines.node` now reflects that: `^22.9.0 || ^24.0.0 || ^26.0.0`. ([`package.json`](package.json))
+- **uws v20.69.0, adding Node 26 support.** Supported Node versions are now exactly 22, 24 and 26 (`engines.node: ^22.9.0 || ^24.0.0 || ^26.0.0`); Node 25 is no longer supported.
 
 ## [0.6.0]
 

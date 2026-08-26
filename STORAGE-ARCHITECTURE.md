@@ -21,14 +21,14 @@ All binary content follows a versioned schema approach, enabling future format m
 
 ---
 
-## Rooms
+## Documents
 
-"rooms" is the concept how we share data. Data in the same "room" is shared. The
-websocket provider subscribes to rooms. For most applications we connect to a
-single document: `room = { org: string, docid: string, branch: string }`.
+The document is the unit of sharing. Data in the same document is shared, and
+the websocket provider subscribes to documents. A document is addressed by a
+DocRef: `docRef = { org: string, docid: string, branch: string }`.
 
 In future releases, we could also subscribe to all documents in a whole
-organization (for offline sync): `room = { org: string }`.
+organization (for offline sync): `docRef = { org: string }`.
 
 ## Binary Content Schemas
 
@@ -107,7 +107,7 @@ This simplified table layout provides several advantages:
 
 ### Table: `yhub_ydoc_tombstones_v1`
 
-One record per deleted room — the durable answer to "is this document gone?". Redis cannot hold
+One record per deleted document — the durable answer to "is this document gone?". Redis cannot hold
 that fact: the `ydoc:tombstone:v1` entry that notifies connected clients is trimmed away with the rest
 of the stream within `minMessageLifetime`.
 
@@ -126,13 +126,13 @@ CREATE INDEX yhub_ydoc_tombstones_v1_pending
     ON yhub_ydoc_tombstones_v1 (deleted_at) WHERE purged_at IS NULL;
 ```
 
-Keyed by room, like everything else — deletion is per branch. The partial index serves the only
+Keyed by DocRef, like everything else — deletion is per branch. The partial index serves the only
 non-key query shape there is, a retention task asking what still needs purging, and so stays
 proportional to pending deletions rather than to every deletion ever.
 
 `hard` is what the compact worker branches on. The barrier lives in `Persistence.store`'s `INSERT`
 itself (`WHERE NOT EXISTS (.. AND d.hard)`), not in a check ahead of it: a compact task spends
-seconds to minutes merging between reading a room's state and storing it, and `ON CONFLICT` cannot
+seconds to minutes merging between reading a document's state and storing it, and `ON CONFLICT` cannot
 catch a late write either, because `t` is a fresh clock on every compaction. Guarding inside the
 statement also covers `unsafePersistDoc`, which reaches storage directly. Soft deletions are
 deliberately unguarded, so compaction keeps persisting what is already on the stream.
@@ -267,7 +267,7 @@ Currently, the task queue supports document compaction tasks:
 ```javascript
 {
   type: 'compact',
-  room: {
+  docRef: {
     org: string,
     docid: string,
     branch: string
@@ -278,13 +278,13 @@ Currently, the task queue supports document compaction tasks:
 
 ### Task Lifecycle
 
-1. **Creation**: When a new message arrives for a room with no existing stream, a `compact` task is added to the worker queue
+1. **Creation**: When a new message arrives for a document with no existing stream, a `compact` task is added to the worker queue
 2. **Debounce**: Tasks have a configurable delay (default: 10 seconds) before being claimed, allowing message batching
 3. **Processing**: Worker claims task, compacts document, persists to PostgreSQL
 4. **Completion**: Task removed, Redis stream trimmed
 5. **Continuation**: If messages remain after trim, a new task is re-queued
 
-The creation step relies on `EXISTS(liveStream) == 0` as the signal to enqueue, which means there is at most one pending task per live room at any time. Operations that remove the live key (notably `Stream.quarantine`) must leave a NOP entry behind so this invariant is preserved across the operation.
+The creation step relies on `EXISTS(liveStream) == 0` as the signal to enqueue, which means there is at most one pending task per live document at any time. Operations that remove the live key (notably `Stream.quarantine`) must leave a NOP entry behind so this invariant is preserved across the operation.
 
 ### Use Cases
 
@@ -327,7 +327,7 @@ Messages distributed via Redis Streams follow versioned schemas:
 }
 ```
 
-Notifies connected clients that the room was deleted; they are disconnected with close code `4404`.
+Notifies connected clients that the document was deleted; they are disconnected with close code `4404`.
 Payload-free on purpose: clients are kicked identically for hard and soft deletions, and anything
 that needs the distinction reads `yhub_ydoc_tombstones_v1`. That also makes it replay-idempotent, so
 unlike `auth:check:v1` it survives `unquarantine` re-injection without a special case.
@@ -342,24 +342,24 @@ let the next write enqueue a second compact task beside the pending one, the sam
 
 ### Stream Storage Format
 
-- **Room Streams**: `{prefix}:room:{org}:{docid}:{branch}` (URL-encoded components)
-- **Quarantined Room Streams**: `{prefix}:quarantine_room:{org}:{docid}:{branch}:{qid}` (see [Quarantine](#quarantine))
+- **Document Streams**: `{prefix}:room:{org}:{docid}:{branch}` (URL-encoded components; the `room` in the key spelling deliberately predates the DocRef rename)
+- **Quarantined Document Streams**: `{prefix}:quarantine_room:{org}:{docid}:{branch}:{qid}` (see [Quarantine](#quarantine))
 - **Message Field**: Each message stored with field `m` containing the encoded buffer. Entries whose field is something other than `m` are skipped by every read path (used for NOP markers — see [Quarantine](#quarantine)).
 - **Clock Format**: `"{timestamp}-{sequence}"` (e.g., `"1704067200000-5"`)
 
 ### Message Lifecycle
 
-1. Messages added to room streams via `XADD`
+1. Messages added to document streams via `XADD`
 2. Subscribers receive messages via `XREAD` with blocking
 3. Messages retained for minimum lifetime (default: 1 minute)
 4. Trimmed during compaction based on age
 
 ### Quarantine
 
-Operational recovery path for rooms whose updates repeatedly fail to compact. Exposed on the `Stream` instance as `quarantine(room)`, `getQuarantineStreams(room)`, `getAllQuarantineStreams()`, and `unquarantine(room, qid)`.
+Operational recovery path for documents whose updates repeatedly fail to compact. Exposed on the `Stream` instance as `quarantine(docRef)`, `getQuarantineStreams(docRef)`, `getAllQuarantineStreams()`, and `unquarantine(docRef, qid)`.
 
-- **Quarantine key**: `{prefix}:quarantine_room:{org}:{docid}:{branch}:{qid}`. One key per quarantined snapshot; `qid` is a fresh UUID, so repeated quarantines on the same room accumulate rather than overwrite.
-- **Invariant preserved**: the compact worker queue holds at most one pending task per live room. `quarantine` atomically renames the live stream to a quarantine key and inserts a NOP entry (field `nop`, not `m`) into the now-empty live key. The NOP keeps `EXISTS(live) == 1`, so a subsequent `addMessage` does not enqueue a second compact task alongside the pre-quarantine one. Without the NOP, two tasks for the same room would race the worker into duplicate `persistence.store` calls at the same `lastClock`.
+- **Quarantine key**: `{prefix}:quarantine_room:{org}:{docid}:{branch}:{qid}`. One key per quarantined snapshot; `qid` is a fresh UUID, so repeated quarantines on the same document accumulate rather than overwrite.
+- **Invariant preserved**: the compact worker queue holds at most one pending task per live document. `quarantine` atomically renames the live stream to a quarantine key and inserts a NOP entry (field `nop`, not `m`) into the now-empty live key. The NOP keeps `EXISTS(live) == 1`, so a subsequent `addMessage` does not enqueue a second compact task alongside the pre-quarantine one. Without the NOP, two tasks for the same document would race the worker into duplicate `persistence.store` calls at the same `lastClock`.
 - **Quarantined streams are read-only by convention**: nothing in the system writes to `quarantine_room:*` keys. `unquarantine` relies on this when it XRANGEs the contents and then DELs the key in a follow-up write — concurrent writers would silently lose data.
 - **NOP entries** are ignored by the normal read path (`getMessages` filters on `message.m != null`) and trimmed by the usual `XTRIM MINID` when they age past `minMessageLifetime`.
 

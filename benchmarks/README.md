@@ -79,7 +79,7 @@ Two knobs worth knowing about:
 
 - **Disk.** Every compaction rewrites the whole document *and* its nongc twin, so
   a run at 40 MB moves several GB through S3. If the backend fills up, MinIO
-  refuses writes and compaction **fails rather than slows** — rooms never drain,
+  refuses writes and compaction **fails rather than slows** — documents never drain,
   benchmarks time out, and the numbers look plausible while being meaningless.
   The suite checks free space at startup, reclaims each benchmark's documents as
   it goes, and prints a loud warning if any compaction task errors.
@@ -123,7 +123,7 @@ If you read nothing else:
   building a document. Cost is proportional to the bytes you sent, and nothing
   else.
 - **Connecting is cheap. Syncing is not.** Opening a socket and subscribing to a
-  room costs almost nothing. Receiving the initial document costs a full
+  document costs almost nothing. Receiving the initial document costs a full
   fetch-merge-scan-copy of the whole document — **once per connection, shared
   with nobody**. 100 users opening the same 40 MB document do that work 100
   times.
@@ -180,7 +180,7 @@ publish the cost model, so anyone can plug in their own numbers.**
 
 There are only four things a client does over a y/hub connection:
 
-1. **Connect and subscribe** — open a websocket, authenticate, join a room.
+1. **Connect and subscribe** — open a websocket, authenticate, join a document.
 2. **Sync a document** — receive the current state of the document as a
    `syncStep1` + `syncStep2` pair. Happens on every connect *and* every
    reconnect.
@@ -204,7 +204,7 @@ The output is a table of constants plus formulas, so that "can y/hub handle
 ## Cost model
 
 The formulas the benchmarks exist to populate. Symbols: `n_conn` connected
-clients, `n_r` subscribers on room `r`, `S` document size, `u_r` updates/s,
+clients, `n_r` subscribers on document `r`, `S` document size, `u_r` updates/s,
 `a_r` awareness updates/s, `j` joins/s.
 
 ```
@@ -224,8 +224,8 @@ measure.
 
 ## Terms
 
-**Room** — one document on one branch, addressed as `{org, docid, branch}`. The
-unit of subscription and of compaction.
+**Document** — one docid on one branch, addressed as `{org, docid, branch}` (a
+`DocRef`). The unit of subscription and of compaction.
 
 **Update** — a binary Yjs change. Cell edits are tens of bytes; an agent's
 flushed batch can be hundreds of kilobytes.
@@ -247,17 +247,17 @@ given exactly one update (`node_modules/@y/y/src/utils/encoding.js:464`). Mergin
 is free for a document with nothing pending, and full price otherwise. That
 single branch is responsible for most of the variance in sync cost.
 
-**Compaction** — the background job that folds a room's pending Redis updates
-into its persisted form and rewrites it. Triggered when a room receives its first
+**Compaction** — the background job that folds a document's pending Redis updates
+into its persisted form and rewrites it. Triggered when a document receives its first
 write after being idle (`src/stream.js:149-152`), and **re-triggered immediately
-after each compaction as long as the room's stream is non-empty**
+after each compaction as long as the document's stream is non-empty**
 (`src/stream.js:192-197`). The worker picks up a pending task once it has been
 idle for `taskDebounce` (`src/stream.js:538`). Net effect: **a continuously
-edited room is compacted roughly every `taskDebounce` seconds, and every
+edited document is compacted roughly every `taskDebounce` seconds, and every
 compaction rewrites the whole document.**
 
-**Fan-out** — delivering one room's messages to its subscribers. The Redis read
-is shared across all rooms in a process (`src/stream.js:292`); the per-subscriber
+**Fan-out** — delivering one document's messages to its subscribers. The Redis read
+is shared across all documents in a process (`src/stream.js:292`); the per-subscriber
 work is a filter by that subscriber's clock, then a merge, encode and copy
 (`src/stream.js:298-309`, `src/server.js:632-637`).
 
@@ -294,16 +294,16 @@ Two things the grades deliberately do *not* punish:
 | # | Operation | When it happens | What it costs | Tier |
 |---|---|---|---|---|
 | 1 | Websocket upgrade + auth | every connect | one auth callback, one small object (`src/server.js:696-731`) | **A** |
-| 2 | Room subscription | every connect | one map/set insert; the Redis `XREAD` is shared across all rooms in the process (`src/stream.js:292`) | **A** |
-| 3 | Idle connection | continuously | a `WSUser` and a socket. No `Y.Doc` per connection or per room; no document cache anywhere in the heap (`src/server.js:555-600`, `src/stream.js:110`) | **A** |
+| 2 | Document subscription | every connect | one map/set insert; the Redis `XREAD` is shared across all documents in the process (`src/stream.js:292`) | **A** |
+| 3 | Idle connection | continuously | a `WSUser` and a socket. No `Y.Doc` per connection or per document; no document cache anywhere in the heap (`src/server.js:555-600`, `src/stream.js:110`) | **A** |
 | 4 | Write an update | every edit | one buffer copy + one linear scan (`Y.createContentIdsFromUpdate`) + one Redis `XADD`. No document is built (`src/server.js:778-788`) | **B** |
-| 5 | Deliver a batch to one subscriber | every edit on your room | filter by the subscriber's clock, binary merge, encode, copy — linear in the batch (`src/server.js:632-637`). Server-side total is this × subscribers, which is what broadcast costs. | **B** |
+| 5 | Deliver a batch to one subscriber | every edit on your document | filter by the subscriber's clock, binary merge, encode, copy — linear in the batch (`src/server.js:632-637`). Server-side total is this × subscribers, which is what broadcast costs. | **B** |
 | 6 | Deliver an awareness batch to one subscriber | every presence tick | same shape as #5, much larger constant: `JSON.parse` per participant state per message, then `JSON.stringify` per state of the merged result (`@y/protocols/src/awareness.js:209,257`), plus an `Awareness` + throwaway `Y.Doc` + `setInterval` per call (`src/protocol.js:25`). Same redundancy as #5 and no `@todo` | **B** |
 | 7 | Fetch the persisted document | every sync | one Postgres `SELECT` plus **one S3 GET per uncompacted row**, buffered then concatenated then decoded — several copies (`src/persistence.js:171`, `src/plugins/s3.js:102-106`) | **C** |
 | 8 | Compute the state vector | every sync | full linear scan of the document; runs inline below 512 KB, offloads above (`src/compute.js:313-327`). The source comments ~30–40 MB/s — **unverified, and load-bearing** | **C** |
-| 9 | Merge pending updates into the document | every sync **to a room written since its last compaction** — i.e. almost always, for an active document | full binary merge of the whole document plus everything pending. Free if nothing is pending (see the one-update shortcut above) | **C** |
-| 10 | Many clients syncing one document at once | deploys, load-balancer failover, reconnect after a network blip, everyone opening the same document at 09:00 | #7+#8+#9 run **independently per connection with no sharing** (`src/server.js:740-764`). The bytes sent are inherent; the fetch, merge and scan are not — one computation could serve every concurrent joiner of the same room. At 40 MB the constant is enormous | **D** |
-| 11 | Compaction of one document | every `taskDebounce` while the room is being written | reads gc **and** nongc blobs, **document-merges** the gc side through a real `Y.Doc`, re-encodes, writes four fresh assets to S3, deletes the old ones (`src/index.js:85-91`). Peak memory is a multiple of document size, counted twice | **E** |
+| 9 | Merge pending updates into the document | every sync **to a document written since its last compaction** — i.e. almost always, for an active document | full binary merge of the whole document plus everything pending. Free if nothing is pending (see the one-update shortcut above) | **C** |
+| 10 | Many clients syncing one document at once | deploys, load-balancer failover, reconnect after a network blip, everyone opening the same document at 09:00 | #7+#8+#9 run **independently per connection with no sharing** (`src/server.js:740-764`). The bytes sent are inherent; the fetch, merge and scan are not — one computation could serve every concurrent joiner of the same document. At 40 MB the constant is enormous | **D** |
+| 11 | Compaction of one document | every `taskDebounce` while the document is being written | reads gc **and** nongc blobs, **document-merges** the gc side through a real `Y.Doc`, re-encodes, writes four fresh assets to S3, deletes the old ones (`src/index.js:85-91`). Peak memory is a multiple of document size, counted twice | **E** |
 
 ## Reading the table
 
@@ -325,7 +325,7 @@ about on a large shared document.** Y1.5 and Y4.2/Y4.3 measure it.
 **Operations 7–10 make sync the dominant per-connection cost**, and 11 is what
 happens when many of them land together. Individually they are ordinary linear
 work. What makes 11 a tier above is that the expensive parts are *identical
-across concurrent joiners of the same room* and are nevertheless recomputed for
+across concurrent joiners of the same document* and are nevertheless recomputed for
 each one — unlike broadcast, this product is avoidable.
 
 ---
@@ -355,7 +355,7 @@ failure being looked for.
 | `workerMem` | worker peak RSS |
 | `s3Ops` / `s3Bytes` | S3 GET/PUT counts and bytes. Counts matter more than local latency — see Notes |
 | `pgRows` | rows in `yhub_ydoc_v1`; every uncompacted row is an S3 GET on every sync |
-| `streamLen` | Redis `XLEN` per room; growth means compaction is not keeping up |
+| `streamLen` | Redis `XLEN` per document; growth means compaction is not keeping up |
 | `docSize` | serialized document size, gc and nongc separately |
 | `memUsed` | heap used by an in-memory `Y.Doc`, for the expansion factor |
 | `dropped` | connections closed for backpressure (`src/server.js:650-653`) |
@@ -403,11 +403,11 @@ Answers "can I afford N connections", separately from "can I afford N
 subscribers on one document".
 
 - **Y2.1] Connect N clients to N distinct empty documents** (`serverMem`,
-  `syncTime`, `time`) — the per-connection **and** per-room floor. Establishes
+  `syncTime`, `time`) — the per-connection **and** per-document floor. Establishes
   `c_conn` and `c_room`.
 - **Y2.2] Connect N clients to one empty document** (`serverMem`, `syncTime`) —
-  the same floor without the per-room term. The difference against Y2.1 is the
-  cost of a room.
+  the same floor without the per-document term. The difference against Y2.1 is the
+  cost of a document.
 - **Y2.3] Idle: hold N connections for T minutes with no traffic** (`serverMem`
   drift, `serverCpu`) — confirms that idle connections are genuinely tier A and
   that nothing accumulates.

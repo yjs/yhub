@@ -126,6 +126,15 @@ export const testActivityYdocRoundTrip = async tc => {
   await promise.wait(3000)
   const all = (await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false`)).activity
   t.assert(all.length === 3)
+  // `from` alone keeps everything at or after it (the window once collapsed to `[from, from]`),
+  // and a `to` below `from` is lifted to it
+  t.assert((await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false&from=${all[1].from}`)).activity.length === 2)
+  t.assert((await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false&from=${all[1].from}&to=1`)).activity.length === 1)
+  // bounds are validated as uints by the query validator - never a requirement error (500)
+  for (const path of [`/api/activity/v1/${org}/${ydoc.guid}?from=1.5`, `/api/activity/v1/${org}/${ydoc.guid}?to=-1`, `/api/changeset/v1/${org}/${ydoc.guid}?from=1.5`]) {
+    const bad = await fetch(`http://${utils.yhubHost}${path}`, { headers: { accept: 'application/json' } })
+    t.assert(bad.status === 400 && (await bad.json()).code === 'invalid-query', `${path} is a 400`)
+  }
   const res = await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false&from=${all[2].from}&ydoc=true&delta=true&attributions=true`)
   t.assert(res.ydoc != null && Array.isArray(res.activity) && res.activity.length === 1, 'ydoc=true wraps { ydoc, activity }')
   const shared = new Y.Doc({ gc: false })
@@ -512,7 +521,10 @@ export const testLargeDoc = async tc => {
  */
 export const testActivityContentIdsFilter = async tc => {
   const { org, createWsClient } = await utils.createTestCase(tc)
-  const { ydoc } = createWsClient()
+  // synced before the first write: on an unsynced provider both writes below are flushed
+  // together once the connection is up, land ~1ms apart on the stream, and the assertion on
+  // `allActivity[0]` being the `someattr` change becomes a coin flip
+  const { ydoc } = await createWsClient({ waitForSync: true })
   const ytype = ydoc.get('map')
   // change an attribute
   ytype.setAttr('someattr', 'hello')
@@ -557,98 +569,98 @@ export const testActivityContentIdsFilter = async tc => {
  * @param {t.TestCase} tc
  */
 export const testQuarantineRoundtrip = async tc => {
-  const { yhub, defaultRoom } = await utils.createTestCase(tc)
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
   const s = yhub.stream
-  const liveKey = stream.encodeRoomName(defaultRoom, s.prefix)
+  const liveKey = stream.encodeRoomName(defaultDocRef, s.prefix)
 
   // seed the live stream directly (bypass the server)
-  await s.addMessage(defaultRoom, { type: 'awareness:v1', update: new Uint8Array([1, 2, 3]) })
-  await s.addMessage(defaultRoom, { type: 'awareness:v1', update: new Uint8Array([4, 5, 6]) })
+  await s.addMessage(defaultDocRef, { type: 'awareness:v1', update: new Uint8Array([1, 2, 3]) })
+  await s.addMessage(defaultDocRef, { type: 'awareness:v1', update: new Uint8Array([4, 5, 6]) })
   t.assert(await s.redis.exists(liveKey) === 1, 'live stream exists after seeding')
   t.assert(await s.redis.xLen(liveKey) === 2, 'live stream has 2 messages')
   const workerTasksBefore = await s.redis.xLen(s.workerStreamName)
   t.assert(workerTasksBefore >= 1, 'seed produced at least one pending compact task')
 
   // quarantine: live moves to a quarantine key, NOP keeps live non-empty
-  const qid = await s.quarantine(defaultRoom)
+  const qid = await s.quarantine(defaultDocRef)
   t.assert(qid != null, 'quarantine returns a qid')
-  const qKey = stream.encodeQuarantineName(defaultRoom, s.prefix, /** @type {string} */ (qid))
+  const qKey = stream.encodeQuarantineName(defaultDocRef, s.prefix, /** @type {string} */ (qid))
   t.assert(await s.redis.exists(liveKey) === 1, 'live key still present after quarantine (NOP)')
   t.assert(await s.redis.xLen(liveKey) === 1, 'live stream holds a single NOP entry')
   t.assert(await s.redis.exists(qKey) === 1, 'quarantine key created')
   t.assert(await s.redis.xLen(qKey) === 2, 'quarantined stream has the 2 messages')
 
   // quarantine of a truly absent live stream is a no-op
-  const emptyRoom = { org: defaultRoom.org, docid: defaultRoom.docid + '-empty', branch: 'main' }
-  t.assert(await s.quarantine(emptyRoom) === null, 'quarantine no-op when live stream absent')
-  t.assert(await s.redis.exists(stream.encodeRoomName(emptyRoom, s.prefix)) === 0, 'empty room did not get an orphan NOP')
+  const emptyDocRef = { org: defaultDocRef.org, docid: defaultDocRef.docid + '-empty', branch: 'main' }
+  t.assert(await s.quarantine(emptyDocRef) === null, 'quarantine no-op when live stream absent')
+  t.assert(await s.redis.exists(stream.encodeRoomName(emptyDocRef, s.prefix)) === 0, 'empty document did not get an orphan NOP')
 
   // listing quarantines
-  t.compare(await s.getQuarantineStreams(defaultRoom), [qid], 'getQuarantineStreams returns only this qid')
+  t.compare(await s.getQuarantineStreams(defaultDocRef), [qid], 'getQuarantineStreams returns only this qid')
 
   // a fresh write after quarantine must NOT enqueue a second compact task, because the NOP
   // keeps the live key non-empty (addMessage's EXISTS check returns 1)
-  await s.addMessage(defaultRoom, { type: 'awareness:v1', update: new Uint8Array([7]) })
+  await s.addMessage(defaultDocRef, { type: 'awareness:v1', update: new Uint8Array([7]) })
   t.assert(await s.redis.xLen(liveKey) === 2, 'live stream now holds NOP + fresh message')
   t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore, 'no additional compact task enqueued after quarantine + write')
 
   // unquarantine: messages move back to live, quarantine key deleted
-  const moved = await s.unquarantine(defaultRoom, /** @type {string} */ (qid))
+  const moved = await s.unquarantine(defaultDocRef, /** @type {string} */ (qid))
   t.assert(moved === 2, 'unquarantine re-injected 2 messages')
   t.assert(await s.redis.exists(qKey) === 0, 'quarantine key gone')
   t.assert(await s.redis.xLen(liveKey) === 4, 'live stream holds NOP + fresh + 2 re-injected')
   t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore, 'unquarantine did not enqueue an extra compact task')
-  t.compare(await s.getQuarantineStreams(defaultRoom), [], 'no quarantines remain')
+  t.compare(await s.getQuarantineStreams(defaultDocRef), [], 'no quarantines remain')
 
   // unquarantine of an unknown qid is a no-op
-  t.assert(await s.unquarantine(defaultRoom, 'does-not-exist') === 0, 'unquarantine no-op on unknown qid')
+  t.assert(await s.unquarantine(defaultDocRef, 'does-not-exist') === 0, 'unquarantine no-op on unknown qid')
 
   // let the worker drain the live stream
   await utils.waitTasksProcessed(yhub)
 }
 
 /**
- * Disabling compaction removes the room's compact task from the worker queue and parks the room
- * in the disabled set; while disabled, writes don't enqueue new compact tasks. Enabling moves the
+ * Disabling compaction removes the document's compact task from the worker queue and parks the
+ * docRef in the disabled set; while disabled, writes don't enqueue new compact tasks. Enabling moves the
  * task back into the queue.
  *
  * @param {t.TestCase} tc
  */
 export const testDisableCompactionRoundtrip = async tc => {
-  const { yhub, defaultRoom } = await utils.createTestCase(tc)
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
   const s = yhub.stream
-  const liveKey = stream.encodeRoomName(defaultRoom, s.prefix)
+  const liveKey = stream.encodeRoomName(defaultDocRef, s.prefix)
 
   // seed the live stream directly (bypass the server)
-  await s.addMessage(defaultRoom, { type: 'awareness:v1', update: new Uint8Array([1, 2, 3]) })
+  await s.addMessage(defaultDocRef, { type: 'awareness:v1', update: new Uint8Array([1, 2, 3]) })
   const workerTasksBefore = await s.redis.xLen(s.workerStreamName)
   t.assert(workerTasksBefore >= 1, 'seed produced at least one pending compact task')
 
-  // disable: task removed from worker queue, room listed as disabled
-  await s.disableCompaction(defaultRoom)
+  // disable: task removed from worker queue, docRef listed as disabled
+  await s.disableCompaction(defaultDocRef)
   t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore - 1, 'compact task removed from worker queue')
-  t.compare(await s.getDisabledCompactionRooms(), [defaultRoom], 'room listed as disabled')
+  t.compare(await s.getDisabledCompactionDocRefs(), [defaultDocRef], 'docRef listed as disabled')
 
   // writes while disabled don't enqueue a compact task
-  await s.addMessage(defaultRoom, { type: 'awareness:v1', update: new Uint8Array([4, 5, 6]) })
+  await s.addMessage(defaultDocRef, { type: 'awareness:v1', update: new Uint8Array([4, 5, 6]) })
   t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore - 1, 'no compact task enqueued while disabled')
 
-  // the addMessage guard also holds when the disabled room's stream doesn't exist yet
-  const freshRoom = { org: defaultRoom.org, docid: defaultRoom.docid + '-fresh', branch: 'main' }
-  await s.disableCompaction(freshRoom)
-  await s.addMessage(freshRoom, { type: 'awareness:v1', update: new Uint8Array([7]) })
-  t.assert(await s.redis.exists(stream.encodeRoomName(freshRoom, s.prefix)) === 1, 'fresh stream created')
-  t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore - 1, 'no compact task enqueued for fresh disabled room')
+  // the addMessage guard also holds when the disabled document's stream doesn't exist yet
+  const freshDocRef = { org: defaultDocRef.org, docid: defaultDocRef.docid + '-fresh', branch: 'main' }
+  await s.disableCompaction(freshDocRef)
+  await s.addMessage(freshDocRef, { type: 'awareness:v1', update: new Uint8Array([7]) })
+  t.assert(await s.redis.exists(stream.encodeRoomName(freshDocRef, s.prefix)) === 1, 'fresh stream created')
+  t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore - 1, 'no compact task enqueued for fresh disabled document')
 
   // enable: tasks re-enqueued, disabled set empty
-  await s.enableCompaction(defaultRoom)
-  await s.enableCompaction(freshRoom)
-  t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore + 1, 'compact tasks re-enqueued for both rooms')
-  t.compare(await s.getDisabledCompactionRooms(), [], 'no rooms remain disabled')
+  await s.enableCompaction(defaultDocRef)
+  await s.enableCompaction(freshDocRef)
+  t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore + 1, 'compact tasks re-enqueued for both documents')
+  t.compare(await s.getDisabledCompactionDocRefs(), [], 'no docRefs remain disabled')
 
-  // enable on a never-disabled room is a no-op
-  await s.enableCompaction(defaultRoom)
-  t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore + 1, 'enable on enabled room did not enqueue an extra task')
+  // enable on a never-disabled docRef is a no-op
+  await s.enableCompaction(defaultDocRef)
+  t.assert(await s.redis.xLen(s.workerStreamName) === workerTasksBefore + 1, 'enable on enabled docRef did not enqueue an extra task')
   t.assert(await s.redis.exists(liveKey) === 1, 'live stream still present')
 
   // let the worker drain both streams
@@ -659,35 +671,35 @@ export const testDisableCompactionRoundtrip = async tc => {
  * A worker whose task was reclaimed (it ran longer than taskDebounce) completes late: its
  * trimMessages call must be a no-op. If it trimmed/deleted the stream, the key could vanish while
  * the successor task is still pending, and the next write would enqueue a second compact task —
- * spawning a concurrent task chain for the same room.
+ * spawning a concurrent task chain for the same document.
  *
  * @param {t.TestCase} tc
  */
 export const testTrimMessagesLateWorker = async tc => {
-  const { yhub, defaultRoom } = await utils.createTestCase(tc)
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
   const s = yhub.stream
-  const liveKey = stream.encodeRoomName(defaultRoom, s.prefix)
+  const liveKey = stream.encodeRoomName(defaultDocRef, s.prefix)
 
   // seed the live stream directly (bypass the server)
-  await s.addMessage(defaultRoom, { type: 'awareness:v1', update: new Uint8Array([1, 2, 3]) })
+  await s.addMessage(defaultDocRef, { type: 'awareness:v1', update: new Uint8Array([1, 2, 3]) })
   const taskid = /** @type {string} */ ((await s.redis.xRange(s.workerStreamName, '-', '+')).find(e => e.message.compact === liveKey)?.id)
   t.assert(taskid != null, 'seed produced a pending compact task')
   const lastClock = array.last(await s.redis.xRange(liveKey, '-', '+')).id
 
   // first completion (the worker that reclaimed the task): acks + re-enqueues a successor task
-  await s.trimMessages(defaultRoom, lastClock, 100000, taskid)
+  await s.trimMessages(defaultDocRef, lastClock, 100000, taskid)
   t.assert(await s.redis.xLen(liveKey) === 1, 'young message survived the trim')
   const successorTasks = await s.redis.xRange(s.workerStreamName, '-', '+')
   t.assert(successorTasks.length === 1 && successorTasks[0].id !== taskid, 'task acked and successor enqueued')
 
   // late completion (the original long-running worker, same taskid): must not touch the stream
-  await s.trimMessages(defaultRoom, lastClock, 0, taskid)
+  await s.trimMessages(defaultDocRef, lastClock, 0, taskid)
   t.assert(await s.redis.exists(liveKey) === 1, 'late trim did not delete the stream key')
   t.assert(await s.redis.xLen(liveKey) === 1, 'late trim did not trim the stream')
   t.assert(await s.redis.xLen(s.workerStreamName) === 1, 'late trim did not enqueue another task')
 
   // a write must not spawn a second task chain
-  await s.addMessage(defaultRoom, { type: 'awareness:v1', update: new Uint8Array([4]) })
+  await s.addMessage(defaultDocRef, { type: 'awareness:v1', update: new Uint8Array([4]) })
   t.assert(await s.redis.xLen(s.workerStreamName) === 1, 'no duplicate compact task after write')
 
   // let the worker drain the live stream
@@ -792,20 +804,20 @@ export const testPatchEmptyBodyIs400 = async tc => {
 }
 
 /**
- * GET /ydoc with `?awareness=true` returns the room's merged awareness state as
+ * GET /ydoc with `?awareness=true` returns the document's merged awareness state as
  * bare bytes that are directly consumable by `applyAwarenessUpdate` (and round-
  * trippable through PATCH).
  *
  * @param {t.TestCase} tc
  */
 export const testGetYdocWithAwareness = async tc => {
-  const { org, defaultRoom } = await utils.createTestCase(tc)
+  const { org, defaultDocRef } = await utils.createTestCase(tc)
   const fakeClientid = 0xabba
   // Seed awareness via the already-validated PATCH path.
-  await patchYhubRequest(`/api/ydoc/v1/${org}/${defaultRoom.docid}`, {
+  await patchYhubRequest(`/api/ydoc/v1/${org}/${defaultDocRef.docid}`, {
     awareness: encodeOneEntry(fakeClientid, 1, { user: 'alice' })
   })
-  const res = await fetchYhubResponse(`/api/ydoc/v1/${org}/${defaultRoom.docid}?awareness=true`)
+  const res = await fetchYhubResponse(`/api/ydoc/v1/${org}/${defaultDocRef.docid}?awareness=true`)
   t.assert(res.doc instanceof Uint8Array, 'doc returned as Uint8Array')
   t.assert(res.awareness instanceof Uint8Array, 'awareness returned as Uint8Array')
   // Confirm the bytes are bare-format by feeding them directly to applyAwarenessUpdate.
@@ -815,32 +827,32 @@ export const testGetYdocWithAwareness = async tc => {
 }
 
 /**
- * Default GET (no `awareness` flag) returns only `doc`, even when the room has
+ * Default GET (no `awareness` flag) returns only `doc`, even when the document has
  * awareness state — preserves the legacy response shape.
  *
  * @param {t.TestCase} tc
  */
 export const testGetYdocWithoutAwarenessFlagOmitsField = async tc => {
-  const { org, defaultRoom } = await utils.createTestCase(tc)
-  await patchYhubRequest(`/api/ydoc/v1/${org}/${defaultRoom.docid}`, {
+  const { org, defaultDocRef } = await utils.createTestCase(tc)
+  await patchYhubRequest(`/api/ydoc/v1/${org}/${defaultDocRef.docid}`, {
     awareness: encodeOneEntry(0xface, 1, { user: 'someone' })
   })
-  const res = await fetchYhubResponse(`/api/ydoc/v1/${org}/${defaultRoom.docid}`)
+  const res = await fetchYhubResponse(`/api/ydoc/v1/${org}/${defaultDocRef.docid}`)
   t.assert(res.doc instanceof Uint8Array, 'doc returned as Uint8Array')
   t.assert(!('awareness' in res), 'awareness field omitted without ?awareness=true')
 }
 
 /**
- * `?awareness=true` on a room with no awareness state omits the field rather
+ * `?awareness=true` on a document with no awareness state omits the field rather
  * than returning the empty-marker bytes.
  *
  * @param {t.TestCase} tc
  */
 export const testGetYdocEmptyAwarenessOmitsField = async tc => {
-  const { org, defaultRoom } = await utils.createTestCase(tc)
-  const res = await fetchYhubResponse(`/api/ydoc/v1/${org}/${defaultRoom.docid}?awareness=true`)
+  const { org, defaultDocRef } = await utils.createTestCase(tc)
+  const res = await fetchYhubResponse(`/api/ydoc/v1/${org}/${defaultDocRef.docid}?awareness=true`)
   t.assert(res.doc instanceof Uint8Array, 'doc returned as Uint8Array')
-  t.assert(!('awareness' in res), 'awareness field omitted when room has no awareness state')
+  t.assert(!('awareness' in res), 'awareness field omitted when document has no awareness state')
 }
 
 /**
@@ -850,11 +862,11 @@ export const testGetYdocEmptyAwarenessOmitsField = async tc => {
  * @param {t.TestCase} tc
  */
 export const testBuiltinContentTypes = async tc => {
-  const { org, defaultRoom } = await utils.createTestCase(tc)
-  const ydocRes = await fetch(`http://${utils.yhubHost}/api/ydoc/v1/${org}/${defaultRoom.docid}`)
+  const { org, defaultDocRef } = await utils.createTestCase(tc)
+  const ydocRes = await fetch(`http://${utils.yhubHost}/api/ydoc/v1/${org}/${defaultDocRef.docid}`)
   t.assert(ydocRes.headers.get('content-type') === 'application/x-lib0any')
   t.assert(buffer.decodeAny(new Uint8Array(await ydocRes.arrayBuffer())).doc instanceof Uint8Array)
-  const activityRes = await fetch(`http://${utils.yhubHost}/api/activity/v1/${org}/${defaultRoom.docid}?group=false`)
+  const activityRes = await fetch(`http://${utils.yhubHost}/api/activity/v1/${org}/${defaultDocRef.docid}?group=false`)
   t.assert(activityRes.headers.get('content-type') === 'application/x-lib0any')
 }
 
@@ -913,17 +925,17 @@ export const testBuiltinJson = async tc => {
  * @param {t.TestCase} tc
  */
 export const testOldRoutesRemoved = async tc => {
-  const { org, defaultRoom } = await utils.createTestCase(tc)
-  for (const path of [`/ydoc/${org}/${defaultRoom.docid}`, `/changeset/${org}/${defaultRoom.docid}`, `/activity/${org}/${defaultRoom.docid}`]) {
+  const { org, defaultDocRef } = await utils.createTestCase(tc)
+  for (const path of [`/ydoc/${org}/${defaultDocRef.docid}`, `/changeset/${org}/${defaultDocRef.docid}`, `/activity/${org}/${defaultDocRef.docid}`]) {
     t.assert((await fetch(`http://${utils.yhubHost}${path}`)).status === 404, `${path} must 404`)
   }
-  for (const path of [`/rollback/${org}/${defaultRoom.docid}`, `/prune/${org}/${defaultRoom.docid}`]) {
+  for (const path of [`/rollback/${org}/${defaultDocRef.docid}`, `/prune/${org}/${defaultDocRef.docid}`]) {
     const res = await fetch(`http://${utils.yhubHost}${path}`, { method: 'POST', body: /** @type {Uint8Array<ArrayBuffer>} */ (buffer.encodeAny({ from: 1 })) })
     t.assert(res.status === 404, `${path} must 404`)
   }
   // the old ws path hits no route - uws answers 404 and the upgrade fails
   const rejected = await new Promise(resolve => {
-    const sock = new WebSocket(`ws://${utils.yhubHost}/ws/${org}/${defaultRoom.docid}`)
+    const sock = new WebSocket(`ws://${utils.yhubHost}/ws/${org}/${defaultDocRef.docid}`)
     sock.on('error', () => resolve(true))
     sock.on('open', () => { sock.close(); resolve(false) })
   })
@@ -937,21 +949,21 @@ export const testOldRoutesRemoved = async tc => {
 //  * @param {t.TestCase} tc
 //  */
 // export const testTmpDocActivityWithDeltaNoGrouping = async tc => {
-//   const { yhub, defaultRoom } = await utils.createTestCase(tc)
+//   const { yhub, defaultDocRef } = await utils.createTestCase(tc)
 //
 //   // Load the known-problematic binary files from the tmp folder (lib0/any-encoded)
 //   const nongcDoc = buffer.decodeAny(fs.readFileSync(new URL('../tmp/ydoc_non_gc.bin', import.meta.url)))
 //   const changeset = buffer.decodeAny(fs.readFileSync(new URL('../tmp/changeset.bin', import.meta.url)))
 //
 //   // Upload the document via the addMessage API
-//   await yhub.stream.addMessage(defaultRoom, {
+//   await yhub.stream.addMessage(defaultDocRef, {
 //     type: 'ydoc:update:v1',
 //     update: nongcDoc.doc,
 //     contentmap: changeset.attributions
 //   })
 //
 //   // Call activity API with delta=true and group=false - this combination previously caused errors
-//   const activity = await fetchYhubResponse(`/api/activity/v1/${defaultRoom.org}/${defaultRoom.docid}?delta=true&group=false`)
+//   const activity = await fetchYhubResponse(`/api/activity/v1/${defaultDocRef.org}/${defaultDocRef.docid}?delta=true&group=false`)
 //   console.log('activity result', JSON.stringify(activity))
 //   t.assert(Array.isArray(activity))
 // }

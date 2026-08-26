@@ -87,7 +87,7 @@ export const renderTable = rows => {
  * Free space on the filesystem backing the storage containers, in GiB.
  *
  * Worth reporting because a full S3 backend does not slow compaction down, it
- * makes it *fail* — the worker retries forever, rooms never drain, and every
+ * makes it *fail* — the worker retries forever, documents never drain, and every
  * Y5/Y6 number silently becomes meaningless. See the preflight check in
  * `index.js`.
  */

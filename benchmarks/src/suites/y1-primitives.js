@@ -181,7 +181,7 @@ export default {
             })
           }
         }
-        report.note('This runs **once per subscriber per batch** (`src/server.js:636`), where a document update is a memcpy. Cost is dominated by a `JSON.parse` of every participant state and a `JSON.stringify` of every state of the merged result (`@y/protocols/src/awareness.js`), plus a throwaway `Awareness` + `Y.Doc` per call (`src/protocol.js:25`) — which is why `µs per state` is so high at N=1 and falls as the fixed cost is amortised. The last column is the number that matters: N participants present in a room means N states to merge **and** N subscribers to merge them for, so one presence tick costs the server `time × N` on a single thread.')
+        report.note('This runs **once per subscriber per batch** (`src/server.js:636`), where a document update is a memcpy. Cost is dominated by a `JSON.parse` of every participant state and a `JSON.stringify` of every state of the merged result (`@y/protocols/src/awareness.js`), plus a throwaway `Awareness` + `Y.Doc` per call (`src/protocol.js:25`) — which is why `µs per state` is so high at N=1 and falls as the fixed cost is amortised. The last column is the number that matters: N participants present in a document means N states to merge **and** N subscribers to merge them for, so one presence tick costs the server `time × N` on a single thread.')
       }
     },
     {

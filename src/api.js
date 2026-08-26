@@ -1,9 +1,9 @@
 import * as buffer from 'lib0/buffer'
 import * as error from 'lib0/error'
-import * as number from 'lib0/number'
 import * as promise from 'lib0/promise'
 import * as s from 'lib0/schema'
 import * as string from 'lib0/string'
+import * as perm from './permissions.js'
 import * as t from './types.js'
 import { builtinApi } from './builtin-api.js'
 import { originAllowed, resolveCors, writeCorsPreflight, writeCorsResponse } from './cors.js'
@@ -95,6 +95,26 @@ export const apiError = (status, message, extra = undefined) => Object.assign(ne
  */
 export const isApiError = err => err?.[apiErrorBrand] === true
 
+/**
+ * Throw the uniform missing-permission 403 unless `permissions` contains `required` (the
+ * containment check `hasPermissions` in permissions.js): the message names the missing fragment
+ * and the body carries it as `{ code: 'missing-permission', required }`. Every rest endpoint is
+ * gated this way on its `endpoint` facet before its handler runs; handlers state their semantic
+ * requirements (ydoc/awareness/history/delete) the same way at their head. `required` is a
+ * permission object of the scope of `permissions` - `createDocumentPermissions({ ydoc: '-r--' })`
+ * (an org permission accepts only `endpoint`). `null` permissions (no answer from the auth
+ * plugin) contain nothing and fail every requirement.
+ *
+ * @template {import('./permissions.js').NormalizedPermissions | null} P
+ * @param {P} permissions
+ * @param {import('./permissions.js').RequiredPermissions<P>} required
+ */
+export const checkPermissions = (permissions, required) => {
+  if (!perm.hasPermissions(permissions, required)) {
+    throw apiError(403, `requires permission ${JSON.stringify(required)}`, { code: 'missing-permission', required })
+  }
+}
+
 export class EncodedAny {
   /**
    * @param {Uint8Array} bytes
@@ -115,36 +135,68 @@ export class EncodedAny {
 export const encodedAny = bytes => new EncodedAny(bytes)
 
 /**
- * @param {import('./index.js').YHub} yhub
- * @param {import('uws').HttpRequest} req
- * @param {'r' | 'rw'} requiredAccess
- * @param {(authInfo: { userid: string }) => Promise<t.AccessType>|t.AccessType|null} getAccess
- * @returns {Promise<{ authInfo: { userid: string }, accessType: t.AccessType } | { error: string, status: string }>}
+ * Run one auth hook. A branded apiError is the plugin's own answer - a 401 from `authenticate`
+ * rejecting a credential, a 503 outage from either hook - and passes through; any other throw is
+ * an infrastructure failure: 503, transient like the ws recheck's 1013. Deny is a value on both
+ * hooks (`authenticate` → null: an anonymous caller; `authorize` → null: no permissions).
+ *
+ * @template T
+ * @param {'authenticate'|'authorize'} hook
+ * @param {() => Promise<T>} run
  */
-const authenticate = async (yhub, req, requiredAccess, getAccess) => {
-  // the auth module is required by $config - without it everything is rejected as unauthenticated
-  if (yhub.conf.server?.auth == null) {
-    return { error: 'Unauthorized', status: '401 Unauthorized' }
-  }
+const runAuthHook = async (hook, run) => {
   try {
-    const authInfo = await yhub.conf.server.auth.readAuthInfo(req)
-    if (authInfo == null) {
-      return { error: 'Unauthorized', status: '401 Unauthorized' }
-    }
-    const accessType = await getAccess(authInfo)
-    if (requiredAccess === 'rw' && !t.hasWriteAccess(accessType)) {
-      return { error: 'Forbidden', status: '403 Forbidden' }
-    }
-    if (requiredAccess === 'r' && !t.hasReadAccess(accessType)) {
-      return { error: 'Forbidden', status: '403 Forbidden' }
-    }
-    return { authInfo, accessType }
+    return await run()
   } catch (err) {
-    // a branded apiError (e.g. apiError(503, ...)) lets the auth plugin signal a temporary
-    // auth-backend outage instead of the fail-closed 401
     if (isApiError(err)) throw err
-    return { error: 'Unauthorized', status: '401 Unauthorized' }
+    log.warn({ err, hook }, 'auth plugin failed')
+    throw apiError(503, `${hook} unavailable`)
   }
+}
+
+/**
+ * Normalize an `authorize` answer for `scope` - the one place every answer passes (rest, ws
+ * upgrade, ws recheck). `null` stays null (no permissions), a well-formed answer of an unknown
+ * future type version is denied whole (null) with a warning, a known-but-wrong-scope type or an
+ * invalid object throws - a plugin bug, never a silent denial.
+ *
+ * @template {perm.PermissionScope} S
+ * @param {S} scope
+ * @param {any} answer
+ * @return {perm.ToNormalizedPermissionType<S> | null}
+ */
+export const normalizeAuthorizeAnswer = (scope, answer) => {
+  if (answer == null) return null
+  const type = `permissions:${scope}:v1`
+  if (answer.type !== type) {
+    if (typeof answer.type === 'string' && !perm.isKnownPermissionsType(answer.type)) {
+      log.warn({ type: answer.type, scope }, 'unknown permissions type, denying')
+      return null
+    }
+    throw error.create(`auth plugin: authorize answered ${JSON.stringify(answer.type)} to a '${scope}' question`)
+  }
+  return /** @type {any} */ (perm.normalizePermissions(answer))
+}
+
+/**
+ * The auth funnel every rest request and ws upgrade passes: `authenticate` the caller (null =
+ * anonymous), then `authorize` against the route's scope and normalize the answer (null = no
+ * permissions - the gates answer 403 naming what is missing). Errors: see `runAuthHook`; a
+ * malformed answer or authInfo escapes unbranded - a logged 500, never a silent denial.
+ *
+ * @template {perm.PermissionScope} S
+ * @param {import('./index.js').YHub} yhub
+ * @param {import('uws').HttpRequest} req - the live uws request; must be entered synchronously
+ * @param {S} scope
+ * @param {perm.PermissionResourceId<S>} resourceId - the resource the route addresses, in the scope's shape
+ * @returns {Promise<{ authInfo: t.UserAuthInfo | null, permissions: perm.ToNormalizedPermissionType<S> | null }>}
+ */
+export const resolvePermissions = async (yhub, req, scope, resourceId) => {
+  const auth = /** @type {t.AuthPlugin<any>} */ (yhub.conf.server?.auth)
+  const authInfo = await runAuthHook('authenticate', () => auth.authenticate(req))
+  if (authInfo != null) s.$string.expect(authInfo.userid)
+  const answer = await runAuthHook('authorize', () => auth.authorize(scope, resourceId, authInfo))
+  return { authInfo, permissions: normalizeAuthorizeAnswer(scope, answer) }
 }
 
 const apiMethods = /** @type {{ get: 'get', post: 'post', put: 'put', patch: 'patch', delete: 'del' }} */ ({ get: 'get', post: 'post', put: 'put', patch: 'patch', delete: 'del' })
@@ -201,10 +253,20 @@ export const registerApi = (yhub, app) => {
   // registerWebsocketServer in server.js) - occupy its route key so a colliding custom endpoint
   // fails at startup like any duplicate
   registered.add('ws/v1/2')
+  // builtin endpoint names are reserved: one name in the `endpoint` permission facet must mean
+  // one route family, and a custom route squatting e.g. `ydoc` (in any version) would blur what
+  // an `endpoint: { ydoc: ... }` grant covers. 'ws' is the websocket route's own entry in the
+  // facet (`r` opens the socket, `u` admits doc updates - see server.js), reserved beyond the
+  // depth-keyed entry above.
+  const builtinNames = new Set([...builtinApi.map(e => e.name), 'ws'])
   ;[...builtinApi, ...(yhub.conf.server?.api ?? [])].forEach(endpoint => {
-    const { name, version = 'v1', scope = 'doc', path = '', accessPurpose = null } = endpoint
-    if (typeof name !== 'string' || !apiSegmentRegex.test(name) || typeof version !== 'string' || !apiSegmentRegex.test(version) || (scope !== 'doc' && scope !== 'org' && scope !== 'global') || (accessPurpose !== null && typeof accessPurpose !== 'string')) {
+    const builtin = builtinApi.includes(endpoint)
+    const { name, version = 'v1', scope = 'document', path = '' } = endpoint
+    if (typeof name !== 'string' || !apiSegmentRegex.test(name) || typeof version !== 'string' || !apiSegmentRegex.test(version) || (scope !== 'document' && scope !== 'org' && scope !== 'global')) {
       throw error.create(`invalid api endpoint: name="${name}" version="${version}" scope="${scope}"`)
+    }
+    if (!builtin && builtinNames.has(name)) {
+      throw error.create(`api endpoint "${name}" reuses a builtin endpoint name (refused in any version)`)
     }
     // an invalid cors config fails at startup, like every other endpoint validation here - with
     // the endpoint named, since the message alone can't tell an override from `server.cors`
@@ -232,7 +294,7 @@ export const registerApi = (yhub, app) => {
       })
     }
     // uws numbers only ":" segments, in order, regardless of interleaved static segments
-    const paramOffset = scope === 'doc' ? 2 : (scope === 'org' ? 1 : 0)
+    const paramOffset = scope === 'document' ? 2 : (scope === 'org' ? 1 : 0)
     // one name may serve several routes (e.g. collection + item) as long as their total segment
     // counts differ - routes of equal depth would collapse to the same uws pattern
     const routeKey = `${name}/${version}/${paramOffset + pathParams.length}`
@@ -240,7 +302,7 @@ export const registerApi = (yhub, app) => {
       throw error.create(`duplicate api endpoint "${name}" (version "${version}", ${paramOffset + pathParams.length} url params)`)
     }
     registered.add(routeKey)
-    const pattern = `/${prefix}/${name}/${version}${scope === 'global' ? '' : '/:org'}${scope === 'doc' ? '/:docid' : ''}${path}`
+    const pattern = `/${prefix}/${name}/${version}${scope === 'global' ? '' : '/:org'}${scope === 'document' ? '/:docid' : ''}${path}`
     const methods = /** @type {Array<keyof typeof apiMethods>} */ (Object.keys(apiMethods)).filter(method => endpoint[method] != null)
     if (methods.length === 0) {
       throw error.create(`api endpoint "${name}" defines no method handlers`)
@@ -250,16 +312,11 @@ export const registerApi = (yhub, app) => {
       if (typeof def?.handler !== 'function') {
         throw error.create(`api endpoint "${name}": ${method}.handler must be a function`)
       }
-      // a method may override the endpoint's purpose - a destructive method usually wants a
-      // stronger gate than its reads, and setting it on the endpoint would silently change the
-      // purpose every existing caller of the other methods is authorized against
-      const methodPurpose = def.accessPurpose ?? accessPurpose
-      if (methodPurpose !== null && typeof methodPurpose !== 'string') {
-        throw error.create(`api endpoint "${name}": invalid ${method}.accessPurpose`)
-      }
+      // the crud position a method needs in the effective endpoint mask follows its http verb
+      const requiredEndpoint = perm.createPermissions(scope, { endpoint: { [name]: /** @type {perm.CRUD} */ (({ get: '-r--', post: 'c---', put: '--u-', patch: '--u-', delete: '---d' })[method]) } })
       const querySpec = def.$query ?? null
       const coerceQuery = querySpec == null ? null : compileSpec(querySpec, name, method, '$query').coerce
-      const queryDeclaresBranch = querySpec != null && scope === 'doc' && Object.hasOwn(/** @type {object} */ (s.$$object.check(querySpec) ? querySpec.shape : querySpec), 'branch')
+      const queryDeclaresBranch = querySpec != null && scope === 'document' && Object.hasOwn(/** @type {object} */ (s.$$object.check(querySpec) ? querySpec.shape : querySpec), 'branch')
       // fetch clients can't send GET bodies - a get endpoint declaring $body would 400 every request
       if (def.$body != null && method === 'get') {
         throw error.create(`api endpoint "${name}": get cannot declare $body`)
@@ -268,9 +325,8 @@ export const registerApi = (yhub, app) => {
       app[apiMethods[method]](pattern, createApiHandler(yhub, {
         method,
         handler: /** @type {(req: t.ApiRequest) => any} */ (def.handler),
-        requiredAccess: method === 'get' ? 'r' : 'rw',
         scope,
-        accessPurpose: methodPurpose,
+        requiredEndpoint,
         pathParams,
         paramOffset,
         coerceQuery,
@@ -310,9 +366,8 @@ export const registerApi = (yhub, app) => {
  * @param {object} opts
  * @param {'get'|'post'|'put'|'patch'|'delete'} opts.method
  * @param {(req: t.ApiRequest) => any} opts.handler
- * @param {'r'|'rw'} opts.requiredAccess
- * @param {'doc'|'org'|'global'} opts.scope
- * @param {string|null} opts.accessPurpose
+ * @param {'document'|'org'|'global'} opts.scope
+ * @param {perm.Permissions} opts.requiredEndpoint - the scope's permission object naming the route's verb class
  * @param {Array<string>} opts.pathParams
  * @param {number} opts.paramOffset
  * @param {((o: any) => { err: string|null, result: any })|null} opts.coerceQuery
@@ -321,7 +376,7 @@ export const registerApi = (yhub, app) => {
  * @param {import('./cors.js').ResolvedCors|null} opts.cors
  * @returns {(res: import('uws').HttpResponse, req: import('uws').HttpRequest) => void}
  */
-const createApiHandler = (yhub, { method, handler, requiredAccess, scope, accessPurpose, pathParams, paramOffset, coerceQuery, bodySpec, queryDeclaresBranch, cors }) => (res, req) => {
+const createApiHandler = (yhub, { method, handler, scope, requiredEndpoint, pathParams, paramOffset, coerceQuery, bodySpec, queryDeclaresBranch, cors }) => (res, req) => {
   const ctx = { aborted: false }
   // assigned once the headers are snapshotted - stays false when reading the request throws
   let acceptsJson = false
@@ -374,13 +429,13 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
     const path = req.getUrl()
     const rawQuery = req.getQuery()
     const org = scope === 'global' ? null : /** @type {string} */ (req.getParameter(0))
-    const docid = scope === 'doc' ? /** @type {string} */ (req.getParameter(1)) : null
+    const docid = scope === 'document' ? /** @type {string} */ (req.getParameter(1)) : null
     /**
      * @type {{ [key: string]: any }}
      */
     let query = Object.fromEntries(new URLSearchParams(rawQuery))
     // derived from the parsed query so that repeated ?branch keys resolve like req.query (last wins)
-    const branch = scope === 'doc' ? /** @type {string} */ (query.branch ?? 'main') : null
+    const branch = scope === 'document' ? /** @type {string} */ (query.branch ?? 'main') : null
     /**
      * @type {{ [name: string]: string }}
      */
@@ -405,24 +460,20 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
       sendErrorResponse(res, writeHeaders, statusLine(403), { error: 'origin not allowed', code: 'origin-not-allowed' }, true)
       return
     }
-    const room = scope === 'doc' ? /** @type {t.Room} */ ({ org, docid, branch }) : null
+    const docRef = scope === 'document' ? /** @type {t.DocRef} */ ({ org, docid, branch }) : null
+    // the resource the route addresses, in the shape `authorize` expects for its scope
+    const resourceId = docRef ?? (scope === 'org' ? /** @type {{ org: string }} */ ({ org }) : {})
     log.debug({ endpoint: `${method.toUpperCase()} ${path}` }, 'api request')
-    // auth starts synchronously - readAuthInfo reads the live uws request
-    const auth = yhub.conf.server?.auth
-    const authPromise = authenticate(yhub, req, requiredAccess, authInfo =>
-      scope === 'doc'
-        ? (auth?.getAccessType(authInfo, /** @type {t.Room} */ (room), accessPurpose) ?? null)
-        : scope === 'org'
-          ? (auth?.getOrgAccessType?.(authInfo, /** @type {string} */ (org), accessPurpose) ?? null)
-          : (auth?.getGlobalAccessType?.(authInfo, accessPurpose) ?? null)
-    )
+    // auth starts synchronously - `authenticate` reads the live uws request
+    const authPromise = resolvePermissions(yhub, req, scope, resourceId)
     const handleRequest = async () => {
-      const authResult = await authPromise
+      // a rejection is handled by the catch below, which waits for the upload to complete first
+      const { authInfo, permissions } = await authPromise
       if (ctx.aborted) return
-      if ('error' in authResult) {
-        // handled by the catch below, which waits for the upload to complete before responding
-        throw apiError(number.parseInt(authResult.status), authResult.error)
-      }
+      // every rest endpoint - builtin and custom alike - is gated by the `endpoint` facet
+      // before its handler runs; the semantic facets (ydoc/awareness/history/delete) are the
+      // handler's business, checked the same way at the handler head
+      checkPermissions(permissions, requiredEndpoint)
       if (coerceQuery != null) {
         // a declared `branch` attribute validates the effective branch - materialize the server
         // default so `branch: 'main'` accepts requests that omit ?branch
@@ -465,11 +516,11 @@ const createApiHandler = (yhub, { method, handler, requiredAccess, scope, access
         org,
         docid,
         branch,
-        room,
+        docRef,
         params,
         headers,
-        authInfo: authResult.authInfo,
-        accessType: /** @type {'r'|'rw'} */ (authResult.accessType),
+        authInfo,
+        permissions,
         aborted: ctx.aborted,
         query,
         body,

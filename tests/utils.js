@@ -16,7 +16,7 @@ import { encodeRoomName } from '../src/stream.js'
 
 // Clean up test data. Nothing here creates the schema - the databases are expected to be
 // initialized with `npm run dev:up`, exactly like a deployment. The tombstone table matters
-// as much as the document table: room ids are deterministic per test, so a tombstone left behind
+// as much as the document table: document ids are deterministic per test, so a tombstone left behind
 // by one run would 404 that docid on every later run, restarts included.
 const sql = postgres(env.ensureConf('postgres-testing'))
 for (const table of ['yhub_ydoc_v1', 'yhub_ydoc_tombstones_v1']) {
@@ -29,7 +29,7 @@ const yhubPort = number.parseInt(env.getConf('test-port') || '4424')
  * Port for an additional test hub. Every test that spins up its own hub must use a distinct
  * `n`, so that concurrent test runs in other worktrees never collide.
  *
- * @param {number} n - 1-8
+ * @param {number} n - 1-9
  */
 export const testHubPort = n => yhubPort + n
 
@@ -48,7 +48,7 @@ export const apiTestState = { slowAborted: null }
 const testApiSpecs = [
   {
     name: 'echo',
-    get: { handler: async req => ({ org: req.org, docid: req.docid, branch: req.branch, room: req.room, q: req.query.q, userid: req.authInfo.userid, header: req.headers['x-echo'] ?? null }) },
+    get: { handler: async req => ({ org: req.org, docid: req.docid, branch: req.branch, docRef: req.docRef, q: req.query.q, userid: req.authInfo?.userid ?? null, header: req.headers['x-echo'] ?? null }) },
     post: { handler: async req => ({ received: await req.any(), rawLen: (await req.bytes()).byteLength }) },
     put: { handler: async () => 'hello' },
     patch: { handler: async () => new Uint8Array([1, 2, 3]) },
@@ -62,9 +62,9 @@ const testApiSpecs = [
     scope: 'org',
     get: {
       handler: async req => {
-        // @ts-expect-error room is null in org scope - regression guard for the scope-typed request
-        req.room?.docid // eslint-disable-line no-unused-expressions
-        return { org: req.org, room: req.room, docid: req.docid }
+        // @ts-expect-error docRef is null in org scope - regression guard for the scope-typed request
+        req.docRef?.docid // eslint-disable-line no-unused-expressions
+        return { org: req.org, docRef: req.docRef, docid: req.docid }
       }
     }
   },
@@ -77,11 +77,11 @@ const testApiSpecs = [
     // a foreign error carrying a numeric `status` must not leak its message (only apiError does)
     put: { handler: async () => { throw Object.assign(new Error('secret-internal'), { status: 502 }) } }
   },
-  // defined via the typing helper: doc scope by default, req.room is non-null - no casts needed
+  // defined via the typing helper: doc scope by default, req.docRef is non-null - no casts needed
   createApiEndpoint('getdoc', {
     get: {
       handler: async req => {
-        const { gcDoc } = await req.yhub.getDoc(req.room, { gc: true }, { gcOnMerge: false })
+        const { gcDoc } = await req.yhub.getDoc(req.docRef, { gc: true }, { gcOnMerge: false })
         return { doc: gcDoc }
       }
     }
@@ -172,13 +172,24 @@ export const yhub = await createYHub({
     cors: { origin: '*' },
     auth: types.createAuthPlugin({
       // pick a "unique" userid
-      async readAuthInfo (req) {
+      async authenticate (req) {
         return { userid: 'user1' }
       },
-      // always grant rw access
-      async getAccessType () { return 'rw' },
-      async getOrgAccessType () { return 'rw' },
-      async getGlobalAccessType () { return 'rw' }
+      // the suite's shared hub grants everything at every scope - restrictive behavior is
+      // exercised on dedicated hubs (auth.tests.js, permissionsEnforcement.tests.js)
+      authorize: types.createAuthorize({
+        document: async () => ({
+          type: 'permissions:document:v1',
+          ydoc: 'crud',
+          awareness: 'crud',
+          history: { from: 0, rollback: true, prune: true },
+          delete: ['soft', 'hard'],
+          endpoint: { '*': 'crud' }
+        }),
+        branch: async () => ({ type: 'permissions:branch:v1', endpoint: { '*': 'crud' } }),
+        org: async () => ({ type: 'permissions:org:v1', endpoint: { '*': 'crud' } }),
+        global: async () => ({ type: 'permissions:global:v1', endpoint: { '*': 'crud' } })
+      })
     }),
     api: testApiSpecs
   },
@@ -281,13 +292,13 @@ export const cleanPreviousClients = () => {
  * @param {t.TestCase} tc
  */
 export const createTestCase = async tc => {
-  const defaultRoom = { org: defaultOrg, docid: tc.testName + '-index', branch: 'main' }
+  const defaultDocRef = { org: defaultOrg, docid: tc.testName + '-index', branch: 'main' }
   cleanPreviousClients()
   await waitTasksProcessed(yhub)
   return {
     // this must match with the default values in createWsClient
-    defaultRoom,
-    defaultStream: encodeRoomName(defaultRoom, yhub.stream.prefix),
+    defaultDocRef,
+    defaultStream: encodeRoomName(defaultDocRef, yhub.stream.prefix),
     yhub,
     org: defaultOrg,
     /**

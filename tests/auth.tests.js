@@ -2,6 +2,7 @@ import * as t from 'lib0/testing'
 import * as jwt from 'lib0/crypto/jwt'
 import * as ecdsa from 'lib0/crypto/ecdsa'
 import * as s from 'lib0/schema'
+import * as p from '../src/permissions.js'
 import * as types from '../src/types.js'
 import * as utils from './utils.js'
 import * as f from 'lib0/function'
@@ -28,55 +29,86 @@ await utils.createTestHub({
   server: {
     port: authHubPort,
     auth: types.createAuthPlugin({
-      async readAuthInfo (req) {
+      async authenticate (req) {
         const authJwt = req.getQuery('auth')
-        if (authJwt == null || authJwt.length === 0) {
-          throw new Error('no auth token')
+        // no token: an anonymous caller (the document handler below answers it null)
+        if (authJwt == null || authJwt.length === 0) return null
+        let auth
+        try {
+          auth = await jwt.verifyJwt(authPublicKey, authJwt)
+        } catch (_err) {
+          // a presented credential that fails verification is rejected with a branded 401 - an
+          // unbranded throw would be read as an auth-backend outage (503)
+          throw apiError(401, 'invalid token')
         }
-        const auth = await jwt.verifyJwt(authPublicKey, authJwt)
-        const authInfo = s.$object({ rooms: s.$array(s.$object({ room: types.$room, accessType: types.$accessType })), userid: s.$string }).expect(auth.payload)
-        return authInfo
+        const payload = s.$object({ docRefs: s.$array(s.$object({ docRef: types.$docRef, permissions: p.$documentPermissionsV1 })), userid: s.$string }).expect(auth.payload)
+        // token payloads are external json - sanitize each permission object once, at this
+        // boundary, so prototype-member endpoint names stay inert own keys downstream
+        return { userid: payload.userid, docRefs: payload.docRefs.map(r => ({ docRef: r.docRef, permissions: /** @type {import('../src/permissions.js').DocumentPermissionsV1} */ (p.sanitizePermissions(r.permissions)) })) }
       },
-      async getAccessType (authInfo, room) {
-        const roomAccess = authInfo.rooms.find(r => f.equalityDeep(room, r.room))
-        return roomAccess?.accessType || null
-      }
+      // capability-token pattern: the answer is a lookup in the sanitized claims - deterministic
+      // per (type, resourceId, user), so the recheck contract holds trivially
+      authorize: types.createAuthorize({
+        /**
+         * @param {types.DocRef} docRef
+         * @param {{ userid: string, docRefs: Array<{ docRef: types.DocRef, permissions: import('../src/permissions.js').DocumentPermissionsV1 }> } | null} user
+         */
+        document: async (docRef, user) => user?.docRefs.find(r => f.equalityDeep(docRef, r.docRef))?.permissions ?? null
+      })
     })
   }
 })
 
+/**
+ * The documented migration mapping (permissions.md §12) of the retired AccessType onto document
+ * permission objects - destructive facets deliberately excluded; the 'r' row grants only the
+ * GET verb class on endpoints.
+ *
+ * @param {'r'|'rw'} accessType
+ * @return {import('../src/permissions.js').DocumentPermissionsV1}
+ */
+const docPermissionsPreset = accessType => ({
+  type: 'permissions:document:v1',
+  ydoc: accessType === 'rw' ? 'cru-' : '-r--',
+  awareness: '-ru-',
+  history: { from: 0 },
+  endpoint: { '*': accessType === 'rw' ? 'crud' : '-r--' }
+})
+
 const kickHubPort = utils.testHubPort(2)
 /**
- * Mutable permission table: userid -> accessType, so tests can revoke/downgrade access of
- * connected users. Unlisted users get 'rw'. `null` is a meaningful (revoked) entry, hence the
- * explicit `undefined` check. `'throw'` makes the plugin fail for that user; `'throw503'` makes
- * it fail with a branded `apiError(503, ...)`.
+ * Mutable permission table: userid -> document permissions, so tests can revoke/downgrade access
+ * of connected users. Unlisted users get the full 'rw' preset. `null` is a meaningful (revoked)
+ * entry, hence the explicit `undefined` check. `'throw'` makes the plugin fail for that user;
+ * `'throw503'` makes it fail with a branded `apiError(503, ...)`.
  *
- * @type {{ [userid: string]: types.AccessType | 'throw' | 'throw503' }}
+ * @type {{ [userid: string]: import('../src/permissions.js').DocumentPermissionsV1 | null | 'throw' | 'throw503' }}
  */
-const kickAccess = {}
+const kickPerms = {}
 // each recheckAuth test resets the table up front rather than cleaning up at its end - a thrown
 // assert would otherwise leak a revoked entry into the next test, whose client then never syncs
 // (endless 403 reconnect loop) and hangs the suite
-const resetKickAccess = () => { for (const userid in kickAccess) delete kickAccess[userid] }
-let kickAccessChecks = 0
+const resetKickPerms = () => { for (const userid in kickPerms) delete kickPerms[userid] }
+let kickPermChecks = 0
 await utils.createTestHub({
   worker: null,
   server: {
     port: kickHubPort,
     auth: types.createAuthPlugin({
-      async readAuthInfo (req) {
+      async authenticate (req) {
         // the extra `group` property makes connection authInfos proper supersets of the
         // `{ userid }` matchers used in the recheckAuth tests
         return { userid: req.getQuery('user') ?? 'user1', group: 'g0' }
       },
-      async getAccessType (authInfo) {
-        kickAccessChecks++
-        const access = kickAccess[authInfo.userid]
-        if (access === 'throw') throw new Error('auth backend down')
-        if (access === 'throw503') throw apiError(503, 'auth backend unavailable')
-        return access === undefined ? 'rw' : access
-      }
+      authorize: types.createAuthorize({
+        document: async (_docRef, user) => {
+          kickPermChecks++
+          const entry = kickPerms[user.userid]
+          if (entry === 'throw') throw new Error('auth backend down')
+          if (entry === 'throw503') throw apiError(503, 'auth backend unavailable')
+          return entry === undefined ? docPermissionsPreset('rw') : entry
+        }
+      })
     })
   }
 })
@@ -84,13 +116,15 @@ await utils.createTestHub({
 /**
  * This is a function the server would use to create a jwt. Note that the private key must be kept
  * private. The authenticated client should only know about the jwt.
+ *
+ * @param {'r'|'rw'} [accessType]
  */
 const createJwtAccessToken = async (accessType = 'rw') => {
   const token = await jwt.encodeJwt(authPrivateKey, {
     iss: 'yhub-demo',
     exp: time.getUnixTime() + 60 * 60 * 1000, // token expires in one hour
     userid: 'testUser', // associate the client with a unique id that can will be used to check permissions
-    rooms: [{ room: { org: 'testOrg', docid: 'testSampleAuthServer-index', branch: 'main' }, accessType }]
+    docRefs: [{ docRef: { org: 'testOrg', docid: 'testSampleAuthServer-index', branch: 'main' }, permissions: docPermissionsPreset(accessType) }]
   })
   return token
 }
@@ -150,8 +184,8 @@ const recordCloseCodes = (provider, closeCodes) => {
  * @param {t.TestCase} tc
  */
 export const testRecheckAuthKicksRevokedUser = async tc => {
-  resetKickAccess()
-  const { createWsClient, yhub, defaultRoom } = await utils.createTestCase(tc)
+  resetKickPerms()
+  const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
   const wsUrl = utils.wsUrlFromPort(kickHubPort)
   const alice = await createWsClient({ waitForSync: true, wsUrl, wsParams: { user: 'alice' } })
   const bob = await createWsClient({ waitForSync: true, wsUrl, wsParams: { user: 'bob' } })
@@ -161,12 +195,12 @@ export const testRecheckAuthKicksRevokedUser = async tc => {
   /** @type {Array<number>} */
   const bobCloseCodes = []
   recordCloseCodes(bob.provider, bobCloseCodes)
-  kickAccess.alice = null
+  kickPerms.alice = null
   // bob's live session keeps write access, so a (wrongly) rechecked bob would be closed on the
   // rw != r mismatch - guards that the users filter actually selects connections
-  kickAccess.bob = 'r'
+  kickPerms.bob = docPermissionsPreset('r')
   // published via the shared hub, received by the kick hub's connections (same redis prefix)
-  await yhub.recheckAuth(defaultRoom, { users: [{ userid: 'alice' }] })
+  await yhub.recheckAuth(defaultDocRef, { users: [{ userid: 'alice' }] })
   await promise.until(5000, () => !alice.provider.wsconnected)
   t.assert(aliceCloseCodes.includes(wsCloseAuthRevoked), 'alice was closed with the auth close code')
   bob.ydoc.get().setAttr('x', 1)
@@ -180,17 +214,17 @@ export const testRecheckAuthKicksRevokedUser = async tc => {
  * @param {t.TestCase} tc
  */
 export const testRecheckAuthClosesOnDowngrade = async tc => {
-  resetKickAccess()
-  const { createWsClient, yhub, defaultRoom } = await utils.createTestCase(tc)
+  resetKickPerms()
+  const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
   const wsUrl = utils.wsUrlFromPort(kickHubPort)
   const alice = await createWsClient({ waitForSync: true, wsUrl, wsParams: { user: 'alice' } })
   const bob = await createWsClient({ waitForSync: true, wsUrl, wsParams: { user: 'bob' } })
   /** @type {Array<number>} */
   const aliceCloseCodes = []
   recordCloseCodes(alice.provider, aliceCloseCodes)
-  kickAccess.alice = 'r'
+  kickPerms.alice = docPermissionsPreset('r')
   // the userid string shorthand, end-to-end
-  await yhub.recheckAuth(defaultRoom, { users: ['alice'] })
+  await yhub.recheckAuth(defaultDocRef, { users: ['alice'] })
   await promise.until(5000, () => aliceCloseCodes.includes(wsCloseAuthRevoked))
   // alice reconnects read-only: her edits must no longer reach bob
   await promise.until(5000, () => alice.provider.wsconnected)
@@ -200,8 +234,8 @@ export const testRecheckAuthClosesOnDowngrade = async tc => {
   t.assert(bob.ydoc.get().getAttr('hidden') == null, 'downgraded alice cannot write anymore')
   // an access upgrade (r -> rw) must also close - alice reconnects with write access restored
   // (and her read-only edits sync over)
-  delete kickAccess.alice
-  await yhub.recheckAuth(defaultRoom, { users: ['alice'] })
+  delete kickPerms.alice
+  await yhub.recheckAuth(defaultDocRef, { users: ['alice'] })
   await promise.until(5000, () => aliceCloseCodes.filter(code => code === wsCloseAuthRevoked).length >= 2)
   await promise.until(5000, () => alice.provider.wsconnected)
   alice.ydoc.get().setAttr('visible', '!')
@@ -212,8 +246,8 @@ export const testRecheckAuthClosesOnDowngrade = async tc => {
  * @param {t.TestCase} tc
  */
 export const testRecheckAuthForceDisconnect = async tc => {
-  resetKickAccess()
-  const { createWsClient, yhub, defaultRoom } = await utils.createTestCase(tc)
+  resetKickPerms()
+  const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
   const wsUrl = utils.wsUrlFromPort(kickHubPort)
   const alice = await createWsClient({ waitForSync: true, wsUrl, wsParams: { user: 'alice' } })
   const bob = await createWsClient({ waitForSync: true, wsUrl, wsParams: { user: 'bob' } })
@@ -224,7 +258,7 @@ export const testRecheckAuthForceDisconnect = async tc => {
   // the update can land in the same stream batch as the auth:check - a force disconnect midway
   // through the batch must not trip the 1011/backpressure error paths (see WSUser.sendData)
   alice.ydoc.get().setAttr('a', 42)
-  await yhub.recheckAuth(defaultRoom, { forceDisconnect: true })
+  await yhub.recheckAuth(defaultDocRef, { forceDisconnect: true })
   await promise.until(5000, () => closeCodes.length >= 2)
   t.assert(closeCodes.every(code => code === wsCloseAuthRevoked), 'both connections were closed with the auth close code')
   // access is unchanged - both reconnect (a force disconnect drops sessions, it doesn't revoke)
@@ -240,12 +274,12 @@ export const testRecheckAuthForceDisconnect = async tc => {
  * @param {t.TestCase} tc
  */
 export const testRecheckAuthPendingCheckOnConnect = async tc => {
-  resetKickAccess()
-  const { createWsClient, yhub, defaultRoom } = await utils.createTestCase(tc)
+  resetKickPerms()
+  const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
   const wsUrl = utils.wsUrlFromPort(kickHubPort)
-  await yhub.recheckAuth(defaultRoom, { forceDisconnect: true })
-  await yhub.recheckAuth(defaultRoom, { users: ['alice'] })
-  const checksBefore = kickAccessChecks
+  await yhub.recheckAuth(defaultDocRef, { forceDisconnect: true })
+  await yhub.recheckAuth(defaultDocRef, { users: ['alice'] })
+  const checksBefore = kickPermChecks
   const alice = createWsClient({ wsUrl, wsParams: { user: 'alice' } })
   /** @type {Array<number>} */
   const aliceCloseCodes = []
@@ -254,7 +288,7 @@ export const testRecheckAuthPendingCheckOnConnect = async tc => {
   await promise.wait(500)
   t.assert(alice.provider.wsconnected, 'a pending force disconnect must not kick a freshly authorized connection')
   t.assert(!aliceCloseCodes.includes(wsCloseAuthRevoked), 'the pending directives were not replayed as kicks')
-  t.assert(kickAccessChecks === checksBefore + 2, 'exactly the upgrade check and the open-handler recheck ran')
+  t.assert(kickPermChecks === checksBefore + 2, 'exactly the upgrade check and the open-handler recheck ran')
 }
 
 /**
@@ -265,38 +299,48 @@ export const testRecheckAuthPendingCheckOnConnect = async tc => {
  * @param {t.TestCase} tc
  */
 export const testRecheckAuthFailsClosed = async tc => {
-  resetKickAccess()
-  const { createWsClient, yhub, defaultRoom } = await utils.createTestCase(tc)
+  resetKickPerms()
+  const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
   const wsUrl = utils.wsUrlFromPort(kickHubPort)
   const carol = await createWsClient({ waitForSync: true, wsUrl, wsParams: { user: 'carol' } })
   /** @type {Array<number>} */
   const closeCodes = []
   recordCloseCodes(carol.provider, closeCodes)
-  kickAccess.carol = 'throw'
-  await yhub.recheckAuth(defaultRoom, { users: ['carol'] })
+  kickPerms.carol = 'throw'
+  await yhub.recheckAuth(defaultDocRef, { users: ['carol'] })
   await promise.until(5000, () => closeCodes.includes(1013))
   t.assert(!closeCodes.includes(wsCloseAuthRevoked), 'a transient auth failure must not look like a revoke')
   // the auth backend recovers - the still-reconnecting client syncs again
-  delete kickAccess.carol
+  delete kickPerms.carol
   await promise.until(5000, () => carol.provider.wsconnected)
 }
 
 /**
- * An auth plugin may signal a temporary auth-backend outage by throwing a branded
- * `apiError(503, ...)` - rest requests respond with that status and message instead of the
- * fail-closed 401.
+ * The error classes of the auth hooks on rest requests: a branded `apiError` passes its status
+ * through (a 503 outage, a 401 rejecting a credential), an unbranded throw is an infrastructure
+ * failure (503 - deny is a value, never a throw), and no credential at all is an anonymous caller
+ * whose missing permissions answer 403, never 401.
  *
  * @param {t.TestCase} _tc
  */
-export const testAuthPluginTransientOutageRest = async _tc => {
-  resetKickAccess()
+export const testAuthPluginErrorClasses = async _tc => {
+  resetKickPerms()
   const url = `http://localhost:${kickHubPort}/api/ydoc/v1/testOrg/anyDoc?user=eve`
-  kickAccess.eve = 'throw503'
+  kickPerms.eve = 'throw503'
   const res503 = await fetch(url)
   t.assert(res503.status === 503, 'a branded apiError propagates its status')
   t.compare(buffer.decodeAny(new Uint8Array(await res503.arrayBuffer())), { error: 'auth backend unavailable' })
-  kickAccess.eve = 'throw'
-  const res401 = await fetch(url)
-  t.assert(res401.status === 401, 'an unbranded auth plugin error stays fail-closed')
-  await res401.arrayBuffer()
+  kickPerms.eve = 'throw'
+  const resThrow = await fetch(url)
+  t.assert(resThrow.status === 503, 'an unbranded authorize error is a transient 503')
+  t.compare(buffer.decodeAny(new Uint8Array(await resThrow.arrayBuffer())), { error: 'authorize unavailable' })
+  // the jwt hub: a bad credential is rejected by the plugin's own branded 401, no credential is
+  // an anonymous caller without a grant - 403
+  const authUrl = `http://localhost:${authHubPort}/api/ydoc/v1/testOrg/anyDoc`
+  const resBadToken = await fetch(`${authUrl}?auth=garbage`)
+  t.assert(resBadToken.status === 401)
+  t.compare(buffer.decodeAny(new Uint8Array(await resBadToken.arrayBuffer())), { error: 'invalid token' })
+  const resAnon = await fetch(authUrl)
+  t.assert(resAnon.status === 403, 'an anonymous caller without permissions is denied, not unauthenticated')
+  t.assert(buffer.decodeAny(new Uint8Array(await resAnon.arrayBuffer())).code === 'missing-permission')
 }

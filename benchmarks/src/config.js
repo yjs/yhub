@@ -52,7 +52,7 @@ export const config = {
      *
      * This is the `XAUTOCLAIM` min-idle-time. It used to double as a hard limit
      * on compaction time — a compaction that outlived it was handed straight
-     * back to its own worker and ran twice (measured: a 4 MB room under 500
+     * back to its own worker and ran twice (measured: a 4 MB document under 500
      * clients produced 6 task starts and 2 duplicate-key errors at
      * `taskDebounce: 10000`). Workers now renew the lease of the tasks they are
      * running (`Stream.renewTasks`), so the value no longer has to exceed
@@ -77,7 +77,7 @@ export const config = {
     servers: 1,
     /** worker processes to fork. Y6.5 overrides this. */
     workers: 1,
-    /** org name used for every room the suite creates */
+    /** org name used for every document the suite creates */
     org: 'bench'
   },
 

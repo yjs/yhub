@@ -51,9 +51,21 @@ export const conf = {
     // latter is safe here only because `credentials` stays off; browsers reject that pair.
     cors: corsOrigin === null ? undefined : { origin: corsOrigin.includes(',') ? corsOrigin.split(',').map(origin => origin.trim()).filter(origin => origin !== '') : corsOrigin.trim() },
     auth: types.createAuthPlugin({
-      // this demo configuration picks a "unique" userid and grants everyone write access
-      async readAuthInfo (_req) { return { userid: random.oneOf(userIdChoices) } },
-      async getAccessType () { return 'rw' }
+      // this demo configuration picks a "unique" userid and grants everyone full document
+      // access - including the destructive permissions the old blanket 'rw' implied. No
+      // org/branch/global grants: scopes without a handler deny, and this demo serves no
+      // endpoints at those scopes.
+      async authenticate (_req) { return { userid: random.oneOf(userIdChoices) } },
+      authorize: types.createAuthorize({
+        document: async () => ({
+          type: 'permissions:document:v1',
+          ydoc: 'cru-',
+          awareness: '-ru-',
+          history: { from: 0, rollback: true, prune: true },
+          delete: ['soft'],
+          endpoint: { '*': 'crud' }
+        })
+      })
     })
   },
   worker: {

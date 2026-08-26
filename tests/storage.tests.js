@@ -29,19 +29,19 @@ const retrieveDoc = async (org, docid) => {
  */
 export const testUnsafePersistDoc = async tc => {
   const org = tc.testName
-  const room = { org, docid: 'index', branch: 'main' }
+  const docRef = { org, docid: 'index', branch: 'main' }
 
   t.info('persisting two docs via unsafePersistDoc')
   const ydoc1 = new Y.Doc()
   ydoc1.get().setAttr('a', 1)
-  await yhub.unsafePersistDoc(room, Y.encodeStateAsUpdate(ydoc1), { by: 'alice' })
+  await yhub.unsafePersistDoc(docRef, Y.encodeStateAsUpdate(ydoc1), { by: 'alice' })
 
   const ydoc2 = new Y.Doc()
   ydoc2.get().setAttr('b', 2)
-  await yhub.unsafePersistDoc(room, Y.encodeStateAsUpdate(ydoc2), { by: 'bob' })
+  await yhub.unsafePersistDoc(docRef, Y.encodeStateAsUpdate(ydoc2), { by: 'bob' })
 
   t.info('retrieving and asserting merged content')
-  const { gcDoc: ydocBin } = await yhub.getDoc(room, { gc: true }, { gcOnMerge: false })
+  const { gcDoc: ydocBin } = await yhub.getDoc(docRef, { gc: true }, { gcOnMerge: false })
   const merged = Y.createDocFromUpdate(ydocBin)
   t.assert(merged.get().getAttr('a') === 1)
   t.assert(merged.get().getAttr('b') === 2)

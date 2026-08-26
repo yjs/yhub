@@ -16,15 +16,15 @@ import { stats } from '../report.js'
 const MB = 1024 * 1024
 
 /**
- * Seed a room with a document of the given size by writing it through a client,
- * then wait for the worker to compact it. After this the room is in the state a
- * real document is in right after compaction: persisted, nothing pending.
+ * Seed a document of the given size by writing it through a client, then wait
+ * for the worker to compact it. After this the document is in the state a real
+ * document is in right after compaction: persisted, nothing pending.
  *
  * @param {import('../cluster.js').Cluster} cluster
  * @param {string} docid
  * @param {number} targetBytes
  */
-const seedRoom = async (cluster, docid, targetBytes) => {
+const seedDoc = async (cluster, docid, targetBytes) => {
   if (targetBytes === 0) return
   const { gcUpdate } = getFixture({ targetBytes })
   const writer = await new RawClient({ port: cluster.ports[0], docid }).connect()
@@ -85,13 +85,13 @@ export default {
             ...syncStats(clients),
             'serverMem rss (MB)': m.server.rssEndMB,
             'above baseline (MB)': m.server.rssEndMB - baseline,
-            'MB per room': (m.server.rssEndMB - baseline) / n,
+            'MB per doc': (m.server.rssEndMB - baseline) / n,
             'serverCpu (ms)': m.server.cpuMs
           })
           closeClients(clients)
           await promise.wait(500)
         }
-        report.note(`Each connection is also a new room, so this is the per-connection **and** per-room floor. Server baseline with nothing connected: ${baseline.toFixed(1)} MB. Compare \`MB per room\` against Y2.2, where all N share one room: the difference is the cost of a room.`)
+        report.note(`Each connection is also a new document, so this is the per-connection **and** per-document floor. Server baseline with nothing connected: ${baseline.toFixed(1)} MB. Compare \`MB per doc\` against Y2.2, where all N share one document: the difference is the cost of a document.`)
       }
     },
     {
@@ -120,7 +120,7 @@ export default {
           closeClients(clients)
           await promise.wait(500)
         }
-        report.note(`One \`WSUser\` and one socket per connection; no \`Y.Doc\` per connection or per room, and no document cache anywhere in the heap. Server baseline with nothing connected: ${baseline.toFixed(1)} MB.`)
+        report.note(`One \`WSUser\` and one socket per connection; no \`Y.Doc\` per connection or per document, and no document cache anywhere in the heap. Server baseline with nothing connected: ${baseline.toFixed(1)} MB.`)
       }
     },
     {
@@ -164,7 +164,7 @@ export default {
         )
         for (const targetBytes of config.scale.docSizes) {
           const docid = `y24-${sizeLabel(targetBytes)}`
-          await seedRoom(cluster, docid, targetBytes)
+          await seedDoc(cluster, docid, targetBytes)
           await cluster.flushCache()
           await cluster.mark()
           const started = performance.now()
@@ -189,7 +189,7 @@ export default {
           closeClients(clients)
           await promise.wait(500)
         }
-        report.note('Capped at `scale.joinStormMax` = ' + config.scale.joinStormMax + ' joiners, separately from the rest of the `connections` sweep: `peak MB per concurrent sync` below is per joiner **per MB of document**, so this is the one measurement bounded by RAM rather than CPU. Y2.5 is where larger populations are covered, by ramping them.\n\nThe join storm: a deploy, a load-balancer failover, or everyone opening the same document at 09:00. The fetch, the state-vector scan and the merge are identical across concurrent joiners of the same room and are nevertheless recomputed for each one (`src/server.js:740-764`). The bytes sent are inherent; this work is not. `queueDepth` is the compute pool\'s unbounded queue, which holds full payloads.')
+        report.note('Capped at `scale.joinStormMax` = ' + config.scale.joinStormMax + ' joiners, separately from the rest of the `connections` sweep: `peak MB per concurrent sync` below is per joiner **per MB of document**, so this is the one measurement bounded by RAM rather than CPU. Y2.5 is where larger populations are covered, by ramping them.\n\nThe join storm: a deploy, a load-balancer failover, or everyone opening the same document at 09:00. The fetch, the state-vector scan and the merge are identical across concurrent joiners of the same document and are nevertheless recomputed for each one (`src/server.js:740-764`). The bytes sent are inherent; this work is not. `queueDepth` is the compute pool\'s unbounded queue, which holds full payloads.')
       }
     },
     {
@@ -206,7 +206,7 @@ export default {
         )
         const targetBytes = config.scale.docSizes[config.scale.docSizes.length - 1]
         const docid = `y25-${sizeLabel(targetBytes)}`
-        await seedRoom(cluster, docid, targetBytes)
+        await seedDoc(cluster, docid, targetBytes)
         for (const rate of config.scale.joinRates) {
           await cluster.flushCache()
           await cluster.mark()
@@ -239,7 +239,7 @@ export default {
         const targetBytes = config.scale.docSizes[config.scale.docSizes.length - 1]
         for (const k of config.scale.pendingUpdates) {
           const docid = `y26-${k}`
-          await seedRoom(cluster, docid, targetBytes)
+          await seedDoc(cluster, docid, targetBytes)
           // write k updates and do NOT let the worker compact them, so the
           // document is in the state an actively edited document is always in
           const writer = await new RawClient({ port: cluster.ports[0], docid }).connect()

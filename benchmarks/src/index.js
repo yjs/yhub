@@ -49,7 +49,7 @@ const withTimeout = (p, ms, label) => Promise.race([
 /**
  * A run of this suite writes several GB to S3 — every compaction rewrites the
  * whole document and its nongc twin. If the storage backend fills up, MinIO
- * starts refusing writes, compaction fails rather than slows, rooms never drain,
+ * starts refusing writes, compaction fails rather than slows, documents never drain,
  * and benchmarks time out with numbers that look plausible and are not. Cheaper
  * to say so up front than to debug it afterwards.
  */
@@ -81,7 +81,7 @@ const run = async () => {
       } finally {
         const failures = takeTaskFailures()
         if (failures > 0) {
-          benchReport.warn(`${failures} compaction task(s) failed during this benchmark, so these numbers are not a valid measurement. The usual cause is a full S3 backend: compaction then fails rather than slows, the room is never persisted, and everything downstream of it is wrong. Check free disk and re-run.`)
+          benchReport.warn(`${failures} compaction task(s) failed during this benchmark, so these numbers are not a valid measurement. The usual cause is a full S3 backend: compaction then fails rather than slows, the document is never persisted, and everything downstream of it is wrong. Check free disk and re-run.`)
         }
         benchReport.close()
         await reclaimStorage()

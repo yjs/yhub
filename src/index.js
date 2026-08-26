@@ -13,23 +13,24 @@ import { agentTask } from './agents.js'
 import { logger } from './logger.js'
 import * as time from 'lib0/time'
 
-export { createAuthPlugin, createApiEndpoint, DocDeletedError } from './types.js'
-export { apiError, encodedAny } from './api.js'
+export { createAuthPlugin, createAuthorize, createApiEndpoint, DocDeletedError } from './types.js'
+export { apiError, checkPermissions, encodedAny } from './api.js'
+export { createPermissions, createDocumentPermissions, createBranchPermissions, createOrgPermissions, createGlobalPermissions } from './permissions.js'
 export { wsCloseAuthRevoked, wsCloseDocDeleted } from './server.js'
 export { logger } from './logger.js'
 
 const log = logger.child({ module: 'worker' })
 
 /**
- * Erase the content of a deleted `room`: its rows in `yhub_ydoc_v1` together with the assets they
+ * Erase the content of a deleted `docRef`: its rows in `yhub_ydoc_v1` together with the assets they
  * reference, and any quarantined backlog in redis. Goes through the same `deleteReferences` path
  * compaction uses, so a row is always dropped before the asset it points at - the reverse would
  * leave references dangling, which read back as silently missing content.
  *
  * Deliberately not part of the public api. Erasing content is only safe once `hard` is set, which
  * is what arms the barrier in `Persistence.store` against a compaction that is still in flight;
- * reachable on its own it would invite purging a merely soft-deleted room, whose rows a straggler
- * compaction could then write straight back. `deleteDoc(room, { hard: true })` is the way in, and
+ * reachable on its own it would invite purging a merely soft-deleted document, whose rows a straggler
+ * compaction could then write straight back. `deleteDoc(docRef, { hard: true })` is the way in, and
  * it is also how a retention task erases what it swept up with `getTombstones`.
  *
  * The returned tombstone carries the `purgedAt` this stamped. That records that the rows are gone
@@ -38,17 +39,17 @@ const log = logger.child({ module: 'worker' })
  * interrupted purge leaves behind is an orphaned object, never a reference to a missing one.
  *
  * @param {YHub} yhub
- * @param {t.Room} room
+ * @param {t.DocRef} docRef
  * @returns {Promise<t.Tombstone>}
  */
-const purgeDoc = async (yhub, room) => {
+const purgeDoc = async (yhub, docRef) => {
   // different stores, no ordering between them
   const [, , purgedAt] = await promise.all([
-    yhub.persistence.purgeDoc(room),
-    yhub.stream.deleteQuarantineStreams(room),
+    yhub.persistence.purgeDoc(docRef),
+    yhub.stream.deleteQuarantineStreams(docRef),
     yhub.stream.getTime()
   ])
-  return yhub.persistence.storeTombstonePurged(room, purgedAt)
+  return yhub.persistence.storeTombstonePurged(docRef, purgedAt)
 }
 
 /**
@@ -87,7 +88,7 @@ export class YHub {
      * The tasks we are currently computing. Their lease is renewed until they are done, so they
      * are neither reclaimed by another worker nor handed back to us by `claimTasks`.
      *
-     * @type {Map<string, { started: number, room: t.Room }>}
+     * @type {Map<string, { started: number, docRef: t.DocRef }>}
      */
     const inflight = new Map()
     // taskDebounce is the granularity at which work becomes claimable - a task enqueued now (the
@@ -104,10 +105,10 @@ export class YHub {
         const tasks = (free > 0 ? await this.stream.claimTasks(free) : []).filter(task => !inflight.has(task.redisClock))
         tasks.length && log.info({ taskCount: tasks.length }, 'picked up tasks')
         tasks.forEach(task => {
-          const run = { started: time.getUnixTime(), room: task.room }
+          const run = { started: time.getUnixTime(), docRef: task.docRef }
           inflight.set(task.redisClock, run)
           this._runTask(task)
-            .catch(err => log.error({ err, room: task.room }, 'error processing task'))
+            .catch(err => log.error({ err, docRef: task.docRef }, 'error processing task'))
             // an abandoned run must not delete the entry of the run that replaced it
             .finally(() => inflight.get(task.redisClock) === run && inflight.delete(task.redisClock))
         })
@@ -126,7 +127,7 @@ export class YHub {
    * slow `claimTasks` or its error backoff can't starve renewals.
    *
    * @param {{ shouldRun: boolean }} ctx
-   * @param {Map<string, { started: number, room: t.Room }>} inflight
+   * @param {Map<string, { started: number, docRef: t.DocRef }>} inflight
    */
   async _renewLeases (ctx, inflight) {
     const interval = math.min(1000, math.floor(this.stream.taskDebounce / 3))
@@ -137,10 +138,10 @@ export class YHub {
       // the compute pool kills a compute task that overruns, which rejects it. Getting here means
       // the task is stuck where we can't kill it - waiting for a wedged s3 or postgres socket, or
       // queued behind other compute tasks - so all we can do is let go: stop renewing, and the
-      // room is reclaimed by another worker after redis.taskDebounce.
+      // document is reclaimed by another worker after redis.taskDebounce.
       array.from(inflight.entries()).forEach(([taskId, run]) => {
         if (now - run.started > this.computePool.taskTimeout) {
-          log.error({ room: run.room, taskDurationMs: now - run.started }, 'task exceeded maxTaskDuration outside of compute, abandoning it')
+          log.error({ docRef: run.docRef, taskDurationMs: now - run.started }, 'task exceeded maxTaskDuration outside of compute, abandoning it')
           inflight.delete(taskId)
         }
       })
@@ -161,64 +162,64 @@ export class YHub {
    */
   async _runTask (task) {
     if (task.type !== 'compact') return
-    const taskLog = log.child({ taskType: task.type, room: task.room })
+    const taskLog = log.child({ taskType: task.type, docRef: task.docRef })
     /**
      * @type {Error | null}
      */
     let taskErr = null
     const taskTs = time.getUnixTime()
     try {
-      this.conf.worker?.events?.taskStart?.({ room: task.room, timestamp: taskTs })
+      this.conf.worker?.events?.taskStart?.({ docRef: task.docRef, timestamp: taskTs })
       taskLog.info('task started')
       // cheap pre-check: pull the stream and the persisted clock (no ydoc blobs, no S3) so
       // we can skip the expensive fetch+merge when there is nothing new to persist. only
       // update/prune messages change the document and advance lastUpdateClock.
       const [cachedMessages, persisted] = await promise.all([
-        this.stream.getMessages([{ room: task.room, clock: '0' }]).then(ms => ms[0] || { messages: [], lastClock: '0' }),
-        this.persistence.retrieveDoc(task.room, {})
+        this.stream.getMessages([{ docRef: task.docRef, clock: '0' }]).then(ms => ms[0] || { messages: [], lastClock: '0' }),
+        this.persistence.retrieveDoc(task.docRef, {})
       ])
       const lastUpdateClock = cachedMessages.messages.reduce(
         (clk, m) => (m.type === 'ydoc:update:v1' || m.type === 'prune:v1') ? strm.maxRedisClock(clk, m.redisClock) : clk,
         persisted.lastClock
       )
-      // a hard-deleted room is never persisted again - its content is thrown away and its
+      // a hard-deleted document is never persisted again - its content is thrown away and its
       // stream trimmed down to nothing. `store` refuses it regardless (that guard is what
       // closes the race against a merge that is already running); skipping here only
-      // avoids doing the work. A soft-deleted room compacts normally, so whatever is on
+      // avoids doing the work. A soft-deleted document compacts normally, so whatever is on
       // the stream is persisted before it is trimmed away.
       if (persisted.tombstone?.hard || !strm.isSmallerRedisClock(persisted.lastClock, lastUpdateClock)) {
         taskLog.debug('nothing to compact, trimming only')
-        // a hard-deleted room drains in this one pass: with maxAgeMs 0 the lua trims
+        // a hard-deleted document drains in this one pass: with maxAgeMs 0 the lua trims
         // everything, finds the stream empty, DELs the key and the task is already acked.
         // Safe because a task is only claimed after taskDebounce, long after every
         // subscriber has seen the kick that was added when the document was deleted.
-        await this.stream.trimMessages(task.room, strm.maxRedisClock(persisted.lastClock, cachedMessages.lastClock), persisted.tombstone?.hard ? 0 : this.stream.minMessageLifetime, task.redisClock)
+        await this.stream.trimMessages(task.docRef, strm.maxRedisClock(persisted.lastClock, cachedMessages.lastClock), persisted.tombstone?.hard ? 0 : this.stream.minMessageLifetime, task.redisClock)
         taskLog.info('task completed (trim only)')
         return
       }
       // there is new content: fetch + merge the ydoc, reusing the stream we already pulled
-      const d = await this.getDoc(task.room, { gc: true, nongc: true, contentmap: true, contentids: true, references: true }, { cachedMessages })
+      const d = await this.getDoc(task.docRef, { gc: true, nongc: true, contentmap: true, contentids: true, references: true }, { cachedMessages })
       // re-check what the pre-check established, now that the slow merge is done: another worker
       // may have persisted this exact clock while we were computing. `store` would then be
       // skipped by ON CONFLICT while `deleteReferences` still deletes that row - the only copy of
       // the document. There is nothing new to write in that case, so only trim.
       if (!strm.isSmallerRedisClock(d.lastPersistedClock, d.lastClock)) {
-        taskLog.warn('another worker persisted this room while we were computing, trimming only')
-        await this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
+        taskLog.warn('another worker persisted this document while we were computing, trimming only')
+        await this.stream.trimMessages(task.docRef, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
         return
       }
-      this.conf.worker?.events?.docUpdate?.(object.assign({}, d, { references: null, room: task.room }))
-      await this.persistence.store(task.room, d)
+      this.conf.worker?.events?.docUpdate?.(object.assign({}, d, { references: null, docRef: task.docRef }))
+      await this.persistence.store(task.docRef, d)
       await promise.all([
         this.persistence.deleteReferences(d.references),
-        this.stream.trimMessages(task.room, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
+        this.stream.trimMessages(task.docRef, d.lastClock, this.stream.minMessageLifetime, task.redisClock)
       ])
       taskLog.info({ gcDocSize: d.gcDoc?.byteLength, nongcDocSize: d.nongcDoc?.byteLength, refsDeleted: d.references?.length ?? 0 }, 'task completed')
     } catch (e) {
       taskErr = /** @type {Error} */ (e)
       throw e
     } finally {
-      this.conf.worker?.events?.taskComplete?.({ room: task.room, duration: time.getUnixTime() - taskTs, error: taskErr })
+      this.conf.worker?.events?.taskComplete?.({ docRef: task.docRef, duration: time.getUnixTime() - taskTs, error: taskErr })
     }
   }
 
@@ -232,17 +233,17 @@ export class YHub {
 
   /**
    * @template {{ gc?: boolean, nongc?: boolean, contentmap?: boolean, references?: boolean, contentids?: boolean, awareness?: boolean }} Include
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {Include} includeContent
    * @param {object} opts
    * @param {boolean} [opts.gcOnMerge] whether to gc when merging updates. (default: true)
    * @param {{ messages: Array<t.Message & { redisClock: string }>, lastClock: string }} [opts.cachedMessages] pre-fetched stream messages, to avoid pulling the redis stream again
    * @return {Promise<t.DocTable<Include>>}
    */
-  async getDoc (room, includeContent, { gcOnMerge = true, cachedMessages: prefetched } = {}) {
+  async getDoc (docRef, includeContent, { gcOnMerge = true, cachedMessages: prefetched } = {}) {
     const [persistedDoc, cachedMessages] = await promise.all([
-      this.persistence.retrieveDoc(room, object.assign({}, includeContent, { contentids: /** @type {const} */ (true) })),
-      prefetched ?? this.stream.getMessages([{ room, clock: '0' }]).then(ms => ms[0] || { messages: [], lastClock: '0' })
+      this.persistence.retrieveDoc(docRef, object.assign({}, includeContent, { contentids: /** @type {const} */ (true) })),
+      prefetched ?? this.stream.getMessages([{ docRef, clock: '0' }]).then(ms => ms[0] || { messages: [], lastClock: '0' })
     ])
     const gcDoc = persistedDoc.gcDoc
     const nongcDoc = persistedDoc.nongcDoc
@@ -282,8 +283,8 @@ export class YHub {
     }
     const pruneBin = pruneSet != null ? Y.encodeIdSet(pruneSet) : undefined
     return {
-      gcDoc: /** @type {Include['gc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (gcDoc ? await this.computePool.mergeUpdates(gcOnMerge, gcDoc, { room }) : null),
-      nongcDoc: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (nongcDoc ? await this.computePool.mergeUpdates(false, nongcDoc, { room }, pruneBin) : null),
+      gcDoc: /** @type {Include['gc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (gcDoc ? await this.computePool.mergeUpdates(gcOnMerge, gcDoc, { docRef }) : null),
+      nongcDoc: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (nongcDoc ? await this.computePool.mergeUpdates(false, nongcDoc, { docRef }, pruneBin) : null),
       contentmap: /** @type {Include['contentmap'] extends true ? Uint8Array<ArrayBuffer> : null} */ (mergedContentmap != null ? Y.encodeContentMap(mergedContentmap) : null),
       contentids: /** @type {Include['contentids'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.contentids === true ? Y.encodeContentIds(mergedCids) : null),
       lastClock,
@@ -301,7 +302,7 @@ export class YHub {
    * irreversible. The prune is distributed as a directive on the redis stream and baked into
    * persistence the next time the document is compacted.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {object} filters
    * @param {number} [filters.from]
    * @param {number} [filters.to]
@@ -310,45 +311,55 @@ export class YHub {
    * @param {Array<{k: string, v: string}>|null} [filters.withCustomAttributions]
    * @returns {Promise<void>}
    */
-  async pruneDoc (room, filters) {
-    const { contentmap, tombstone } = await this.getDoc(room, { contentmap: true })
-    if (tombstone != null) throw new t.DocDeletedError(room, tombstone)
+  async pruneDoc (docRef, filters) {
+    const { contentmap, tombstone } = await this.getDoc(docRef, { contentmap: true })
+    if (tombstone != null) throw new t.DocDeletedError(docRef, tombstone)
     if (contentmap == null) return
-    const prune = await this.computePool.computePruneSet({ contentmapBin: contentmap, ...filters }, { room })
+    const prune = await this.computePool.computePruneSet({ contentmapBin: contentmap, ...filters }, { docRef })
     if (prune != null) {
-      await this.stream.addMessage(room, { type: 'prune:v1', prune })
+      await this.stream.addMessage(docRef, { type: 'prune:v1', prune })
+      // pruning is an erasure guarantee - cached changeset/activity responses may still hold the
+      // pruned content and must not outlive it
+      await this.stream.deleteCachedResponses(docRef)
     }
   }
 
   /**
-   * Force a permission re-check for the websocket connections of `room`, distributed via the
+   * Force a permission re-check for the websocket connections of `docRef`, distributed via the
    * redis stream to all servers. Each matching connection re-evaluates
-   * `auth.getAccessType(authInfo, room, null)` and is disconnected (close code 4401
-   * 'permission revoked') when its access type changed — the client then reconnects,
-   * re-authenticates, and resyncs at its new access level. A failing auth plugin fails closed
-   * with the transient close code 1013 ('auth recheck failed'), so clients reconnect once the
-   * auth backend recovers. With `forceDisconnect: true`, matching connections are disconnected
-   * without re-checking. Note that a disconnect cannot keep users out: reconnects are
-   * re-authenticated at upgrade, so revoke access in the auth plugin's authority first.
+   * `auth.authorize('document', docRef, user)` and is disconnected (close code 4401
+   * 'permission revoked') when the permissions the socket consumes changed - the `ydoc` mask,
+   * the `awareness` mask, the effective `ws` endpoint mask, or (on `gc=false` connections)
+   * whether full history is still granted; REST-only facets (`delete`,
+   * `history.rollback`/`prune`, the other `endpoint` entries) never bounce a live
+   * connection. The client then reconnects, re-authenticates, and resyncs at its new access
+   * level. A failing auth plugin fails closed with the transient close code 1013 ('auth recheck
+   * failed'), so clients reconnect once the auth backend recovers. With `forceDisconnect: true`,
+   * matching connections are disconnected without re-checking. Note that a disconnect cannot
+   * keep users out: reconnects are re-authenticated at upgrade, so revoke access in the auth
+   * plugin's authority first - a plugin deriving permissions purely from the authInfo (token
+   * claims) re-derives the same answer on every re-check, so revocation there needs
+   * `forceDisconnect` plus short token lifetimes, or a revocation list inside `authorize`.
    *
-   * `users` is an array of matchers; `null` matches every connection in the room. A string
+   * `users` is an array of matchers; `null` matches every connection in the document. A string
    * matcher matches connections with that `userid`. A plain-object matcher matches a
    * connection when each of its top-level properties deep-equals the corresponding property
    * of the connection's authInfo (the authInfo may have additional properties) — e.g.
-   * `{ userid: 'X' }` matches the authInfo `{ userid: 'X', name: 'Kevin' }`.
+   * `{ userid: 'X' }` matches the authInfo `{ userid: 'X', name: 'Kevin' }`. Anonymous
+   * connections (authInfo `null`) are matched only by the empty object matcher.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {object} opts
    * @param {Array<string|Object<string,any>>?} [opts.users]
    * @param {boolean} [opts.forceDisconnect]
    * @returns {Promise<void>}
    */
-  async recheckAuth (room, { users = null, forceDisconnect = false } = {}) {
-    await this.stream.addMessage(room, { type: 'auth:check:v1', users, forceDisconnect })
+  async recheckAuth (docRef, { users = null, forceDisconnect = false } = {}) {
+    await this.stream.addMessage(docRef, { type: 'auth:check:v1', users, forceDisconnect })
   }
 
   /**
-   * Delete `room`.
+   * Delete `docRef`.
    *
    * A soft deletion (the default) only records that the document is gone: reads report it as
    * deleted and every endpoint answers 404, connected clients are disconnected, but its rows and
@@ -358,7 +369,7 @@ export class YHub {
    * what is due.
    *
    * A hard deletion additionally clears the stream and erases every row and asset right away,
-   * and cannot be undone. Compaction never persists a hard-deleted room again.
+   * and cannot be undone. Compaction never persists a hard-deleted document again.
    *
    * Tombstone is per branch - deleting a document with all of its branches means deleting each of
    * them.
@@ -368,26 +379,26 @@ export class YHub {
    * reverse. Re-running a hard deletion re-runs the purge, which is how a compaction that was
    * still in flight the first time gets cleaned up.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {object} [opts]
    * @param {boolean} [opts.hard] erase the content immediately and irreversibly. (default: false)
    * @param {string|null} [opts.by] userid recorded as the deleting user
    * @returns {Promise<t.Tombstone>}
    */
-  async deleteDoc (room, { hard = false, by = null } = {}) {
+  async deleteDoc (docRef, { hard = false, by = null } = {}) {
     // postgres first: it is the durable record, and every step after it is idempotent and
     // re-derivable from it. The other order would let a crash leave a kick that is trimmed away
     // minutes later, silently undeleting the document with nothing left to heal from.
-    const tombstone = await this.persistence.storeTombstone(room, { deletedAt: await this.stream.getTime(), hard, by })
+    const tombstone = await this.persistence.storeTombstone(docRef, { deletedAt: await this.stream.getTime(), hard, by })
     // both only have to happen after the tombstone commits - clearing the stream so a hard
     // deletion keeps nothing, and dropping cached responses because a cache hit never reaches
     // `getDoc` and would otherwise keep serving what was computed moments ago
     await promise.all([
       // add a tombstone message to the stream after trying to trim
-      (tombstone.hard ? this.stream.clearMessages(room) : promise.resolve()).finally(() => this.stream.addMessage(room, { type: 'ydoc:tombstone:v1' })),
-      this.stream.deleteCachedResponses(room)
+      (tombstone.hard ? this.stream.clearMessages(docRef) : promise.resolve()).finally(() => this.stream.addMessage(docRef, { type: 'ydoc:tombstone:v1' })),
+      this.stream.deleteCachedResponses(docRef)
     ])
-    return tombstone.hard ? purgeDoc(this, room) : tombstone
+    return tombstone.hard ? purgeDoc(this, docRef) : tombstone
   }
 
   /**
@@ -398,16 +409,16 @@ export class YHub {
    * dropping the record would resurrect the document as a partial one, since `retrieveDoc`
    * merges every row it finds and a straggling compaction may have left some behind.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @returns {Promise<void>}
    */
-  async restoreDoc (room) {
-    const tombstone = await this.persistence.retrieveTombstone(room)
+  async restoreDoc (docRef) {
+    const tombstone = await this.persistence.retrieveTombstone(docRef)
     if (tombstone == null) return
     if (tombstone.hard || tombstone.purgedAt != null) {
-      throw new Error(`cannot restore ${room.org}/${room.docid}/${room.branch}: its content was erased`)
+      throw new Error(`cannot restore ${docRef.org}/${docRef.docid}/${docRef.branch}: its content was erased`)
     }
-    await this.persistence.deleteTombstone(room)
+    await this.persistence.deleteTombstone(docRef)
   }
 
   /**
@@ -429,11 +440,11 @@ export class YHub {
    *
    * Changes won't be synced to users connected via websocket until they reconnect.
    *
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {Uint8Array<ArrayBuffer>} ydoc
    * @param {{ by?: string }} attributions
    */
-  async unsafePersistDoc (room, ydoc, { by }) {
+  async unsafePersistDoc (docRef, ydoc, { by }) {
     const ms = await this.stream.getTime()
     const lastClock = `${ms}-I`
     const contentids = Y.createContentIdsFromUpdate(ydoc)
@@ -450,18 +461,18 @@ export class YHub {
       deleteAttrs.push(Y.createContentAttribute('delete', by))
     }
     const contentmap = Y.createContentMapFromContentIds(contentids, insertAttrs, deleteAttrs)
-    await this.persistence.store(room, { lastClock, gcDoc: ydoc, nongcDoc: ydoc, contentids: Y.encodeContentIds(contentids), contentmap: Y.encodeContentMap(contentmap) })
+    await this.persistence.store(docRef, { lastClock, gcDoc: ydoc, nongcDoc: ydoc, contentids: Y.encodeContentIds(contentids), contentmap: Y.encodeContentMap(contentmap) })
   }
 
   /**
    * @template R
-   * @param {t.Room} room
+   * @param {t.DocRef} docRef
    * @param {import('./agents.js').AgentTaskOptions} opts
    * @param {(ydoc: Y.Doc, awareness: import('@y/protocols/awareness').Awareness) => Promise<R> | R} handler
    * @returns {Promise<R>}
    */
-  agentTask (room, opts, handler) {
-    return agentTask(this, room, opts, handler)
+  agentTask (docRef, opts, handler) {
+    return agentTask(this, docRef, opts, handler)
   }
 }
 

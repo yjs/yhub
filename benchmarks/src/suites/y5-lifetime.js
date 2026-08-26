@@ -9,10 +9,10 @@ import { stats } from '../report.js'
  * Y5: what does a document's lifetime cost?
  *
  * The background cost nobody sees, and the group most relevant to
- * agent-generated content. Compaction is triggered when a room receives its
+ * agent-generated content. Compaction is triggered when a document receives its
  * first write after being idle and re-triggered immediately after each
  * compaction while the stream is non-empty (`src/stream.js:192-197`), so a
- * continuously edited room is compacted roughly every `taskDebounce` seconds and
+ * continuously edited document is compacted roughly every `taskDebounce` seconds and
  * **every compaction rewrites the whole document**.
  */
 

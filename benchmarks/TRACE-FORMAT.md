@@ -139,7 +139,7 @@ node --max-old-space-size=8192 \
 ```
 
 It connects with `server: null, worker: null` — a read-only hub that touches nothing —
-calls `getDoc(room, { nongc: true, contentmap: true })`, reconstructs, verifies, and
+calls `getDoc(docRef, { nongc: true, contentmap: true })`, reconstructs, verifies, and
 writes. It refuses to write an unverified trace, and it tells you if the document is
 empty or unattributed rather than emitting a silently useless file.
 

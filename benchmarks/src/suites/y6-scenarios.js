@@ -67,12 +67,12 @@ const scenario = async ({ tag, users, docs, docSize, awareness = false, servers 
   }
   await promise.wait(1000)
 
-  // only clients that share the writer's room can observe its edit: users are
+  // only clients that share the writer's document can observe its edit: users are
   // assigned round-robin, so those are the ones whose index is a multiple of
   // `docs`. In the fully spread case (docs === users) there are none.
   const writer = clients[0]
-  const roomMates = clients.filter((_, i) => i > 0 && i % docs === 0).slice(0, 50)
-  const prop = await measurePropagation({ writer, observers: roomMates, count: 10 })
+  const docMates = clients.filter((_, i) => i > 0 && i % docs === 0).slice(0, 50)
+  const prop = await measurePropagation({ writer, observers: docMates, count: 10 })
   const elapsed = performance.now() - started
   // Drain *before* collecting: a compaction is only claimed after `taskDebounce`,
   // so collecting first would report zero worker activity for a workload that
@@ -120,7 +120,7 @@ export default {
       /** @param {{ report: import('../report.js').Reporter }} ctx */
       run: async ({ report }) => {
         report.row(await scenario({ tag: 'y61', users, docs: docCounts[0], docSize }))
-        report.note('The spread case: everyone in their own document. No fan-out at all, so this isolates the per-connection and per-room costs plus the worker load of many independent compactions. If your load looks like this, y/hub\'s design is well matched to it and the expected bottleneck is Redis and Postgres rather than the server process.')
+        report.note('The spread case: everyone in their own document. No fan-out at all, so this isolates the per-connection and per-document costs plus the worker load of many independent compactions. If your load looks like this, y/hub\'s design is well matched to it and the expected bottleneck is Redis and Postgres rather than the server process.')
       }
     },
     {

@@ -6,44 +6,51 @@ import * as delta from 'lib0/delta'
 import * as s from 'lib0/schema'
 import * as types from '../src/types.js'
 import * as utils from './utils.js'
-import { registerApi } from '../src/api.js'
+import { apiError, registerApi } from '../src/api.js'
 
 /**
  * @param {Response} response
  */
 const decodeResponse = async response => buffer.decodeAny(new Uint8Array(await response.arrayBuffer()))
 
-const purposeHubPort = utils.testHubPort(3)
-const purposeHost = `localhost:${purposeHubPort}`
+const endpointHubPort = utils.testHubPort(3)
+const endpointHost = `localhost:${endpointHubPort}`
 
 /**
- * The purposes the auth plugin below received, in call order.
+ * The (type, resourceId) selectors the auth plugin below received, in call order.
  *
- * @type {Array<string|null|undefined>}
+ * @type {Array<{ type: string, resourceId: object }>}
  */
-const purposeCalls = []
+const permissionCalls = []
 
 await utils.createTestHub({
   worker: null,
   server: {
-    port: purposeHubPort,
+    port: endpointHubPort,
     auth: types.createAuthPlugin({
-      async readAuthInfo (req) {
-        if (req.getHeader('x-no-auth') === '1') return null
-        return { userid: 'purposeUser' }
+      async authenticate (req) {
+        // a branded 401 is the plugin rejecting a credential; null is an anonymous caller
+        if (req.getHeader('x-no-auth') === '1') throw apiError(401, 'unauthenticated')
+        if (req.getHeader('x-anon') === '1') return null
+        return { userid: 'endpointUser' }
       },
-      async getAccessType (_authInfo, _room, purpose) {
-        purposeCalls.push(purpose)
-        if (purpose === 'admin') return null
-        if (purpose === 'comments') return 'rw'
-        return 'r'
-      }
-      // intentionally no getOrgAccessType / getGlobalAccessType - org/global endpoints must deny
+      // org/global endpoints fail closed: scopes without a handler deny
+      authorize: types.createAuthorize({
+        document: async (resourceId) => {
+          permissionCalls.push({ type: 'document', resourceId })
+          return {
+            type: 'permissions:document:v1',
+            endpoint: { '*': '-r--', comments: 'crud', appendonly: 'c---', blocked: false }
+          }
+        }
+      })
     }),
     api: [
-      { name: 'purposed', accessPurpose: 'comments', get: { handler: async () => ({ ok: true }) }, post: { handler: async () => ({ ok: true }) } },
-      { name: 'unpurposed', get: { handler: async () => ({ ok: true }) }, post: { handler: async () => ({ ok: true }) } },
-      { name: 'private', accessPurpose: 'admin', get: { handler: async () => ({ ok: true }) } },
+      { name: 'comments', get: { handler: async () => ({ ok: true }) }, post: { handler: async () => ({ ok: true }) } },
+      { name: 'appendonly', get: { handler: async () => ({ ok: true }) }, post: { handler: async () => ({ ok: true }) } },
+      { name: 'fallback', get: { handler: async () => ({ ok: true }) }, post: { handler: async () => ({ ok: true }) } },
+      { name: 'whoami', get: { handler: async req => ({ authInfo: req.authInfo }) } },
+      { name: 'blocked', get: { $query: s.$partial({ n: s.$number }), handler: async () => ({ ok: true }) } },
       { name: 'orgless', scope: 'org', get: { handler: async () => ({ ok: true }) } },
       { name: 'globalless', scope: 'global', get: { handler: async () => ({ ok: true }) } },
       // prebuilt (partial) schema spec + auth-before-validation ordering (see testQuerySchema)
@@ -63,8 +70,10 @@ await utils.createTestHub({
     port: prefixHubPort,
     apiPrefix: 'collaboration',
     auth: types.createAuthPlugin({
-      async readAuthInfo () { return { userid: 'prefixUser' } },
-      async getAccessType () { return 'rw' }
+      async authenticate () { return { userid: 'prefixUser' } },
+      authorize: types.createAuthorize({
+        document: async () => ({ type: 'permissions:document:v1', ydoc: 'cru-', endpoint: { '*': 'crud' } })
+      })
     }),
     api: [
       { name: 'echo', get: { handler: async req => ({ docid: req.docid }) } }
@@ -82,14 +91,14 @@ export const testDocScope = async tc => {
   t.assert(res.status === 200)
   t.assert(res.headers.get('content-type') === 'application/x-lib0any')
   const body = await decodeResponse(res)
-  t.compare(body.room, { org, docid, branch: 'b2' })
+  t.compare(body.docRef, { org, docid, branch: 'b2' })
   t.assert(body.org === org && body.docid === docid && body.branch === 'b2')
   t.assert(body.q === '42')
   t.assert(body.userid === 'user1')
   t.assert(body.header === 'hi')
   // branch defaults to main
   const resDefault = await fetch(`http://${utils.yhubHost}/api/echo/v1/${org}/${docid}`)
-  t.compare((await decodeResponse(resDefault)).room, { org, docid, branch: 'main' })
+  t.compare((await decodeResponse(resDefault)).docRef, { org, docid, branch: 'main' })
 }
 
 /**
@@ -229,19 +238,22 @@ export const testQuerySchema = async tc => {
     t.assert((await decodeResponse(invalid)).code === 'invalid-query')
   })
   await t.groupAsync('prebuilt s.$object(..).partial spec: attrs optional, still coerced+validated', async () => {
-    const absent = await fetch(`http://${purposeHost}/api/qcheck/v1/o/d`)
+    const absent = await fetch(`http://${endpointHost}/api/qcheck/v1/o/d`)
     t.assert(absent.status === 200)
     t.compare(await decodeResponse(absent), {})
-    const coerced = await fetch(`http://${purposeHost}/api/qcheck/v1/o/d?n=5`)
+    const coerced = await fetch(`http://${endpointHost}/api/qcheck/v1/o/d?n=5`)
     t.compare(await decodeResponse(coerced), { n: 5 })
-    const invalid = await fetch(`http://${purposeHost}/api/qcheck/v1/o/d?n=abc`)
+    const invalid = await fetch(`http://${endpointHost}/api/qcheck/v1/o/d?n=abc`)
     t.assert(invalid.status === 400)
   })
   await t.groupAsync('auth is decided before query validation', async () => {
-    const unauthedRes = await fetch(`http://${purposeHost}/api/qcheck/v1/o/d?n=abc`, { headers: { 'x-no-auth': '1' } })
+    const unauthedRes = await fetch(`http://${endpointHost}/api/qcheck/v1/o/d?n=abc`, { headers: { 'x-no-auth': '1' } })
     t.assert(unauthedRes.status === 401)
-    const authedRes = await fetch(`http://${purposeHost}/api/qcheck/v1/o/d?n=abc`)
+    const authedRes = await fetch(`http://${endpointHost}/api/qcheck/v1/o/d?n=abc`)
     t.assert(authedRes.status === 400)
+    // an anonymous caller is authorized like any other and reaches validation
+    const anonRes = await fetch(`http://${endpointHost}/api/qcheck/v1/o/d?n=abc`, { headers: { 'x-anon': '1' } })
+    t.assert(anonRes.status === 400)
   })
 }
 
@@ -251,7 +263,7 @@ export const testQuerySchema = async tc => {
 export const testOrgAndGlobalScope = async tc => {
   const { org } = await utils.createTestCase(tc)
   const orgRes = await fetch(`http://${utils.yhubHost}/api/docs/v1/${org}`)
-  t.compare(await decodeResponse(orgRes), { org, room: null, docid: null })
+  t.compare(await decodeResponse(orgRes), { org, docRef: null, docid: null })
   const globalRes = await fetch(`http://${utils.yhubHost}/api/stats/v1`)
   t.compare(await decodeResponse(globalRes), { ok: true, org: null })
 }
@@ -461,36 +473,53 @@ export const testAbort = async tc => {
 /**
  * @param {t.TestCase} _tc
  */
-export const testPurposeAndAuth = async _tc => {
-  await t.groupAsync('accessPurpose is forwarded, purpose grants rw', async () => {
-    purposeCalls.length = 0
-    const res = await fetch(`http://${purposeHost}/api/purposed/v1/o/d`)
+export const testEndpointFacetAndAuth = async _tc => {
+  await t.groupAsync('a named grant wins over the fallback, and the selector reaches the plugin', async () => {
+    permissionCalls.length = 0
+    const res = await fetch(`http://${endpointHost}/api/comments/v1/o/d`)
     t.assert(res.status === 200)
-    t.assert(purposeCalls[purposeCalls.length - 1] === 'comments')
-    const postRes = await fetch(`http://${purposeHost}/api/purposed/v1/o/d`, { method: 'POST' })
+    t.compare(permissionCalls[permissionCalls.length - 1], { type: 'document', resourceId: { org: 'o', docid: 'd', branch: 'main' } })
+    const postRes = await fetch(`http://${endpointHost}/api/comments/v1/o/d`, { method: 'POST' })
     t.assert(postRes.status === 200)
   })
-  await t.groupAsync('unset accessPurpose arrives as null, plain access applies', async () => {
-    purposeCalls.length = 0
-    const res = await fetch(`http://${purposeHost}/api/unpurposed/v1/o/d`)
+  await t.groupAsync("the '*' fallback applies to unnamed endpoints - read-only here", async () => {
+    const res = await fetch(`http://${endpointHost}/api/fallback/v1/o/d`)
     t.assert(res.status === 200)
-    t.assert(purposeCalls[purposeCalls.length - 1] === null)
-    const postRes = await fetch(`http://${purposeHost}/api/unpurposed/v1/o/d`, { method: 'POST' })
+    // post checks the 'c' position, which the '-r--' fallback denies
+    const postRes = await fetch(`http://${endpointHost}/api/fallback/v1/o/d`, { method: 'POST' })
     t.assert(postRes.status === 403)
   })
-  await t.groupAsync('purpose-private endpoint denies', async () => {
-    const res = await fetch(`http://${purposeHost}/api/private/v1/o/d`)
+  await t.groupAsync('append-only: create without read', async () => {
+    const postRes = await fetch(`http://${endpointHost}/api/appendonly/v1/o/d`, { method: 'POST' })
+    t.assert(postRes.status === 200)
+    const res = await fetch(`http://${endpointHost}/api/appendonly/v1/o/d`)
     t.assert(res.status === 403)
   })
-  await t.groupAsync('org/global scope without the auth callback fails closed', async () => {
-    const orgRes = await fetch(`http://${purposeHost}/api/orgless/v1/o`)
+  await t.groupAsync('an explicit denial blocks the fallback, the 403 names the missing permission', async () => {
+    const res = await fetch(`http://${endpointHost}/api/blocked/v1/o/d`)
+    t.assert(res.status === 403)
+    const body = await decodeResponse(res)
+    t.assert(body.code === 'missing-permission')
+    t.compare(body.required, { type: 'permissions:document:v1', endpoint: { blocked: '-r--' } })
+  })
+  await t.groupAsync('permissions are decided before query validation', async () => {
+    const res = await fetch(`http://${endpointHost}/api/blocked/v1/o/d?n=abc`)
+    t.assert(res.status === 403, 'a denied caller must not learn about query validity')
+  })
+  await t.groupAsync('org/global scope fails closed on a null answer', async () => {
+    const orgRes = await fetch(`http://${endpointHost}/api/orgless/v1/o`)
     t.assert(orgRes.status === 403)
-    const globalRes = await fetch(`http://${purposeHost}/api/globalless/v1`)
+    const globalRes = await fetch(`http://${endpointHost}/api/globalless/v1`)
     t.assert(globalRes.status === 403)
   })
-  await t.groupAsync('failed readAuthInfo responds 401', async () => {
-    const res = await fetch(`http://${purposeHost}/api/unpurposed/v1/o/d`, { headers: { 'x-no-auth': '1' } })
+  await t.groupAsync('a branded 401 from authenticate passes through; an anonymous caller reaches the handler', async () => {
+    const res = await fetch(`http://${endpointHost}/api/fallback/v1/o/d`, { headers: { 'x-no-auth': '1' } })
     t.assert(res.status === 401)
+    t.compare(await decodeResponse(res), { error: 'unauthenticated' })
+    const anon = await fetch(`http://${endpointHost}/api/whoami/v1/o/d`, { headers: { 'x-anon': '1' } })
+    t.assert(anon.status === 200)
+    t.compare(await decodeResponse(anon), { authInfo: null })
+    t.compare(await decodeResponse(await fetch(`http://${endpointHost}/api/whoami/v1/o/d`)), { authInfo: { userid: 'endpointUser' } })
   })
 }
 
@@ -561,10 +590,9 @@ export const testSpecValidation = _tc => {
   t.fails(() => registerApi(fakeYhub([{ name: 'a', get: { handler } }, { name: 'a', scope: 'org', path: '/:id', get: { handler } }]), stubApp))
   // name must be a single segment
   t.fails(() => registerApi(fakeYhub([{ name: 'a/b', get: { handler } }]), stubApp))
-  // name is required, version and accessPurpose must be strings
+  // name is required, version must be a string
   t.fails(() => registerApi(fakeYhub([{ get: { handler } }]), stubApp))
   t.fails(() => registerApi(fakeYhub([{ name: 'a', version: 2, get: { handler } }]), stubApp))
-  t.fails(() => registerApi(fakeYhub([{ name: 'a', accessPurpose: 42, get: { handler } }]), stubApp))
   // at least one method handler
   t.fails(() => registerApi(fakeYhub([{ name: 'a' }]), stubApp))
   // invalid scope
@@ -591,10 +619,13 @@ export const testSpecValidation = _tc => {
   t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/:branch', get: { handler } }]), stubApp))
   t.fails(() => registerApi(fakeYhub([{ name: 'a', path: '/:x/:x', get: { handler } }]), stubApp))
   t.fails(() => registerApi(fakeYhub([{ name: 'a', path: ':x', get: { handler } }]), stubApp))
-  // built-in names are default endpoints - taken at v1, free at other versions
+  // built-in endpoint names are refused in any version - they are excluded from the `endpoint`
+  // permission facet, so a custom route under such a name would be gated by nothing
   t.fails(() => registerApi(fakeYhub([{ name: 'ydoc', get: { handler } }]), stubApp))
-  t.fails(() => registerApi(fakeYhub([{ name: 'ws', get: { handler } }]), stubApp)) // seeded ws route key
-  registerApi(fakeYhub([{ name: 'ydoc', version: 'v2', get: { handler } }]), stubApp)
+  t.fails(() => registerApi(fakeYhub([{ name: 'ws', get: { handler } }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'ydoc', version: 'v2', get: { handler } }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'ws', version: 'v2', get: { handler } }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'changeset', path: '/:id', get: { handler } }]), stubApp))
   // configurable prefix: everything - built-ins included - is served under the renamed segment
   patterns.length = 0
   registerApi(fakeYhub([{ name: 'a', get: { handler } }], 'collaboration'), stubApp)

@@ -521,7 +521,10 @@ export const testLargeDoc = async tc => {
  */
 export const testActivityContentIdsFilter = async tc => {
   const { org, createWsClient } = await utils.createTestCase(tc)
-  const { ydoc } = createWsClient()
+  // synced before the first write: on an unsynced provider both writes below are flushed
+  // together once the connection is up, land ~1ms apart on the stream, and the assertion on
+  // `allActivity[0]` being the `someattr` change becomes a coin flip
+  const { ydoc } = await createWsClient({ waitForSync: true })
   const ytype = ydoc.get('map')
   // change an attribute
   ytype.setAttr('someattr', 'hello')

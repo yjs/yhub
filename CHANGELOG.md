@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## 0.8.0
 
 > **Upgrading:** the auth plugin interface changed. Rewrite `server.auth` from
 > `{ readAuthInfo, getAccessType }` to `{ authenticate, authorize }` (migration table below), and in

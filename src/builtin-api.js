@@ -103,7 +103,8 @@ const ydocEndpoint = createApiEndpoint('ydoc', {
   }
 })
 
-const $rollbackBody = s.$object({ from: s.$number.optional, to: s.$number.optional, by: s.$string.optional, contentIds: s.$uint8Array.optional, customAttributions: s.$array($kv).optional, withCustomAttributions: s.$array($kv).optional })
+// `from`/`to` are unix ms - validated as uints so a bad bound is a 400, never a requirement error
+const $rollbackBody = s.$object({ from: s.$uint.optional, to: s.$uint.optional, by: s.$string.optional, contentIds: s.$uint8Array.optional, customAttributions: s.$array($kv).optional, withCustomAttributions: s.$array($kv).optional })
 
 const rollbackEndpoint = createApiEndpoint('rollback', {
   post: {
@@ -114,10 +115,10 @@ const rollbackEndpoint = createApiEndpoint('rollback', {
         throw apiError(400, 'Rollback requires at least one filter (from, to, by, contentIds, or withCustomAttributions)')
       }
       // mutations refuse, never clamp: the requested range starts at `from` regardless of the
-      // other filters, so a filter-only (or malformed-`from`) rollback is unbounded and demands
-      // the full ray - a granted `from` of 0 (the epoch) admits any request. Requiring rollback
-      // also requires the ydoc write it rides on (see hasPermissions).
-      checkPermissions(req.permissions, createDocumentPermissions({ history: { from: s.$uint.check(from) ? from : 0, rollback: true } }))
+      // other filters, so a filter-only rollback is unbounded and demands the full ray - a
+      // granted `from` of 0 (the epoch) admits any request. Requiring rollback also requires the
+      // ydoc write it rides on (see hasPermissions).
+      checkPermissions(req.permissions, createDocumentPermissions({ history: { from: from ?? 0, rollback: true } }))
       // the reverting update is attributed to the caller - see PATCH
       if (req.authInfo == null) throw apiError(401, 'writing the document requires authentication', { code: 'unauthenticated' })
       const { contentmap: contentmapBin, nongcDoc, tombstone } = await req.yhub.getDoc(req.docRef, { nongc: true, contentmap: true })
@@ -131,7 +132,7 @@ const rollbackEndpoint = createApiEndpoint('rollback', {
   }
 })
 
-const $pruneBody = s.$object({ from: s.$number.optional, to: s.$number.optional, by: s.$string.optional, contentIds: s.$uint8Array.optional, withCustomAttributions: s.$array($kv).optional })
+const $pruneBody = s.$object({ from: s.$uint.optional, to: s.$uint.optional, by: s.$string.optional, contentIds: s.$uint8Array.optional, withCustomAttributions: s.$array($kv).optional })
 
 const pruneEndpoint = createApiEndpoint('prune', {
   post: {
@@ -142,7 +143,7 @@ const pruneEndpoint = createApiEndpoint('prune', {
         throw apiError(400, 'Prune requires at least one filter (from, to, by, contentIds, or withCustomAttributions)')
       }
       // see rollback: mutations refuse, never clamp
-      checkPermissions(req.permissions, createDocumentPermissions({ history: { from: s.$uint.check(from) ? from : 0, prune: true } }))
+      checkPermissions(req.permissions, createDocumentPermissions({ history: { from: from ?? 0, prune: true } }))
       await req.yhub.pruneDoc(req.docRef, { from, to, by, contentIds, withCustomAttributions })
       return { success: true, message: 'Prune completed' }
     }

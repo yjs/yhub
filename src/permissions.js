@@ -170,24 +170,32 @@ export const isKnownPermissionsType = type =>
   type === 'permissions:document:v1' || type === 'permissions:branch:v1' || type === 'permissions:org:v1' || type === 'permissions:global:v1'
 
 /**
+ * Rebuild a permission object and its object-valued facets (`endpoint`, `history`) without a
+ * prototype. Endpoint names share a namespace with `Object.prototype` members (`constructor`
+ * and `toString` are valid endpoint names per the api segment regex) and json-derived maps may
+ * carry an own `__proto__` key - after this both are inert own keys. Arrays (`delete`) keep
+ * theirs: they are only ever indexed and iterated.
+ *
+ * @param {any} permissions
+ */
+const withoutPrototype = permissions => {
+  const result = object.assign(Object.create(null), permissions)
+  ;['endpoint', 'history'].forEach(facet => {
+    if (result[facet] != null && typeof result[facet] === 'object') result[facet] = object.assign(Object.create(null), result[facet])
+  })
+  return result
+}
+
+/**
  * Sanitize permissions read from an external source (json bodies, tokens, http responses):
- * rebuild the object and its open-keyed endpoint map without a prototype, then validate (throws
- * on an invalid object). Endpoint names share a namespace with `Object.prototype` members
- * (`constructor` and `toString` are valid endpoint names per the api segment regex) and
- * json-derived maps may carry an own `__proto__` key - after this boundary both are inert own
- * keys, so the merges and `normalizeDocumentPermissions` use plain property access and explicitly do
- * not repeat this work.
+ * rebuild without prototypes (`withoutPrototype`), then validate (throws on an invalid object).
+ * Past this boundary the merges and `normalizeDocumentPermissions` use plain property access and
+ * explicitly do not repeat this work.
  *
  * @param {any} permissions
  * @return {Permissions}
  */
-export const sanitizePermissions = permissions => {
-  const result = object.assign(Object.create(null), permissions)
-  if (result.endpoint != null && typeof result.endpoint === 'object') {
-    result.endpoint = object.assign(Object.create(null), result.endpoint)
-  }
-  return $permissions.expect(result)
-}
+export const sanitizePermissions = permissions => $permissions.expect(withoutPrototype(permissions))
 
 /**
  * The normalized view on permissions allows us to avoid typechecks: every facet is present, and
@@ -239,20 +247,16 @@ const createNormalizedDocumentPermissions = p => {
 /**
  * Create an input-form permission object of `scope` from its facets - the one spelling of a
  * hand-written permission object, whether a plugin answer, a composed grant, or the requirement
- * handed to `hasPermissions`/`checkPermissions`: the `type` literal follows the scope, and the
- * result has no prototype, so endpoint names never resolve to `Object.prototype` members.
+ * handed to `hasPermissions`/`checkPermissions`: the `type` literal follows the scope, and
+ * neither the result nor its `endpoint`/`history` facets have a prototype, so endpoint names
+ * never resolve to `Object.prototype` members (see `withoutPrototype`).
  *
  * @template {PermissionScope} S
  * @param {S} scope
  * @param {Omit<ToPermissionType<S>, 'type'>} p
  * @return {ToPermissionType<S>}
  */
-export const createPermissions = (scope, p) => /** @type {any} */ ({
-  // @ts-ignore - the literal form sets the prototype
-  __proto__: null,
-  type: `permissions:${scope}:v1`,
-  ...p
-})
+export const createPermissions = (scope, p) => withoutPrototype({ ...p, type: `permissions:${scope}:v1` })
 
 /**
  * @param {Omit<DocumentPermissionsV1, 'type'>} p

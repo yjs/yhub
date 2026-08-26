@@ -379,8 +379,11 @@ export const testHasPermissions = _tc => {
   t.assert(has(grant, {}), 'an empty requirement is vacuously true')
   t.assert(has(grant, { ydoc: 'cr--' }), 'crud masks are positional subsets')
   t.assert(!has(grant, { ydoc: '---d' }))
-  // the created requirement has no prototype - endpoint names stay inert own keys
-  t.assert(Object.getPrototypeOf(p.createDocumentPermissions({ ydoc: '-r--' })) === null)
+  // the created requirement has no prototype, and neither do its endpoint map and history -
+  // endpoint names stay inert own keys on both sides of the intersection
+  const created = p.createDocumentPermissions({ ydoc: '-r--', history: { from: 0 }, endpoint: { x: '-r--' } })
+  t.assert(Object.getPrototypeOf(created) === null && Object.getPrototypeOf(created.endpoint) === null && Object.getPrototypeOf(created.history) === null)
+  t.assert(has(/** @type {any} */ ({ type: doc, endpoint: { '*': 'crud', toString: '-r--' } }), { endpoint: { '*': '-r--' } }), "a granted entry named `toString` resolves as an own key when the requirement names '*'")
   // the history ray: a granted `from` satisfies every requirement it reaches back to
   t.assert(has(grant, { history: { from: 700 } }))
   t.assert(!has(grant, { history: { from: 300 } }))

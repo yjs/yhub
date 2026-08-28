@@ -40,9 +40,8 @@ caller (see [Anonymous callers](#contracts)) may not hold the write — ydoc `u`
 `endpoint.ws` `u` — because attributions carry the userid, so that upgrade is refused with `401`
 after the permission check. After the upgrade each message is gated by its own facets: doc
 updates require ydoc `u` and `endpoint.ws` `u`, presence broadcasts awareness `u` alone (each
-dropped independently — a read-only connection with awareness `u` still broadcasts cursors; note
-the awareness field of `PATCH /ydoc` sits behind that route's `u` instead), and presence is only
-relayed to connections holding awareness `r`.
+dropped independently — a read-only connection with awareness `u` still broadcasts cursors), and
+presence is only relayed to connections holding awareness `r`.
 
 ### Errors
 
@@ -183,9 +182,10 @@ After a deletion every endpoint that reads the document answers `404` — `GET`/
 Update the Yjs document with new changes.
 
 Access: `update` requires ydoc `u` (which also creates the document on that branch when absent),
-`awareness` requires awareness `u` — an awareness-only body passes on awareness `u` alone. All
-facets are checked before anything is applied: partial permission fails the whole request with
-`403` and nothing written.
+checked before anything is applied — a refusal writes nothing. `awareness` needs awareness `u`
+and is otherwise dropped rather than refused, like a cursor sent over a socket without the bit:
+an awareness-only body passes on awareness `u` alone, and without it answers `200` with nothing
+written.
 
 * `PATCH /api/ydoc/v1/{org}/{docid}` body: `{ update?: Uint8Array, awareness?: Uint8Array, customAttributions?: Array<{ k: string, v: string }> }` parameters: `{ branch?: string }`
   * `update`: optional Yjs update (encoded via `Y.encodeStateAsUpdate` or similar). Diffed against the current document state — only new content is applied and attributed. Attributions are automatically assigned to the authenticated user.

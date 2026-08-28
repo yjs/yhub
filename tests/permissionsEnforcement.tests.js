@@ -1,6 +1,7 @@
 import * as Y from '@y/y'
 import * as t from 'lib0/testing'
 import * as buffer from 'lib0/buffer'
+import * as encoding from 'lib0/encoding'
 import * as promise from 'lib0/promise'
 import * as types from '../src/types.js'
 import * as utils from './utils.js'
@@ -329,9 +330,10 @@ export const testRestYdocFacetGates = async tc => {
     const patchBody = (/** @type {object} */ body) => /** @type {RequestInit} */ ({ method: 'PATCH', headers: { 'content-type': 'application/octet-stream' }, body: /** @type {Uint8Array<ArrayBuffer>} */ (buffer.encodeAny(body)) })
     t.assert((await enfFetch(doc, 'reader', patchBody({ update: Y.encodeStateAsUpdate(update) }))).status === 403)
     t.assert((await enfFetch(doc, 'writer', patchBody({ update: Y.encodeStateAsUpdate(update) }))).status === 200)
-    // an awareness-only body passes on awareness 'u' alone - no ydoc access needed
+    // an awareness-only body passes on awareness 'u' alone - no ydoc access needed - and is
+    // dropped rather than refused without it
     t.assert((await enfFetch(doc, 'presence', patchBody({ awareness: new Uint8Array([0]) }))).status === 200)
-    t.assert((await enfFetch(doc, 'reader', patchBody({ awareness: new Uint8Array([0]) }))).status === 403)
+    t.assert((await enfFetch(doc, 'reader', patchBody({ awareness: new Uint8Array([0]) }))).status === 200)
   })
   await t.groupAsync('an unknown future type version denies instead of throwing', async () => {
     t.assert((await enfFetch(doc, 'futuristic')).status === 403)
@@ -353,26 +355,46 @@ export const testRestYdocFacetGates = async tc => {
 }
 
 /**
- * Multiplex atomicity (§9.4): a PATCH carrying update + awareness with permission for only one
- * of them fails whole - nothing is applied before the failing check.
+ * Multiplex handling (§9.4): a PATCH carrying update + awareness applies the update leg only on
+ * ydoc `u` - a refusal writes nothing, not even the permitted awareness leg - while a missing
+ * awareness `u` silently drops presence and still applies the update.
  *
  * @param {t.TestCase} tc
  */
 export const testRestPatchAtomicity = async tc => {
   resetPermTable()
+  permTable.presence = { document: docPerms({ ydoc: '-r--', awareness: '--u-', endpoint: { '*': 'crud' } }) }
   permTable.half = { document: docPerms({ ydoc: 'cru-', awareness: false, endpoint: { '*': 'crud' } }) }
   permTable.full = { document: docPerms({ ydoc: '-r--', awareness: '-r--', endpoint: { '*': 'crud' } }) }
   const { org } = await utils.createTestCase(tc)
   const doc = `/ydoc/v1/${org}/${tc.testName}-doc`
   const update = new Y.Doc()
   update.get().setAttr('leaked', true)
-  const res = await enfFetch(doc, 'half', { method: 'PATCH', headers: { 'content-type': 'application/octet-stream' }, body: /** @type {Uint8Array<ArrayBuffer>} */ (buffer.encodeAny({ update: Y.encodeStateAsUpdate(update), awareness: new Uint8Array([0]) })) })
-  t.assert(res.status === 403)
-  const after = await decodeResponse(await enfFetch(`${doc}?awareness=true`, 'full'))
-  const ydoc = new Y.Doc()
-  Y.applyUpdate(ydoc, after.doc)
-  t.assert(ydoc.get().getAttr('leaked') == null, 'the update leg was not applied')
-  t.assert(after.awareness == null, 'the awareness leg was not applied')
+  const awareness = encoding.encode(enc => {
+    encoding.writeVarUint(enc, 1)
+    encoding.writeVarUint(enc, 42)
+    encoding.writeVarUint(enc, 1)
+    encoding.writeVarString(enc, JSON.stringify({ user: { name: 'ghost' } }))
+  })
+  const patch = (/** @type {string} */ user) => enfFetch(doc, user, { method: 'PATCH', headers: { 'content-type': 'application/octet-stream' }, body: /** @type {Uint8Array<ArrayBuffer>} */ (buffer.encodeAny({ update: Y.encodeStateAsUpdate(update), awareness })) })
+  const read = async () => {
+    const after = await decodeResponse(await enfFetch(`${doc}?awareness=true`, 'full'))
+    const ydoc = new Y.Doc()
+    Y.applyUpdate(ydoc, after.doc)
+    return { leaked: ydoc.get().getAttr('leaked'), awareness: after.awareness }
+  }
+  await t.groupAsync('missing ydoc u refuses the whole request', async () => {
+    t.assert((await patch('presence')).status === 403)
+    const after = await read()
+    t.assert(after.leaked == null, 'the update leg was not applied')
+    t.assert(after.awareness == null, 'the permitted awareness leg was not applied either')
+  })
+  await t.groupAsync('missing awareness u drops presence and applies the update', async () => {
+    t.assert((await patch('half')).status === 200)
+    const after = await read()
+    t.assert(after.leaked === true, 'the update leg was applied')
+    t.assert(after.awareness == null, 'the awareness leg was dropped')
+  })
 }
 
 /**

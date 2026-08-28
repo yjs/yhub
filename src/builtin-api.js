@@ -5,7 +5,7 @@ import * as math from 'lib0/math'
 import * as number from 'lib0/number'
 import * as s from 'lib0/schema'
 import { createApiEndpoint, DocDeletedError } from './types.js'
-import { createDocumentPermissions } from './permissions.js'
+import { createDocumentPermissions, hasPermissions } from './permissions.js'
 // benign import cycle with api.js - apiError/checkPermissions are only referenced at request
 // time, never during module evaluation
 import { apiError, checkPermissions, encodedAny } from './api.js'
@@ -70,13 +70,15 @@ const ydocEndpoint = createApiEndpoint('ydoc', {
   patch: {
     $body: { update: s.$uint8Array.optional, awareness: s.$uint8Array.optional, customAttributions: s.$array($kv).optional },
     handler: async req => {
-      const { update, awareness, customAttributions = [] } = req.body
-      if (update == null && awareness == null) {
+      const { update, customAttributions = [] } = req.body
+      if (update == null && req.body.awareness == null) {
         throw apiError(400, 'Invalid request body')
       }
-      // every leaf is validated before the first stream write: partial permission fails the
-      // whole request with nothing applied
-      checkPermissions(req.permissions, createDocumentPermissions({ ...(update != null && { ydoc: '--u-' }), ...(awareness != null && { awareness: '--u-' }) }))
+      // presence without awareness `u` is dropped, not refused - same as a cursor sent over a
+      // socket lacking the bit. Only the update leg is a hard requirement, checked before the
+      // first stream write
+      const awareness = req.body.awareness != null && hasPermissions(req.permissions, createDocumentPermissions({ awareness: '--u-' })) ? req.body.awareness : null
+      if (update != null) checkPermissions(req.permissions, createDocumentPermissions({ ydoc: '--u-' }))
       // attributions carry the userid - permission first (403 names what is missing), identity second
       if (update != null && req.authInfo == null) throw apiError(401, 'writing the document requires authentication', { code: 'unauthenticated' })
       if (update != null) {

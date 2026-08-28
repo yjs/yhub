@@ -388,8 +388,9 @@ mask } })`. 403 bodies name the whole requirement:
 
 Builtins, rewritten: `GET /ydoc` — ydoc `r` (+awareness `r` for `?awareness=true`, +`history.from
 === 0` for `?gc=false`); `PATCH /ydoc` — ydoc `u` for updates (which also creates the document on
-that branch when absent — v1 creation semantics, §3), awareness `u` for the awareness field,
-**all facets checked before the first `stream.addMessage`** (§9); `DELETE /ydoc` — `delete`
+that branch when absent — v1 creation semantics, §3), **checked before the first
+`stream.addMessage`** (§9), awareness `u` for the awareness field (dropped without it, as on the
+socket); `DELETE /ydoc` — `delete`
 contains `'soft'`/`'hard'`; `POST /rollback` — `history.rollback` + range containment;
 `POST /prune` — `history.prune` + range containment; `changeset`/`activity` — history granted,
 clamped.
@@ -432,10 +433,12 @@ These are the rules that keep the granular model sound; each has a concrete expl
    content from any time, so a filter-only rollback/prune has an unbounded requested range and is
    refused for any bounded-ray subject (403 naming the missing unbounded history). There is no
    separate rollback bound (add one beside the boolean later if a real need appears).
-4. **Multiplex atomicity.** `PATCH /ydoc` validates every required leaf before the first
-   `addMessage` (today it publishes the update before the awareness write — in-handler sequential
-   checking would half-apply). Partial permission ⇒ whole request 403. Same invariant documented
-   for custom handlers: all checks before the first side effect.
+4. **Multiplex atomicity.** `PATCH /ydoc` checks ydoc `u` before the first `addMessage` (today it
+   publishes the update before the awareness write — in-handler sequential checking would
+   half-apply). A refused update ⇒ whole request 403, the awareness leg included. The awareness
+   leg itself is never a refusal: without awareness `u` it is dropped and the update still lands,
+   matching the ws case-1 gate (5.). Same invariant documented for custom handlers: all checks
+   before the first side effect.
 5. **Per-type ws gates.** The blanket `if (!user.hasWriteAccess) return` in `message` splits:
    case 0 needs ydoc `u` and endpoint `ws` `u`, case 1 needs awareness `u` — read-only
    connections can finally broadcast cursors when granted. Fan-out: awareness relayed only when awareness has `r` (one

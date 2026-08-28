@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.8.1]
+
+### Fixes
+
+- **`PATCH /ydoc` no longer answers `403` for an `awareness` field the caller may not broadcast.** Presence without awareness `u` is dropped silently, as it is on the websocket; the `update` field still requires ydoc `u` and a refused update writes nothing. An awareness-only body without the permission answers `200` with nothing written. ([API docs](API.md#patch-apiydocv1orgdocid))
+
+### Other
+
+- Docs: the `c` and `d` positions of the `ydoc` and `awareness` masks are reserved and currently grant nothing — `'crud'` and `'-ru-'` are equivalent grants for now. ([API docs](API.md#permissions))
+
 ## [0.8.0]
 
 > **Upgrading:** the auth plugin interface changed. Rewrite `server.auth` from
@@ -34,7 +44,7 @@
   - **Every REST endpoint is gated by the `endpoint` facet** - builtin and custom, before the handler runs. The websocket is the endpoint named `ws` (`r` opens it, `u` allows sending updates). A grant without any `endpoint` entry opens nothing; `endpoint: { '*': 'crud' }` is the "everything" spelling.
   - **History is a ray.** `changeset`/`activity` only show history from `history.from` on (the query's `from` is clamped up to it), `?ydoc=`/`?delta=` additionally need ydoc `r`, and `gc=false` needs `from: 0`. Rollback and prune requests reaching before the ray are refused with `403`, never clamped. `from`/`to` must be non-negative integers (`400` otherwise).
   - **Anonymous callers exist.** `authenticate` returning `null` means "nobody", and `authorize` is still asked (public documents). yhub never answers `401` for a *missing* credential, with one exception: writing the document needs an identity because attributions carry the userid - `401 { code: 'unauthenticated' }` on `PATCH /ydoc`, `POST /rollback` and the websocket upgrade.
-  - **Read-only connections can broadcast presence** when granted awareness `u` (their cursors used to be dropped). Without it presence is dropped, never refused - on the socket and for the `awareness` field of `PATCH /ydoc` alike.
+  - **Read-only connections can broadcast presence** when granted awareness `u` (their cursors used to be dropped).
   - **Denial is a value, a throw is an outage.** Return `null` to deny. A throw from either hook answers `503` (websocket re-check: close `1013`); a branded `apiError(status, ..)` passes through. An invalid or wrong-scope answer is a logged `500`, never a silent denial.
   - **`403` bodies name what is missing:** `{ error, code: 'missing-permission', required }`, where `required` is the permission object the request needed.
   - **Custom endpoints:** `req.permissions` (the normalized view, or `null`) replaces `req.accessType`; a handler checks the facets it touches with `checkPermissions(req.permissions, createDocumentPermissions({ ydoc: '-r--' }))`. `accessPurpose` is gone, and the built-in names (`ydoc`, `rollback`, `prune`, `changeset`, `activity`, `ws`) can no longer be reused by custom endpoints in any version.

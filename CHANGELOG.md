@@ -19,8 +19,8 @@
     authorize: createAuthorize({
       document: async ({ org, docid, branch }, user) => ({
         type: 'permissions:document:v1',
-        ydoc: 'cru-',              // crud mask: r = read/sync, u = write (c and d are reserved)
-        awareness: '-ru-',         // r = receive presence, u = broadcast it
+        ydoc: 'cru-',              // crud mask: r = read/sync, u = write (c and d are reserved, they do nothing yet)
+        awareness: '-ru-',         // r = receive presence, u = broadcast it (c and d reserved as well)
         history: { from: 0, rollback: true, prune: false }, // attributed history from `from` (unix ms, 0 = all)
         delete: ['soft'],          // allowed forms of DELETE /ydoc: 'soft' and/or 'hard'
         endpoint: { '*': 'crud' }  // rest routes by name ('*' = fallback), by verb: get→r, post→c, put/patch→u, delete→d

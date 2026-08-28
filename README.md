@@ -249,8 +249,8 @@ const authPublicKey = await ecdsa.importKeyJwk(JSON.parse(process.env.AUTH_PUBLI
 const docPermissions = {
   rw: {
     type: 'permissions:document:v1',
-    ydoc: 'cru-',         // positional crud mask: create/read/update/delete, '-' denies
-    awareness: '-ru-',    // r = receive presence, u = broadcast own
+    ydoc: 'cru-',         // positional crud mask, '-' denies: r = read/sync, u = write (c/d reserved, do nothing yet)
+    awareness: '-ru-',    // r = receive presence, u = broadcast own (c/d reserved)
     history: { from: 0 }, // from-ray, unix ms; 0 grants the full history
     endpoint: { '*': 'crud' } // rest endpoints + the websocket route ('ws'), '*' = fallback
   },

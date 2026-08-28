@@ -613,8 +613,8 @@ A **document** permission object carries the full facet vocabulary; the coarser 
 ```js
 {
   type: 'permissions:document:v1',
-  ydoc: 'cru-',                    // positional crud mask over the document content
-  awareness: '-ru-',               // presence: r = receive, u = broadcast own
+  ydoc: 'cru-',                    // positional crud mask: r = read/sync, u = write (c/d reserved, inert)
+  awareness: '-ru-',               // presence: r = receive, u = broadcast own (c/d reserved, inert)
   history: { from: 0, rollback: true, prune: false }, // attributed history from `from` (unix ms, 0 = full)
   delete: ['soft'],                // deletion kinds - never implied by a write mask
   endpoint: { '*': '-r--', comments: 'crud' } // rest endpoints + the websocket route ('ws'); '*' is the fallback entry
@@ -626,14 +626,16 @@ A **document** permission object carries the full facet vocabulary; the coarser 
 Access values are **positional CRUD masks** — a 4-char string with a fixed position per verb
 (`create`/`read`/`update`/`delete`), `-` denying: `'crud'`, `'cru-'`, `'-r--'`, `'----'`. Checks
 are single char compares — `perms.ydoc[1] === 'r'` — and every value has exactly one spelling.
-On `ydoc`, `r` grants read/sync and `u` grants submitting updates (`c`/`d` are reserved). What
-each facet gates:
+On `ydoc` and `awareness` only `r` and `u` do anything today: the `c` and `d` positions are
+reserved for future use and currently grant nothing (deletion is granted solely through the
+`delete` facet) — `'crud'` and `'-ru-'` are equivalent grants for now. What each facet gates:
 
 | Facet | Gates |
 |---|---|
 | `ydoc` `r` | ws upgrade + sync (with `endpoint.ws` `r`), `GET /ydoc`, changeset/activity `?ydoc=`/`?delta=` |
 | `ydoc` `u` | ws doc updates (with `endpoint.ws` `u`), `PATCH /ydoc` `update` (creates the document when absent) — needs an identity, see [Anonymous callers](#contracts) |
 | `awareness` `r` / `u` | receiving / broadcasting presence (ws and `GET`/`PATCH /ydoc`) |
+| `ydoc` / `awareness` `c`, `d` | nothing yet — reserved |
 | `history.from` | changeset/activity, clamped to the ray; `gc=false` needs `from: 0` |
 | `history.rollback` / `.prune` | `POST /rollback` / `POST /prune`, with range containment — rollback needs an identity |
 | `delete` `['soft'\|'hard']` | `DELETE /ydoc` by kind |

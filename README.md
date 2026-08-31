@@ -534,6 +534,7 @@ const yhub = await createYHub({
       useSSL:    false,
       accessKey: 'minioadmin',
       secretKey: 'minioadmin',
+      // enable: false,       // stop persisting new assets, keep serving existing ones (default: true)
       // branches: ['main'],  // offload only the listed branches (default: every branch)
       // deleteVersions: false,  // versioned buckets: only place delete markers (default: erase versions)
     })
@@ -545,6 +546,11 @@ const yhub = await createYHub({
 The optional `branches` option restricts which branches are offloaded to S3: `true` (the
 default) offloads every branch, an array offloads only the listed ones. Assets on branches
 the plugin skips are stored inline in PostgreSQL instead.
+
+`enable: false` loads the plugin without persisting: new assets store inline in PostgreSQL as if
+no plugin were configured, while already-offloaded references keep resolving — and keep being
+cleaned up as compaction supersedes them, so the bucket drains gradually. Useful to pause
+offloading or migrate off S3 without losing access to existing documents.
 
 On a bucket with versioning enabled, a plain delete only writes a delete marker — every stored
 version would persist forever. `deleteVersions` controls this: `true` (the default) deletes the

@@ -24,6 +24,13 @@
   preserved blobs must be re-imported (e.g. via `unsafePersistDoc`). New IAM permission on
   versioned buckets: `s3:DeleteObjectVersion`. ([README](README.md#s3-persistence-s3persistencev1))
 
+### New Features
+
+- **`S3PersistenceV1` `enable` option.** `enable: false` loads the plugin without persisting: new
+  assets store inline in postgres while already-offloaded references keep resolving and being
+  cleaned up — pause offloading or migrate off S3 without losing access to existing documents.
+  Default `true`. ([README](README.md#s3-persistence-s3persistencev1))
+
 ## [0.8.2]
 
 ### New Features

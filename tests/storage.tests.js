@@ -194,3 +194,22 @@ export const testS3MarkOnlyDelete = async tc => {
   t.assert(versions.some(v => v.isDeleteMarker), 'a delete marker was placed')
   t.assert(versions.some(v => !v.isDeleteMarker), 'the stored version is retained')
 }
+
+/**
+ * `enable: false` loads the plugin without persisting: `store` declines everything (assets stay
+ * inline in postgres) while existing references keep resolving and being cleaned up.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testS3EnableOption = async tc => {
+  const s3conf = s3TestConf()
+  /** @type {types.AssetId} */
+  const assetId = { type: 'id:ydoc:v1', org: tc.testName, docid: 'index', branch: 'main', t: '1-0', gc: true }
+  /** @type {types.Asset} */
+  const asset = { type: 'asset:ydoc:v1', update: new Uint8Array([1, 2, 3]) }
+  const stored = /** @type {import('@y/hub/plugins/s3').RetrievableS3Asset} */ (await new S3PersistenceV1(s3conf).store(assetId, asset))
+  const disabled = new S3PersistenceV1({ ...s3conf, enable: false })
+  t.assert(await disabled.store(assetId, asset) === null, 'a disabled plugin never stores')
+  t.compare(await disabled.retrieve(assetId, stored), asset, 'but it still resolves existing references')
+  t.assert(await disabled.delete(assetId, stored), 'and still cleans them up')
+}

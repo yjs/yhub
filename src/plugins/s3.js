@@ -10,7 +10,7 @@ import { logger } from '../logger.js'
 const log = logger.child({ module: 's3' })
 
 /**
- * @typedef {{ bucket: string, endPoint: string, port: number, useSSL: boolean, accessKey: string, secretKey: string, branches?: true | Array<string>, deleteVersions?: boolean }} S3Conf
+ * @typedef {{ bucket: string, endPoint: string, port: number, useSSL: boolean, accessKey: string, secretKey: string, enable?: boolean, branches?: true | Array<string>, deleteVersions?: boolean }} S3Conf
  */
 
 export const $retrievableS3Asset = s.$object({
@@ -54,6 +54,7 @@ export class S3PersistenceV1 {
    */
   constructor (s3conf) {
     this.bucket = s3conf.bucket
+    this.enable = s3conf.enable ?? true
     this.branches = s3conf.branches ?? true
     this.deleteVersions = s3conf.deleteVersions ?? true
     const Agent = s3conf.useSSL ? https.Agent : http.Agent
@@ -86,7 +87,7 @@ export class S3PersistenceV1 {
    * @return {Promise<RetrievableS3Asset?>}
    */
   async store (assetId, asset) {
-    if (this.branches === true || this.branches.includes(assetId.branch)) {
+    if (this.enable && (this.branches === true || this.branches.includes(assetId.branch))) {
       const path = t.assetIdToString(assetId)
       const file = Buffer.from(buffer.encodeAny(asset))
       const put = () => this.s3client.putObject(this.bucket, path, Readable.from(file), file.length)

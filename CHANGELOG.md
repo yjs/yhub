@@ -2,6 +2,10 @@
 
 ## [0.9.0]
 
+> **Upgrading:** `S3PersistenceV1` now offloads every branch and, on versioned buckets, deletes
+> the object versions it recorded. Configure the plugin with `branches: ['main']` and
+> `deleteVersions: false` to keep the previous behavior.
+
 ### Breaking Changes
 
 - **`S3PersistenceV1` offloads every branch by default.** Previously only `main` was offloaded and
@@ -10,6 +14,15 @@
   `branches: ['main']` restores the previous behavior. No migration is needed: the reference
   markers are per asset, existing inline rows stay valid, and the next compaction of a branch
   offloads its new version. ([README](README.md#s3-persistence-s3persistencev1))
+- **`S3PersistenceV1` deletes object versions on versioned buckets.** A delete used to leave only a
+  delete marker there, keeping every version forever. The new `deleteVersions` option controls it:
+  `true` (the default) supplies the object version recorded on the reference at store time;
+  `false` restores the marker-only behavior for operators who use bucket versioning as a safety
+  net. Versions without a record — objects stored by older releases, or duplicates left by a
+  crashed or concurrent compaction — are not searched for and deleted; expire them with bucket
+  lifecycle rules. Restoring is manual either way: the postgres rows are dropped on deletion, so
+  preserved blobs must be re-imported (e.g. via `unsafePersistDoc`). New IAM permission on
+  versioned buckets: `s3:DeleteObjectVersion`. ([README](README.md#s3-persistence-s3persistencev1))
 
 ## [0.8.2]
 

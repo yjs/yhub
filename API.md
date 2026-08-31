@@ -1259,6 +1259,15 @@ finish) — nor that every byte is reachable to begin with: branches excluded by
 `yhub_ydoc_v1` — a deleted row survives until autovacuum and lives on in WAL, replicas, and any
 earlier base backup.
 
+On a versioning-enabled bucket, `S3PersistenceV1` deletes the object version recorded at store
+time by default (`deleteVersions: true`). Versions it has no record of — objects stored before the
+version was recorded, duplicates left by a crashed or concurrent compaction, or objects no row
+ever referenced — are not searched for and deleted; expiring them is the operator's job, e.g. via
+bucket lifecycle rules. Best-effort caveats apply here too: a deferred deletion is dropped if the
+process exits within its 10-second grace window, and failures are logged but not retried. With
+`deleteVersions: false` nothing is erased at all: deletes leave markers, and cleanup — or
+restoration of the raw bytes — is the operator's job.
+
 **Writes after a deletion** are not rejected at the Redis layer: a client that has not noticed yet can
 still push updates onto the stream. They are never persisted for a hard-deleted document, and are trimmed
 away with the rest of the stream.

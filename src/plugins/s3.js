@@ -1,4 +1,5 @@
 import * as t from '../types.js'
+import * as s from 'lib0/schema'
 import * as buffer from 'lib0/buffer'
 import { Client as S3Client } from 'minio'
 import { Readable } from 'stream'
@@ -9,7 +10,18 @@ import { logger } from '../logger.js'
 const log = logger.child({ module: 's3' })
 
 /**
- * @typedef {{ bucket: string, endPoint: string, port: number, useSSL: boolean, accessKey: string, secretKey: string, branches?: true | Array<string> }} S3Conf
+ * @typedef {{ bucket: string, endPoint: string, port: number, useSSL: boolean, accessKey: string, secretKey: string, branches?: true | Array<string>, deleteVersions?: boolean }} S3Conf
+ */
+
+export const $retrievableS3Asset = s.$object({
+  type: s.$literal('asset:retrievable:v1'),
+  plugin: s.$literal('S3Persistence:v1'),
+  // object-store version id of the offloaded object, recorded so a versioned delete can target it
+  versionId: s.$string.optional
+})
+
+/**
+ * @typedef {s.Unwrap<typeof $retrievableS3Asset>} RetrievableS3Asset
  */
 
 const TRANSIENT_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ESOCKETTIMEDOUT'])
@@ -43,11 +55,15 @@ export class S3PersistenceV1 {
   constructor (s3conf) {
     this.bucket = s3conf.bucket
     this.branches = s3conf.branches ?? true
+    this.deleteVersions = s3conf.deleteVersions ?? true
     const Agent = s3conf.useSSL ? https.Agent : http.Agent
     this._agent = new Agent({ keepAlive: true, keepAliveMsecs: 30_000 })
     this.s3client = new S3Client({ ...s3conf, transportAgent: this._agent, partSize: S3_PART_SIZE })
   }
 
+  /**
+   * @return {'S3Persistence:v1'}
+   */
   get pluginid () {
     return 'S3Persistence:v1'
   }
@@ -67,24 +83,30 @@ export class S3PersistenceV1 {
   /**
    * @param {t.AssetId} assetId
    * @param {t.Asset} asset
-   * @return {Promise<t.RetrievableAsset?>}
+   * @return {Promise<RetrievableS3Asset?>}
    */
   async store (assetId, asset) {
     if (this.branches === true || this.branches.includes(assetId.branch)) {
       const path = t.assetIdToString(assetId)
       const file = Buffer.from(buffer.encodeAny(asset))
       const put = () => this.s3client.putObject(this.bucket, path, Readable.from(file), file.length)
+      let res
       try {
-        await put()
+        res = await put()
       } catch (e) {
         if (!isTransient(e)) throw e
         log.warn({ err: e, path }, 'transient error storing object, retrying')
-        await put()
+        res = await put()
       }
-      return {
+      /** @type {RetrievableS3Asset} */
+      const reference = {
         type: 'asset:retrievable:v1',
         plugin: this.pluginid
       }
+      if (typeof res.versionId === 'string') {
+        reference.versionId = res.versionId
+      }
+      return reference
     }
     return null
   }
@@ -95,7 +117,7 @@ export class S3PersistenceV1 {
    * @return {Promise<t.Asset?>}
    */
   async retrieve (assetId, assetInfo) {
-    if (assetInfo.type === 'asset:retrievable:v1' && assetInfo.plugin === this.pluginid) {
+    if ($retrievableS3Asset.check(assetInfo)) {
       const path = t.assetIdToString(assetId)
       const get = async () => {
         try {
@@ -129,15 +151,28 @@ export class S3PersistenceV1 {
    * @return {Promise<boolean>}
    */
   async delete (assetId, assetInfo) {
-    if (assetInfo.type !== 'asset:retrievable:v1' || assetInfo.plugin !== this.pluginid) {
+    if (!$retrievableS3Asset.check(assetInfo)) {
       return false
     }
     const path = t.assetIdToString(assetId)
+    const versionId = assetInfo.versionId
     setTimeout(() => {
       // delete at some point later, avoiding issues of clients pulling from stale data
       // @todo it would be nice to implement a worker that finds unused s3 docs and deletes them
-      this.s3client.removeObject(this.bucket, path).catch(err => log.error({ err, path }, 'error deleting object'))
+      this._erase(path, versionId).catch(err => log.error({ err, path }, 'error deleting object'))
     }, 10_000)
     return true
+  }
+
+  /**
+   * Remove the object at `path`. With `deleteVersions` (the default) the version recorded on the
+   * reference is deleted directly; unrecorded versions and the delete markers plain deletes leave
+   * on a versioned bucket are the operator's cleanup, e.g. via bucket lifecycle rules.
+   *
+   * @param {string} path
+   * @param {string} [versionId]
+   */
+  _erase (path, versionId) {
+    return this.s3client.removeObject(this.bucket, path, this.deleteVersions && versionId != null ? { versionId } : {})
   }
 }

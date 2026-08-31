@@ -535,6 +535,7 @@ const yhub = await createYHub({
       accessKey: 'minioadmin',
       secretKey: 'minioadmin',
       // branches: ['main'],  // offload only the listed branches (default: every branch)
+      // deleteVersions: false,  // versioned buckets: only place delete markers (default: erase versions)
     })
   ],
   server: { /* ... */ },
@@ -544,6 +545,16 @@ const yhub = await createYHub({
 The optional `branches` option restricts which branches are offloaded to S3: `true` (the
 default) offloads every branch, an array offloads only the listed ones. Assets on branches
 the plugin skips are stored inline in PostgreSQL instead.
+
+On a bucket with versioning enabled, a plain delete only writes a delete marker — every stored
+version would persist forever. `deleteVersions` controls this: `true` (the default) deletes the
+object version recorded at store time, so compaction and hard deletes erase what they wrote;
+`false` leaves the standard delete marker so deleted bytes can be restored or expired with bucket
+lifecycle rules by the operator. Versions the plugin has no record of — objects written before
+this feature, or duplicates left by a crashed or concurrent compaction — are not searched for and
+deleted; expire them with lifecycle rules. Note that yhub drops its PostgreSQL rows on deletion
+either way — `deleteVersions: false` preserves raw blobs for manual recovery (e.g. re-import via
+`unsafePersistDoc`), not live documents.
 
 The environment variables `S3_ENDPOINT`, `S3_PORT`, `S3_SSL`, `S3_ACCESS_KEY`,
 `S3_SECRET_KEY`, and `S3_YHUB_BUCKET` are mapped to these fields by the default
@@ -558,6 +569,7 @@ configuration loader.
 | `s3:GetObject` | Always |
 | `s3:PutObject` | Always |
 | `s3:DeleteObject` | Always |
+| `s3:DeleteObjectVersion` | Versioned buckets (with `deleteVersions`, the default) |
 | `s3:ListBucketMultipartUploads` | Objects > 5 MB |
 | `s3:ListMultipartUploadParts` | Objects > 5 MB |
 | `s3:AbortMultipartUpload` | Objects > 5 MB |
@@ -576,6 +588,7 @@ Minimal AWS IAM policy example:
         "s3:GetObject",
         "s3:PutObject",
         "s3:DeleteObject",
+        "s3:DeleteObjectVersion",
         "s3:ListBucketMultipartUploads",
         "s3:ListMultipartUploadParts",
         "s3:AbortMultipartUpload"

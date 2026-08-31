@@ -1,5 +1,6 @@
 import * as Y from '@y/y'
 import * as t from 'lib0/testing'
+import * as types from '../src/types.js'
 import * as env from 'lib0/environment'
 import { S3PersistenceV1 } from '@y/hub/plugins/s3'
 import { yhub } from './utils.js'
@@ -94,24 +95,102 @@ export const testStorage = async tc => {
  * @param {t.TestCase} tc
  */
 export const testS3BranchesOption = async tc => {
-  const s3conf = {
-    bucket: env.ensureConf('S3_YHUB_TEST_BUCKET'),
-    endPoint: env.ensureConf('S3_ENDPOINT'),
-    port: parseInt(env.ensureConf('S3_PORT'), 10),
-    useSSL: env.ensureConf('S3_SSL') === 'true',
-    accessKey: env.ensureConf('S3_ACCESS_KEY'),
-    secretKey: env.ensureConf('S3_SECRET_KEY')
-  }
+  const s3conf = s3TestConf()
   /** @type {import('../src/types.js').AssetId} */
   const assetId = { type: 'id:ydoc:v1', org: tc.testName, docid: 'index', branch: 'feature', t: '1-0', gc: true }
   /** @type {import('../src/types.js').Asset} */
   const asset = { type: 'asset:ydoc:v1', update: new Uint8Array([1, 2, 3]) }
   const all = new S3PersistenceV1(s3conf)
-  const stored = /** @type {import('../src/types.js').RetrievableAsset} */ (await all.store(assetId, asset))
+  const stored = /** @type {import('@y/hub/plugins/s3').RetrievableS3Asset} */ (await all.store(assetId, asset))
   t.assert(stored != null && stored.plugin === all.pluginid, 'the default offloads every branch')
+  t.assert(stored.versionId === undefined, 'no version is recorded on an unversioned bucket')
   t.assert(await new S3PersistenceV1({ ...s3conf, branches: ['feature'] }).store(assetId, asset) != null, 'a listed branch is offloaded')
   const excluding = new S3PersistenceV1({ ...s3conf, branches: ['main'] })
   t.assert(await excluding.store(assetId, asset) === null, 'an unlisted branch stays inline')
   t.compare(await excluding.retrieve(assetId, stored), asset, 'retrieval ignores the allowlist')
   t.assert(await excluding.delete(assetId, stored), 'deletion ignores the allowlist')
+}
+
+const s3TestConf = () => ({
+  bucket: env.ensureConf('S3_YHUB_TEST_BUCKET'),
+  endPoint: env.ensureConf('S3_ENDPOINT'),
+  port: parseInt(env.ensureConf('S3_PORT'), 10),
+  useSSL: env.ensureConf('S3_SSL') === 'true',
+  accessKey: env.ensureConf('S3_ACCESS_KEY'),
+  secretKey: env.ensureConf('S3_SECRET_KEY')
+})
+
+/**
+ * @param {S3PersistenceV1} plugin
+ * @param {string} path
+ */
+const listVersions = async (plugin, path) => {
+  const found = []
+  for await (const entry of plugin.s3client.listObjects(plugin.bucket, path, true, { IncludeVersion: true })) {
+    const e = /** @type {{ name?: string, versionId?: string, isDeleteMarker?: boolean }} */ (entry)
+    if (e.name === path) found.push(e)
+  }
+  return found
+}
+
+/**
+ * With `deleteVersions` (the default) `_erase` deletes exactly the version recorded on the
+ * reference. Unrecorded versions - duplicates left by a crashed or concurrent compaction, objects
+ * stored before the version was recorded - are deliberately left to operator cleanup, e.g. via
+ * bucket lifecycle rules.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testS3VersionedDelete = async tc => {
+  const bucket = env.ensureConf('S3_YHUB_TEST_BUCKET') + '-versioned'
+  const plugin = new S3PersistenceV1({ ...s3TestConf(), bucket })
+  await plugin.init()
+  await plugin.s3client.setBucketVersioning(bucket, { Status: 'Enabled' })
+  const clock = `${Date.now()}-0` // fresh keys per run - the versioned bucket accumulates
+  /** @param {string} docid */
+  const mkAssetId = docid => /** @type {types.AssetId} */ ({ type: 'id:ydoc:v1', org: tc.testName, docid, branch: 'main', t: clock, gc: true })
+  /** @type {types.Asset} */
+  const asset = { type: 'asset:ydoc:v1', update: new Uint8Array([1, 2, 3]) }
+
+  const targeted = mkAssetId('targeted')
+  const ref = /** @type {import('@y/hub/plugins/s3').RetrievableS3Asset} */ (await plugin.store(targeted, asset))
+  t.assert(typeof ref.versionId === 'string', 'the reference records the object version')
+  await plugin._erase(types.assetIdToString(targeted), ref.versionId)
+  t.assert((await listVersions(plugin, types.assetIdToString(targeted))).length === 0, 'the recorded version is gone, no marker was placed')
+
+  // a re-run compaction PUT the same key twice - only the recorded version is deleted
+  const sibling = mkAssetId('sibling')
+  await plugin.store(sibling, asset)
+  const ref2 = /** @type {import('@y/hub/plugins/s3').RetrievableS3Asset} */ (await plugin.store(sibling, asset))
+  await plugin._erase(types.assetIdToString(sibling), ref2.versionId)
+  const rest = await listVersions(plugin, types.assetIdToString(sibling))
+  t.assert(rest.length === 1 && rest[0].versionId !== ref2.versionId, 'the unrecorded sibling version is left to operator cleanup')
+
+  // a reference without a recorded version gets a plain delete - a marker on a versioned bucket
+  const legacy = mkAssetId('legacy')
+  await plugin.store(legacy, asset)
+  await plugin._erase(types.assetIdToString(legacy), undefined)
+  const versions = await listVersions(plugin, types.assetIdToString(legacy))
+  t.assert(versions.some(v => v.isDeleteMarker) && versions.some(v => !v.isDeleteMarker), 'a delete marker hides the retained version')
+}
+
+/**
+ * `deleteVersions: false` leaves the standard delete marker so operators can restore the bytes or
+ * clean up via lifecycle rules themselves.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testS3MarkOnlyDelete = async tc => {
+  const bucket = env.ensureConf('S3_YHUB_TEST_BUCKET') + '-versioned'
+  const plugin = new S3PersistenceV1({ ...s3TestConf(), bucket, deleteVersions: false })
+  await plugin.init()
+  await plugin.s3client.setBucketVersioning(bucket, { Status: 'Enabled' })
+  /** @type {types.AssetId} */
+  const assetId = { type: 'id:ydoc:v1', org: tc.testName, docid: 'index', branch: 'main', t: `${Date.now()}-0`, gc: true }
+  const ref = /** @type {import('@y/hub/plugins/s3').RetrievableS3Asset} */ (await plugin.store(assetId, { type: 'asset:ydoc:v1', update: new Uint8Array([1]) }))
+  const path = types.assetIdToString(assetId)
+  await plugin._erase(path, ref.versionId)
+  const versions = await listVersions(plugin, path)
+  t.assert(versions.some(v => v.isDeleteMarker), 'a delete marker was placed')
+  t.assert(versions.some(v => !v.isDeleteMarker), 'the stored version is retained')
 }

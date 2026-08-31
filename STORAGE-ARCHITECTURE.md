@@ -396,7 +396,8 @@ The `S3PersistenceV1` plugin offloads assets to S3:
 
 - **Storage Path**: Uses asset ID string as S3 object key
 - **Branch Filter**: the `branches` option — `true` (the default) offloads every branch, an array offloads only the listed ones
-- **Returns**: `{ type: 'asset:retrievable:v1', plugin: 'S3Persistence:v1' }`
+- **Returns**: `RetrievableS3Asset` — `{ type: 'asset:retrievable:v1', plugin: 'S3Persistence:v1', versionId? }`. `versionId` is the s3 plugin's own field recording the object-store version id when the bucket is versioned; the shared reference type stays `{ type, plugin }`
+- **Versioned deletes**: with `deleteVersions` (the default) a delete supplies the version recorded on the reference; unrecorded versions and delete markers are left to operator cleanup (lifecycle rules); `deleteVersions: false` leaves a plain delete marker
 
 ### Plugin Chain
 

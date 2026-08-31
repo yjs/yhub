@@ -151,6 +151,27 @@ export const testActivityYdocRoundTrip = async tc => {
 }
 
 /**
+ * `groupExclude` exempts the listed userids from grouping: their consecutive edits stay
+ * individual entries while grouping stays on for everyone else.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testActivityGroupExclude = async tc => {
+  const { org, createWsClient } = await utils.createTestCase(tc)
+  const { ydoc } = await createWsClient({ waitForSync: true })
+  ydoc.get().applyDelta(delta.create().insert('hello').done())
+  await promise.wait(100)
+  ydoc.get().applyDelta(delta.create().insert('world').done())
+  await promise.wait(3000)
+  // the two edits land < groupMaxGap apart, so default grouping merges them
+  t.assert((await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=true`)).activity.length === 1)
+  const excluded = (await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=true&groupExclude=user1`)).activity
+  t.assert(excluded.length === 2 && excluded.every((/** @type {any} */ a) => a.by === 'user1'), "the exempt user's edits stay individual entries")
+  // excluding someone else leaves grouping untouched
+  t.assert((await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=true&groupExclude=agent-1,agent-2`)).activity.length === 1)
+}
+
+/**
  * Pruning permanently compacts churned history: content that was both inserted and deleted within
  * the requested range is destroyed, so it no longer shows up in the activity API. Fresh insertions
  * (never deleted) and the visible document content are untouched.

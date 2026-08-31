@@ -294,7 +294,7 @@ the activity API and the changeset API to reconstruct an editing trail.
 Access: the `history` facet, with the same clamping and ydoc-read rule as
 [changeset](#changeset).
 
-* `GET /api/activity/v1/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, groupMaxGap?: number, groupMaxDuration?: number, delta?: boolean, withCustomAttributions?: string, customAttributions?: boolean, contentIds?: string }`
+* `GET /api/activity/v1/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, groupMaxGap?: number, groupMaxDuration?: number, groupExclude?: string, delta?: boolean, withCustomAttributions?: string, customAttributions?: boolean, contentIds?: string }`
   * `from`/`to`: unix timestamp range filter — non-negative integers (`400` otherwise); `to` is lifted to the clamped `from`, so it never lies below the granted ray
   * `by=string`: comma-separated list of user-ids to filter by
   * `withCustomAttributions=string`: filter by custom attributions using `key:value` pairs, comma-separated (e.g. `source:import,tag:v2`). Only changes matching all specified attributions are included.
@@ -304,6 +304,7 @@ Access: the `history` facet, with the same clamping and ydoc-read rule as
   * `group=boolean`: bundle consecutive changes from the same user into a single entry (experimental)
   * `groupMaxGap=number`: maximum time gap (in milliseconds) between consecutive changes by the same user that still merges them into a single entry (default: `1000`). Only applies when grouping is enabled.
   * `groupMaxDuration=number`: maximum total span (in milliseconds) of a grouped entry (`entry.to - entry.from`). A change is not merged into a group if the resulting span would exceed this value (default: unlimited). Only applies when grouping is enabled.
+  * `groupExclude=string`: comma-separated user-ids exempt from grouping — their consecutive changes stay individual entries while other users group normally. Only applies when grouping is enabled.
   * `delta=boolean`: include a delta representation for each activity entry — the document at that entry's `to`, with the entry's changes highlighted.
   * `ydoc=boolean`: return a single shared partially-gc'd document for the whole list, plus per entry a `renderedContent` IdSet (= content alive at the entry's `to`). The response shape becomes `{ ydoc, activity }`. Render any entry client-side by applying `ydoc` to a `gc: false` doc and overlaying an `AttributionsRenderer` with that entry's `renderedContent` (and `attributions`) — see [Rendering with AttributionsRenderer](#rendering-with-attributionsrenderer).
   * `attributions=boolean`: include each entry's attribution `ContentMap` (as `attributions: Uint8Array`).

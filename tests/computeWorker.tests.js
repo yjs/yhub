@@ -139,6 +139,7 @@ export const testActivityGrouping = async _tc => {
     group: true,
     groupMaxGap: 1000,
     groupMaxDuration: Number.MAX_SAFE_INTEGER,
+    groupExclude: [],
     ...opts
   }))).activity
   // default: 500ms gaps are below groupMaxGap=1000, everything merges
@@ -152,6 +153,9 @@ export const testActivityGrouping = async _tc => {
   t.compare(capped.map(a => [a.from, a.to]), [[1000, 1500], [2000, 2000]])
   const ungrouped = await activity({ group: false })
   t.assert(ungrouped.length === 3)
+  // an exempt user's own edits never merge; excluding someone else changes nothing
+  t.assert((await activity({ groupExclude: ['user1'] })).length === 3)
+  t.compare((await activity({ groupExclude: ['someoneelse'] })).map(a => [a.from, a.to]), [[1000, 2000]])
   doc.destroy()
   await pool.destroy()
 }

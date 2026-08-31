@@ -126,7 +126,7 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       break
     }
     case 'activity': {
-      const { nongcDoc: nongcDocBin, contentmapBin, from, to, by, contentIds: contentIdsBin, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupMaxGap, groupMaxDuration } = msg
+      const { nongcDoc: nongcDocBin, contentmapBin, from, to, by, contentIds: contentIdsBin, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupMaxGap, groupMaxDuration, groupExclude } = msg
       const contentmap = Y.decodeContentMap(contentmapBin)
       const contentIds = contentIdsBin && Y.decodeContentIds(contentIdsBin)
       const filteredAttributions = filterContentMap(contentmap, from, to, by || undefined, contentIds, withCustomAttributions)
@@ -181,7 +181,7 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       /** @type {{ from: number, to: number, by: string?, customAttributions: Array<{k:string,v:string}>|null }|null} */
       let lastActivity = null
       activity.forEach(act => {
-        if (lastActivity != null && lastActivity.by === act.by && act.from - lastActivity.to < groupDistance && act.to - lastActivity.from < groupMaxDuration) {
+        if (lastActivity != null && lastActivity.by === act.by && (act.by == null || !groupExclude.includes(act.by)) && act.from - lastActivity.to < groupDistance && act.to - lastActivity.from < groupMaxDuration) {
           lastActivity.to = act.to
           lastActivity.customAttributions?.push(...(act?.customAttributions || []))
         } else {

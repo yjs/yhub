@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### New Features
+
+- **`GET /activity?groupExclude=agent-1,agent-2`** — exempt the listed userids from grouping: their consecutive edits stay individual activity entries while other users group as usual. ([API docs](API.md#activity))
+
 ## [0.8.1]
 
 ### Fixes

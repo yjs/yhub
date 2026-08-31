@@ -163,7 +163,9 @@ export const yhub = await createYHub({
       port: parseInt(env.ensureConf('S3_PORT'), 10),
       useSSL: env.ensureConf('S3_SSL') === 'true',
       accessKey: env.ensureConf('S3_ACCESS_KEY'),
-      secretKey: env.ensureConf('S3_SECRET_KEY')
+      secretKey: env.ensureConf('S3_SECRET_KEY'),
+      // 'main' only, so the delete suite's branch tests exercise the inline-postgres fallback
+      branches: ['main']
     })
   ],
   server: {

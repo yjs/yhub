@@ -1254,9 +1254,10 @@ it grants deletion to everyone who can write — so irreversible erasure stays p
 **What "hard delete" guarantees.** The document becomes unrecoverable *through the API*, and objects
 referenced by persistence plugins are handed to them for deletion. It is not a guarantee that every byte
 has already left the store — plugins may defer (`S3PersistenceV1` does, to let concurrent readers
-finish) — nor that every byte is reachable to begin with: `S3PersistenceV1`
-only offloads the `main` branch, so other branches' blobs live inline in `yhub_ydoc_v1` — a deleted
-row survives until autovacuum and lives on in WAL, replicas, and any earlier base backup.
+finish) — nor that every byte is reachable to begin with: branches excluded by `S3PersistenceV1`'s
+`branches` allowlist, and rows written before offloading covered them, keep their blobs inline in
+`yhub_ydoc_v1` — a deleted row survives until autovacuum and lives on in WAL, replicas, and any
+earlier base backup.
 
 **Writes after a deletion** are not rejected at the Redis layer: a client that has not noticed yet can
 still push updates onto the stream. They are never persisted for a hard-deleted document, and are trimmed

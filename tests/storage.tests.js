@@ -1,5 +1,7 @@
 import * as Y from '@y/y'
 import * as t from 'lib0/testing'
+import * as env from 'lib0/environment'
+import { S3PersistenceV1 } from '@y/hub/plugins/s3'
 import { yhub } from './utils.js'
 
 let currClock = 0
@@ -82,4 +84,34 @@ export const testStorage = async tc => {
     t.assert(doc3.get().getAttr('a') === 2)
     t.info('delete references')
   }
+}
+
+/**
+ * `branches` gates which branches `store` offloads. `retrieve` and `delete` are keyed on the
+ * asset's `plugin` marker instead, so objects offloaded under an earlier configuration stay
+ * readable and deletable after the allowlist changes.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testS3BranchesOption = async tc => {
+  const s3conf = {
+    bucket: env.ensureConf('S3_YHUB_TEST_BUCKET'),
+    endPoint: env.ensureConf('S3_ENDPOINT'),
+    port: parseInt(env.ensureConf('S3_PORT'), 10),
+    useSSL: env.ensureConf('S3_SSL') === 'true',
+    accessKey: env.ensureConf('S3_ACCESS_KEY'),
+    secretKey: env.ensureConf('S3_SECRET_KEY')
+  }
+  /** @type {import('../src/types.js').AssetId} */
+  const assetId = { type: 'id:ydoc:v1', org: tc.testName, docid: 'index', branch: 'feature', t: '1-0', gc: true }
+  /** @type {import('../src/types.js').Asset} */
+  const asset = { type: 'asset:ydoc:v1', update: new Uint8Array([1, 2, 3]) }
+  const all = new S3PersistenceV1(s3conf)
+  const stored = /** @type {import('../src/types.js').RetrievableAsset} */ (await all.store(assetId, asset))
+  t.assert(stored != null && stored.plugin === all.pluginid, 'the default offloads every branch')
+  t.assert(await new S3PersistenceV1({ ...s3conf, branches: ['feature'] }).store(assetId, asset) != null, 'a listed branch is offloaded')
+  const excluding = new S3PersistenceV1({ ...s3conf, branches: ['main'] })
+  t.assert(await excluding.store(assetId, asset) === null, 'an unlisted branch stays inline')
+  t.compare(await excluding.retrieve(assetId, stored), asset, 'retrieval ignores the allowlist')
+  t.assert(await excluding.delete(assetId, stored), 'deletion ignores the allowlist')
 }

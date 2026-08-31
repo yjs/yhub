@@ -82,8 +82,8 @@ CREATE TABLE yhub_ydoc_v1 (
 The `_is_reference` markers let a reader that only wants the references — the purge — leave inline
 blobs in the database instead of reading them out to discard them. Decided **per asset**, since
 `PersistencePlugin.store` is called once per asset and may offload some and not others;
-`S3PersistenceV1` happens to decide by branch, offloading only `main`, which is why the saving lands
-on branches rather than on main.
+`S3PersistenceV1` decides by branch when its `branches` option is an allowlist (by default it
+offloads every branch), which is why the saving lands on the branches the allowlist skips.
 
 `DEFAULT true` is what makes adding them a one-statement migration. A row written before the columns
 existed reads as "this may be a reference", so it is fetched and checked exactly as it was before —
@@ -395,7 +395,7 @@ interface PersistencePlugin {
 The `S3PersistenceV1` plugin offloads assets to S3:
 
 - **Storage Path**: Uses asset ID string as S3 object key
-- **Branch Filter**: Only stores assets from `main` branch by default
+- **Branch Filter**: the `branches` option — `true` (the default) offloads every branch, an array offloads only the listed ones
 - **Returns**: `{ type: 'asset:retrievable:v1', plugin: 'S3Persistence:v1' }`
 
 ### Plugin Chain

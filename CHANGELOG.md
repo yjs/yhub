@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.0]
+
+### Breaking Changes
+
+- **`S3PersistenceV1` offloads every branch by default.** Previously only `main` was offloaded and
+  other branches stored their assets inline in postgres. The new `branches` option controls it:
+  `true` (the new default) offloads every branch, an array offloads only the listed ones —
+  `branches: ['main']` restores the previous behavior. No migration is needed: the reference
+  markers are per asset, existing inline rows stay valid, and the next compaction of a branch
+  offloads its new version. ([README](README.md#s3-persistence-s3persistencev1))
+
 ## [0.8.2]
 
 ### New Features

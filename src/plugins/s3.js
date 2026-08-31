@@ -9,7 +9,7 @@ import { logger } from '../logger.js'
 const log = logger.child({ module: 's3' })
 
 /**
- * @typedef {{ bucket: string, endPoint: string, port: number, useSSL: boolean, accessKey: string, secretKey: string }} S3Conf
+ * @typedef {{ bucket: string, endPoint: string, port: number, useSSL: boolean, accessKey: string, secretKey: string, branches?: true | Array<string> }} S3Conf
  */
 
 const TRANSIENT_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ESOCKETTIMEDOUT'])
@@ -42,6 +42,7 @@ export class S3PersistenceV1 {
    */
   constructor (s3conf) {
     this.bucket = s3conf.bucket
+    this.branches = s3conf.branches ?? true
     const Agent = s3conf.useSSL ? https.Agent : http.Agent
     this._agent = new Agent({ keepAlive: true, keepAliveMsecs: 30_000 })
     this.s3client = new S3Client({ ...s3conf, transportAgent: this._agent, partSize: S3_PART_SIZE })
@@ -69,7 +70,7 @@ export class S3PersistenceV1 {
    * @return {Promise<t.RetrievableAsset?>}
    */
   async store (assetId, asset) {
-    if (assetId.branch === 'main') {
+    if (this.branches === true || this.branches.includes(assetId.branch)) {
       const path = t.assetIdToString(assetId)
       const file = Buffer.from(buffer.encodeAny(asset))
       const put = () => this.s3client.putObject(this.bucket, path, Readable.from(file), file.length)

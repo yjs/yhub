@@ -394,7 +394,8 @@ export const testGetDeletedDocs = async tc => {
 }
 
 /**
- * `S3PersistenceV1` only offloads the `main` branch, so a branch's assets live inline in postgres.
+ * The test hub's s3 plugin is configured with `branches: ['main']`, so a branch's assets live inline
+ * in postgres.
  * The purge has no external object to delete for those, and the reference markers let it leave the
  * blobs where they are - while still deleting every row, which is the trap: rows are dropped by the
  * assetIds `deleteReferences` is handed, so an all-inline row that contributed none would survive.

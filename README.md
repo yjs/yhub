@@ -534,11 +534,16 @@ const yhub = await createYHub({
       useSSL:    false,
       accessKey: 'minioadmin',
       secretKey: 'minioadmin',
+      // branches: ['main'],  // offload only the listed branches (default: every branch)
     })
   ],
   server: { /* ... */ },
 })
 ```
+
+The optional `branches` option restricts which branches are offloaded to S3: `true` (the
+default) offloads every branch, an array offloads only the listed ones. Assets on branches
+the plugin skips are stored inline in PostgreSQL instead.
 
 The environment variables `S3_ENDPOINT`, `S3_PORT`, `S3_SSL`, `S3_ACCESS_KEY`,
 `S3_SECRET_KEY`, and `S3_YHUB_BUCKET` are mapped to these fields by the default

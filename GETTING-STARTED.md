@@ -212,7 +212,7 @@ S3_YHUB_BUCKET=yhub
 
 - **PostgreSQL** stores document metadata and references (small pointers)
 - **S3** stores the actual document data (Yjs updates, content maps)
-- The plugin only persists documents on the `main` branch
+- The plugin persists every branch by default; `branches: ['main']` restricts offloading to the listed branches — skipped branches store their data inline in PostgreSQL
 - On startup, the plugin automatically creates the bucket if it doesn't exist
 
 ### Using MinIO for Local Development

@@ -12,7 +12,7 @@ import * as s from 'lib0/schema'
 // eslint-disable-next-line
 import * as t from './types.js'
 import { isSmallerRedisClock } from './stream.js'
-import { logger } from './logger.js'
+import { logger, describeUrl } from './logger.js'
 
 const log = logger.child({ module: 'persistence' })
 
@@ -21,12 +21,14 @@ const log = logger.child({ module: 'persistence' })
  * @param {t.PersistencePlugin[]} plugins
  */
 export const createPersistence = async (postgresUrl, plugins) => {
+  // parsed before connecting, so a malformed url fails here rather than inside the catch below
+  const endpoint = describeUrl(postgresUrl)
   // If a specific database is requested, ensure it exists
   const sql = postgres(postgresUrl, { connect_timeout: 60 })
   try {
     await sql`SELECT 1 as connected`
   } catch (err) {
-    throw new Error(`Can't connect to postgres. url: ${postgresUrl}.\n${err}`)
+    throw new Error(`Can't connect to postgres at ${endpoint.hostname}:${endpoint.port}/${endpoint.database}.\n${err}`)
   }
   return new Persistence(sql, plugins)
 }

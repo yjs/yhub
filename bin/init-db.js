@@ -4,7 +4,7 @@ import postgres from 'postgres'
 import * as env from 'lib0/environment'
 import { Client as S3Client } from 'minio'
 import { createClient as createRedisClient } from 'redis'
-import { logger } from '../src/logger.js'
+import { logger, describeUrl } from '../src/logger.js'
 
 const log = logger.child({ module: 'init-db' })
 
@@ -71,12 +71,12 @@ const initTables = async sql => {
  * @param {string} postgresUrl - postgres://username:password@host:port/database
  */
 async function init (postgresUrl) {
-  log.info({ postgresUrl }, 'initializing database')
+  log.info({ postgres: describeUrl(postgresUrl) }, 'initializing database')
   // Extract database from URL path
   const database = new URL(postgresUrl).pathname.slice(1)
   if (database !== '') {
     // Step 1: Create database if URL includes one
-    log.info({ database, postgresUrl }, 'ensuring database exists')
+    log.info({ database }, 'ensuring database exists')
     // Connect to default 'postgres' database for admin operations
     // Preserve query parameters (like ssl=require) when switching database
     const url = new URL(postgresUrl)
@@ -109,7 +109,7 @@ async function init (postgresUrl) {
   } finally {
     await sql.end({ timeout: 5 })
   }
-  log.info({ postgresUrl }, 'initialization done')
+  log.info({ postgres: describeUrl(postgresUrl) }, 'initialization done')
 }
 
 /**

@@ -299,7 +299,7 @@ export const testWorker = async tc => {
   provider.destroy()
   ydoc.destroy()
   const streamName = stream.encodeRoomName({ org, docid: ydoc.guid, branch: 'main' }, yhub.stream.prefix)
-  console.info('waiting for stream to be deleted', { conf: yhub.conf.redis, streamName })
+  console.info('waiting for stream to be deleted', { streamName })
   await promise.untilAsync(async () => ((await yhub.stream.redis.exists(streamName)) === 1), yhub.conf.redis.minMessageLifetime * 9)
   t.info('stream deleted')
   const { ydoc: loadedDoc } = await createWsClient({ waitForSync: true, syncAwareness: false })

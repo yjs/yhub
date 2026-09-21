@@ -10,7 +10,7 @@ import * as protocol from './protocol.js'
 import * as server from './server.js'
 import { createComputePool } from './compute.js'
 import { agentTask } from './agents.js'
-import { logger } from './logger.js'
+import { logger, describeUrl } from './logger.js'
 import * as time from 'lib0/time'
 
 export { createAuthPlugin, createAuthorize, createApiEndpoint, DocDeletedError } from './types.js'
@@ -484,6 +484,10 @@ export class YHub {
  */
 export const createYHub = async conf => {
   t.$config.expect(conf)
+  // parsed here, before the redis client sees the url: node's ERR_INVALID_URL carries the
+  // offending string - password included - in `err.input`, which pino copies onto the log record
+  const postgres = describeUrl(conf.postgres)
+  const redis = describeUrl(conf.redis.url)
   // sanitize conf
   if (conf.server) {
     conf.server.maxDocSize ??= 500 * 1024 * 1024
@@ -497,6 +501,8 @@ export const createYHub = async conf => {
   }
   log.info({
     redisPrefix: conf.redis.prefix,
+    postgres,
+    redis,
     pluginCount: conf.persistence.length,
     workerConcurrency: conf.worker?.taskConcurrency ?? null,
     computePoolSize: yhub.computePool.maxPoolSize,

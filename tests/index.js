@@ -13,9 +13,11 @@ import * as stream from './stream.tests.js'
 import * as worker from './worker.tests.js'
 import * as permissions from './permissions.tests.js'
 import * as permissionsEnforcement from './permissionsEnforcement.tests.js'
+import * as logger from './logger.tests.js'
 import { runTests } from 'lib0/testing'
 
 runTests({
+  logger,
   permissions,
   permissionsEnforcement,
   computeWorker,

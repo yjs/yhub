@@ -2,11 +2,17 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **The top-level `events` config key is gone.** It was declared in `$config` but never read — `worker.events` is the hook that actually fires (`docUpdate` after each compaction, plus `taskStart`/`taskComplete`). Nothing changes at runtime: `$config` never inspects a key it doesn't declare, so a config object that still carries `events` keeps behaving exactly as it did, which is to say the callback never ran. A TypeScript config *literal* naming it now errors — move the callback to `worker.events.docUpdate`, which receives the merged `DocTable` plus its `docRef`. This supersedes the 0.3.0 entry about the top-level `events.docUpdate` signature; that callback had no call site to change. ([`src/types.js`](src/types.js))
+
 ### New Features
 
 - **`GET /activity?groupByUser=false`** — bundle consecutive changes into one entry regardless of who made them, so `groupMaxGap`/`groupMaxDuration` alone decide the grouping. The entry's `by` is then a deduplicated array of every contributing user-id (always an array, even for a single author; `null` for changes with no recorded author), and its `attributions`/`delta` keep each change's own author and timestamp instead of a uniform stamp. Default `true`, which is the previous per-author behavior. Useful for a "what happened to this document between 9am and 10am" timeline, where interleaved edits should read as one session rather than one entry per author switch. ([API docs](API.md#activity))
 
 ### Fixes
+
+- **A partial persistence plugin is no longer rejected at startup, and a plugin's `delete` is now validated.** `$persistencePlugin` declared `init` as required although `createYHub` has always invoked it as `p.init?.(yhub)`, so a plugin implementing only `retrieve` threw at `createYHub` instead of running. In the other direction, `delete` was missing from the schema altogether — `Persistence.deleteReferences` calls it, but a key absent from a schema's shape is never inspected, so a misspelled or mistyped `delete` passed validation and then silently never deleted anything. All four members (`init`, `store`, `retrieve`, `delete`) are now optional and checked when present. ([`src/types.js`](src/types.js))
 
 - **Connection urls are no longer logged with their password.** `bin/init-db.js` logged the resolved `POSTGRES` url verbatim at `info` on every run, so a deployment running it as an initContainer shipped the database password to whatever scrapes pod stdout; `createPersistence` also put the full url into the error it throws when it can't connect, and a malformed `REDIS`/`POSTGRES` value produced a node `ERR_INVALID_URL` whose `input` property carries the offending string — pino's error serializer copies that onto the log record. All of them now report the parsed endpoint (`{ hostname, port, username, database }`) and never the url, and a url that doesn't parse fails with `malformed connection url` instead of an error carrying the string. The same descriptor is now on the `yhub initialized` line, which previously logged no host at all. **A password that was already logged is still in your log store — rotate it.** (yjs/yhub#70)
 

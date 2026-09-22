@@ -1,4 +1,3 @@
-import * as Y from '@y/y'
 import * as s from 'lib0/schema'
 
 /**
@@ -260,9 +259,10 @@ export const $task = $compactTask
  * @type {s.Schema<PersistencePlugin>}
  */
 export const $persistencePlugin = s.$object({
-  init: /** @type {s.Schema<()=>any>} */ (s.$function),
+  init: /** @type {s.Schema<()=>any>} */ (s.$function).nullable.optional,
   store: /** @type {s.Schema<()=>any>} */ (s.$function).nullable.optional,
-  retrieve: /** @type {s.Schema<()=>any>} */ (s.$function).nullable.optional
+  retrieve: /** @type {s.Schema<()=>any>} */ (s.$function).nullable.optional,
+  delete: /** @type {s.Schema<()=>any>} */ (s.$function).nullable.optional
 })
 
 export const $authPlugin = /** @type {s.Schema<AuthPlugin<any>>} */ (s.$object({
@@ -560,11 +560,13 @@ export const $config = s.$object({
    * (default: 30 minutes)
    */
   maxTaskDuration: s.$number.optional,
-  events: s.$object({
-    docUpdate: s.$lambda(s.$any, s.$instanceOf(Y.Doc), s.$object({ inserts: s.$instanceOf(Y.IdMap), deletes: s.$instanceOf(Y.IdMap) }), s.$undefined)
-  }).optional,
   worker: s.$object({
     taskConcurrency: s.$number,
+    /**
+     * Observability callbacks invoked by the compaction worker. Every payload identifies its
+     * document with `docRef`. Called synchronously and never awaited; a synchronous throw
+     * propagates into the task. See API.md.
+     */
     events: s.$object({
       docUpdate: /** @type {s.$Optional<s.Schema<(event:DocTable<{ gc: true, nongc: true, contentmap: true, contentids: true }> & { docRef: DocRef }) => void>>} */ (s.$function.optional),
       taskStart: /** @type {s.$Optional<s.Schema<(event: { docRef: DocRef, timestamp: number }) => void>>} */ (s.$function.optional),

@@ -995,7 +995,9 @@ const yhub = await createYHub(config)
 | `server.cors.maxAge` | `number` | no | `Access-Control-Max-Age` in seconds (a non-negative integer; browsers cap it, e.g. Chrome at `7200`). Default: `3600` |
 | `worker` | `object \| null` | no | Background compaction worker config. Set to `null` to disable. |
 | `worker.taskConcurrency` | `number` | yes* | Maximum number of compaction tasks to process in parallel |
-| `worker.events.docUpdate` | `function` | no | Called after each compaction with the merged `DocTable` plus the `docRef` it belongs to |
+| `worker.events.docUpdate` | `function` | no | Called with the merged document, just before it is persisted. See [Worker events](#worker-events). |
+| `worker.events.taskStart` | `function` | no | Called when a compaction task starts. See [Worker events](#worker-events). |
+| `worker.events.taskComplete` | `function` | no | Called when a compaction task finishes, successfully or not. See [Worker events](#worker-events). |
 
 **Example: full server setup**
 
@@ -1039,6 +1041,48 @@ const yhub = await createYHub({
   server: null,
   worker: null
 })
+```
+
+#### Worker events
+
+Optional observability callbacks on `worker.events`, invoked by the compaction worker. Every
+payload identifies its document with **`docRef`** (`{ org, docid, branch }`) — that property was
+called `room` before 0.8.0.
+
+| Event | Payload | When |
+|---|---|---|
+| `taskStart` | `{ docRef, timestamp }` | A compaction task starts, before it reads anything. `timestamp` is unix milliseconds. |
+| `docUpdate` | the merged `DocTable` plus `docRef` | New content was merged and is about to be written. **Not** called for a task that finds nothing to persist and only trims the stream. |
+| `taskComplete` | `{ docRef, duration, error }` | The task finished. Fires from a `finally`, so it also covers trim-only passes and failures: `error` is the `Error` that aborted the task, or `null`. `duration` is milliseconds since the matching `taskStart` `timestamp`. |
+
+Not every `taskStart` is followed by a `docUpdate` — a task on a document with no new content
+takes the trim-only path — but every `taskStart` is followed by a `taskComplete`.
+
+`docUpdate` receives the same fields as [`yhub.getDoc`](#yhubgetdocdocref-include-opts) with
+`{ gc: true, nongc: true, contentmap: true, contentids: true }`, plus `docRef`: `gcDoc`,
+`nongcDoc`, `contentmap` and `contentids` are populated, `lastClock` / `lastPersistedClock`
+bracket what this compaction is persisting, and `tombstone` is set when the document is
+soft-deleted. `references` and `awareness` are always `null` — the worker resolves references for
+its own bookkeeping and does not expose them here.
+
+The callbacks are invoked synchronously and their return value is ignored, so an `async` callback
+is not awaited and its rejection surfaces as an unhandled rejection. A callback that throws
+*synchronously* propagates into the task: from `docUpdate` that aborts the compaction before the
+document is stored, leaving the task to be retried after `redis.taskDebounce`. Keep them cheap and
+handle your own errors.
+
+```js
+worker: {
+  taskConcurrency: 10,
+  events: {
+    taskStart: ({ docRef }) => metrics.increment('compaction.started', { org: docRef.org }),
+    docUpdate: ({ docRef, gcDoc }) => metrics.gauge('doc.bytes', gcDoc.byteLength, { org: docRef.org }),
+    taskComplete: ({ docRef, duration, error }) => {
+      metrics.timing('compaction.duration', duration, { org: docRef.org })
+      if (error != null) log.error({ err: error, docRef }, 'compaction failed')
+    }
+  }
+}
 ```
 
 #### `yhub.getDoc(docRef, include, opts?)`

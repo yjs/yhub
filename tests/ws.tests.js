@@ -4,6 +4,10 @@ import * as promise from 'lib0/promise'
 import * as encoding from 'lib0/encoding'
 import WebSocket from 'ws'
 import * as utils from './utils.js'
+import * as protocol from '../src/protocol.js'
+import { WSUser } from '../src/server.js'
+import { mergeUpdates } from '../src/y-utils.js'
+import { normalizeDocumentPermissions } from '../src/permissions.js'
 
 /**
  * @param {t.TestCase} tc
@@ -223,4 +227,57 @@ export const testEmptyBranchIsRejected = async tc => {
   explicit.get().setAttr('a', 1)
   const { ydoc: implicit } = await createWsClient({ branch: null, waitForSync: true })
   await promise.until(10000, () => implicit.get().getAttr('a') === 1)
+}
+
+/**
+ * A stream batch is encoded once: every connection it is fanned out to is sent the identical frame
+ * object, so the ydoc and awareness merges don't run per connection. The awareness read gate stays
+ * per connection.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testStreamBatchEncodedOnce = async tc => {
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
+  /**
+   * @param {import('../src/permissions.js').CRUD} awareness
+   */
+  const createUser = awareness => {
+    /**
+     * @type {Array<Uint8Array>}
+     */
+    const sent = []
+    const ws = /** @type {any} */ ({ send: (/** @type {Uint8Array} */ m) => { sent.push(m); return 1 }, getBufferedAmount: () => 0 })
+    const user = new WSUser(yhub, ws, defaultDocRef, normalizeDocumentPermissions({ type: 'permissions:document:v1', ydoc: '-r--', awareness }), null, true, [])
+    return { user, sent }
+  }
+  const a = createUser('-r--')
+  const b = createUser('-r--')
+  const c = createUser('----')
+  const ydoc = new Y.Doc()
+  ydoc.get().setAttr('a', 1)
+  const u1 = Y.encodeStateAsUpdate(ydoc)
+  const sv = Y.encodeStateVector(ydoc)
+  ydoc.get().setAttr('b', 2)
+  const u2 = Y.encodeStateAsUpdate(ydoc, sv)
+  const aw = encoding.encode(encoder => {
+    encoding.writeVarUint(encoder, 1)
+    encoding.writeVarUint(encoder, 0xfeed)
+    encoding.writeVarUint(encoder, 1)
+    encoding.writeVarString(encoder, JSON.stringify({ user: 'alice' }))
+  })
+  const ms = /** @type {Array<any>} */ ([
+    { type: 'ydoc:update:v1', update: u1, contentmap: new Uint8Array(), redisClock: '1-0' },
+    { type: 'ydoc:update:v1', update: u2, contentmap: new Uint8Array(), redisClock: '2-0' },
+    { type: 'awareness:v1', update: aw, redisClock: '3-0' }
+  ])
+  ;[a, b, c].forEach(({ user }) => user.onStreamMessage(defaultDocRef, ms))
+  t.assert(a.sent.length === 2 && b.sent.length === 2, 'awareness readers get the sync and the awareness frame')
+  t.assert(c.sent.length === 1, 'presence is gated per connection')
+  t.assert(a.sent[0] === b.sent[0] && a.sent[0] === c.sent[0], 'one sync frame per batch')
+  t.assert(a.sent[1] === b.sent[1], 'one awareness frame per batch')
+  t.compare(a.sent[0], protocol.encodeSyncUpdate(mergeUpdates(false, [u1, u2])))
+  t.compare(a.sent[1], protocol.mergeAwarenessUpdates([aw]))
+  t.info('a single ydoc update is relayed unmerged')
+  a.user.onStreamMessage(defaultDocRef, [ms[0]])
+  t.compare(a.sent[2], protocol.encodeSyncUpdate(u1))
 }

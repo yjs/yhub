@@ -87,3 +87,40 @@ export const testSubLoopRestartsAfterConnectFailure = async tc => {
   st.redis.destroy()
   await utils.waitTasksProcessed(yhub)
 }
+
+/**
+ * Subscribers at the same clock are handed the same messages array, which is what lets `WSUser`
+ * encode a batch once for all of them.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testSubscribersShareBatch = async tc => {
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
+  const createSubscriber = () => {
+    const subscriber = {
+      lastReceivedClock: '0',
+      /**
+       * @type {Array<any>|null}
+       */
+      received: null,
+      /**
+       * @param {any} _docRef
+       * @param {Array<any>} ms
+       */
+      onStreamMessage: (_docRef, ms) => { subscriber.received = ms },
+      destroy: () => {},
+      closeWithError: () => {}
+    }
+    return subscriber
+  }
+  const s1 = createSubscriber()
+  const s2 = createSubscriber()
+  yhub.stream.subscribe(defaultDocRef, s1)
+  yhub.stream.subscribe(defaultDocRef, s2)
+  await yhub.stream.addMessage(defaultDocRef, { type: 'awareness:v1', update: new Uint8Array([1, 2, 3]) })
+  await promise.until(10000, () => s1.received != null && s2.received != null)
+  t.assert(s1.received === s2.received, 'both subscribers received the same array instance')
+  yhub.stream.unsubscribe(defaultDocRef, s1)
+  yhub.stream.unsubscribe(defaultDocRef, s2)
+  await utils.waitTasksProcessed(yhub)
+}

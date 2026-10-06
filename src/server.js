@@ -120,9 +120,19 @@ let _idCnt = 0
  */
 
 /**
+ * The frames a stream batch encodes to, shared by every connection it is fanned out to (`_runSub`
+ * hands subscribers at the same clock the same array), so the ydoc and awareness merges run once
+ * per batch. `undefined` = not computed yet, `null` = the batch has no such messages. Weak: an
+ * entry lives exactly as long as its batch.
+ *
+ * @type {WeakMap<Array<import('./types.js').Message>, { sync?: Uint8Array<ArrayBuffer>|null, awareness?: Uint8Array<ArrayBuffer>|null }>}
+ */
+const batchFrames = new WeakMap()
+
+/**
  * @implements SSubscriber
  */
-class WSUser {
+export class WSUser {
   /**
    * @param {import('./index.js').YHub} yhub
    * @param {uws.WebSocket<{ user: WSUser }>|null} ws
@@ -180,22 +190,13 @@ class WSUser {
    */
   onStreamMessage (_docRef, ms) {
     if (ms.length > 0) {
-      /** @type {Array<Uint8Array<ArrayBuffer>>} */
-      const ydocUpdates = []
-      /** @type {Array<Uint8Array<ArrayBuffer>>} */
-      const awarenessUpdates = []
       ms.forEach(message => {
         switch (message.type) {
-          case 'ydoc:update:v1': {
-            ydocUpdates.push(message.update)
-            break
-          }
-          case 'awareness:v1': {
-            awarenessUpdates.push(message.update)
-            break
-          }
+          case 'ydoc:update:v1':
+          case 'awareness:v1':
           case 'prune:v1': {
-            // history-pruning directive: affects persisted history only, nothing to relay to clients
+            // data is encoded once per batch below; prune is a history-pruning directive that
+            // affects persisted history only, nothing to relay to clients
             break
           }
           case 'ydoc:tombstone:v1': {
@@ -219,13 +220,21 @@ class WSUser {
           }
         }
       })
-      if (ydocUpdates.length > 0) {
-        this.sendData(protocol.encodeSyncUpdate(mergeUpdates(false, ydocUpdates)))
+      let frames = batchFrames.get(ms)
+      if (frames === undefined) batchFrames.set(ms, frames = {})
+      if (frames.sync === undefined) {
+        const ydocUpdates = ms.flatMap(m => m.type === 'ydoc:update:v1' ? [m.update] : [])
+        frames.sync = ydocUpdates.length > 0 ? protocol.encodeSyncUpdate(mergeUpdates(false, ydocUpdates)) : null
       }
+      frames.sync !== null && this.sendData(frames.sync)
       // presence is relayed only when this connection may receive it (ydoc fan-out needs no
       // gate: ydoc read is an upgrade invariant, maintained by recheckAuth)
-      if (awarenessUpdates.length > 0 && this.permissions.awareness[1] === 'r') {
-        this.sendData(protocol.mergeAwarenessUpdates(awarenessUpdates))
+      if (this.permissions.awareness[1] === 'r') {
+        if (frames.awareness === undefined) {
+          const awarenessUpdates = ms.flatMap(m => m.type === 'awareness:v1' ? [m.update] : [])
+          frames.awareness = awarenessUpdates.length > 0 ? protocol.mergeAwarenessUpdates(awarenessUpdates) : null
+        }
+        frames.awareness !== null && this.sendData(frames.awareness)
       }
     }
   }

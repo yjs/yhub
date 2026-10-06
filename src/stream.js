@@ -366,9 +366,17 @@ export class Stream {
             const m = ms[i]
             const sub = this.subs.get(m.streamName)
             if (sub != null) {
+              // subscribers at the same clock get the same array instance - `WSUser` memoizes the
+              // encoded frames on its identity, so it must not be mutated after the fan-out.
+              // Messages are in clock order, so the unseen ones are a suffix.
+              /**
+               * @type {Map<number, Array<t.Message & { redisClock: string }>>}
+               */
+              const slices = new Map()
               sub.subs.forEach(s => {
-                const filteredMessages = m.messages.filter(m => isSmallerRedisClock(s.lastReceivedClock, m.redisClock))
-                if (filteredMessages.length > 0) {
+                const start = m.messages.findIndex(msg => isSmallerRedisClock(s.lastReceivedClock, msg.redisClock))
+                if (start >= 0) {
+                  const filteredMessages = map.setIfUndefined(slices, start, () => start === 0 ? m.messages : m.messages.slice(start))
                   nsubCounter++
                   try {
                     s.onStreamMessage(m.docRef, filteredMessages)

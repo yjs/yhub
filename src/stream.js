@@ -349,7 +349,7 @@ export class Stream {
         await redisSubscriptions.connect()
         this.redisSubscriptions = redisSubscriptions
       }
-      while (this.subs.size > 0 || this.subUpdates.size > 0) {
+      while (!this._destroyed && (this.subs.size > 0 || this.subUpdates.size > 0)) {
         // update subs
         this.subUpdates.forEach((update, streamName) => {
           const s = map.setIfUndefined(this.subs, streamName, () => ({ lastReceivedClock: update.lastReceivedClock, subs: /** @type {Set<StreamSubscriber>} */ (new Set()) }))
@@ -632,6 +632,15 @@ export class Stream {
    */
   async getDisabledCompactionDocRefs () {
     return (await this.redis.sMembers(this.compactionDisabledSetName)).map(k => decodeRoomName(k, this.prefix))
+  }
+
+  /**
+   * Close both redis clients. Commands in flight are answered first, so the messages the closing
+   * connections just added still reach redis. The subscription loop exits after its current read.
+   */
+  async destroy () {
+    this._destroyed = true
+    await promise.all([this.redis.close(), this.redisSubscriptions?.close()])
   }
 
   /**

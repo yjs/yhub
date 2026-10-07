@@ -29,7 +29,7 @@ const yhubPort = number.parseInt(env.getConf('test-port') || '4424')
  * Port for an additional test hub. Every test that spins up its own hub must use a distinct
  * `n`, so that concurrent test runs in other worktrees never collide.
  *
- * @param {number} n - 1-10
+ * @param {number} n - 1-10, or -1
  */
 export const testHubPort = n => yhubPort + n
 

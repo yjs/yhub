@@ -219,6 +219,10 @@ CORS_ORIGIN=https://app.example.com
 
 # Logging (optional): trace | debug | info | warn | error | fatal | silent
 LOG_LEVEL=info
+
+# Graceful shutdown (optional): ms that SIGTERM/SIGINT wait at most for running compaction tasks
+# and for websocket clients to acknowledge the close
+SHUTDOWN_DRAIN_MS=60000
 ```
 
 ---
@@ -258,3 +262,37 @@ npm run start:server
 
 Multiple server instances can run behind a load balancer. Ensure the load
 balancer supports WebSocket upgrades.
+
+---
+
+## 9. Shut Down Gracefully
+
+`bin/server.js`, `bin/worker.js` and `bin/yhub.js` shut down on `SIGTERM` (what orchestrators
+send) and `SIGINT` (Ctrl-C), calling [`yhub.destroy`](API.md#yhubdestroyopts):
+
+* The worker stops claiming tasks and waits for the running ones, keeping their leases alive so
+  no other worker reclaims them meanwhile.
+* The server stops accepting connections and closes every websocket with `4503` (server shutting
+  down). That code is transient: clients reconnect, and land on another instance.
+* Then the redis, postgres and compute-pool resources are released and the process exits by
+  itself, with code 0.
+
+Both waits are bounded by `SHUTDOWN_DRAIN_MS` (default 60 000) and run at the same time. That is an
+upper bound for slow compactions: closing the websockets takes milliseconds, and the process exits
+as soon as the running tasks are done. A task that is still running when the time is up is
+reclaimed by another worker after `REDIS_TASK_DEBOUNCE`. Pressing Ctrl-C a second time kills the process at once.
+
+The S3 plugin deletes superseded objects 10 seconds after a compaction replaced them. Those
+pending deletes keep the process alive until they have run, so the process can stay up for that
+long after the drain.
+
+Give the process time to finish before it is killed. Set the orchestrator's grace period above
+`SHUTDOWN_DRAIN_MS` plus that delete delay:
+
+* Kubernetes: `terminationGracePeriodSeconds: 75` for the defaults. The default of 30 is too short.
+* Docker: the default stop timeout of 10 seconds is too short. Raise `stop_grace_period` in
+  compose (e.g. `75s`), or pass `docker stop -t 75`.
+
+A process killed with `SIGKILL` drops its connections without a close frame. Its tasks are
+reclaimed after `REDIS_TASK_DEBOUNCE` and nothing is lost, but any pending S3 deletes are
+orphaned.

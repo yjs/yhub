@@ -18,6 +18,12 @@ const userIdChoices = [
   'Garfield'
 ]
 
+/**
+ * How long `YHub.destroy` waits for running tasks and closing connections on SIGTERM/SIGINT.
+ * Generous, because a compaction can take a while - the shutdown is over as soon as they are done.
+ */
+export const shutdownDrainMs = number.parseInt(env.getConf('shutdown-drain-ms') || '60000')
+
 const bucket = env.getConf('s3-yhub-bucket')
 const corsOrigin = env.getConf('cors-origin') || null
 

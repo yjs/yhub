@@ -50,6 +50,22 @@ export const wsCloseAuthRevoked = 4401
 export const wsCloseDocDeleted = 4404
 
 /**
+ * Close code sent to every connection when the server shuts down (see `YHub.destroy`).
+ * Transient (4500-4599): the document is fine, only this server is going away - a client should
+ * reconnect, and lands on another instance behind the load balancer.
+ */
+export const wsCloseDraining = 4503
+
+/**
+ * Resolves once `check` holds, or after `timeout` ms - whichever comes first. Never rejects.
+ *
+ * @param {number} timeout
+ * @param {() => boolean} check
+ * @return {Promise<void>}
+ */
+export const waitUntil = (timeout, check) => timeout > 0 && !check() ? promise.until(timeout, check).catch(f.nop) : promise.resolve()
+
+/**
  * Matcher semantics of `YHub.recheckAuth`: a string matcher matches connections with that
  * `userid`; a plain-object matcher matches when each of its top-level properties deep-equals
  * the corresponding authInfo property (the authInfo may have additional properties). Anonymous
@@ -72,9 +88,33 @@ export class YHubServer {
     this.yhub = yhub
     this.conf = conf
     this.uwsApp = app
+    /**
+     * @type {uws.us_listen_socket|null}
+     */
+    this.listenSocket = null
+    /**
+     * The open websocket connections - from the uws `open` event until its `close` event.
+     *
+     * @type {Set<WSUser>}
+     */
+    this.users = new Set()
+    this.isDestroyed = false
   }
 
-  async destroy () {
+  /**
+   * Stop accepting connections, close every websocket with `wsCloseDraining` and wait up to
+   * `drainMs` for the clients to acknowledge, then terminate whatever is left without a close
+   * frame. Idempotent.
+   *
+   * @param {object} [opts]
+   * @param {number} [opts.drainMs] (default: 0)
+   */
+  async destroy ({ drainMs = 0 } = {}) {
+    if (this.isDestroyed) return
+    this.isDestroyed = true
+    this.listenSocket !== null && uws.us_listen_socket_close(this.listenSocket)
+    this.users.forEach(user => user.close(wsCloseDraining, 'server shutting down'))
+    await waitUntil(drainMs, () => this.users.size === 0)
     this.uwsApp.close()
   }
 }
@@ -93,7 +133,7 @@ export const createYHubServer = async (yhub, conf) => {
   if (cors?.originAll === true) {
     log.warn('cors.origin is "*" - the api and websockets are open to every origin: any site can act in a logged-in visitor\'s session if the auth plugin reads ambient credentials (cookies). Use an allowlist in production.')
   }
-  registerWebsocketServer(yhub, app, prefix, cors)
+  registerWebsocketServer(yhubServer, prefix, cors)
 
   // built-in + custom rest endpoints - served under `/{apiPrefix}/{name}/{version}/...`
   registerApi(yhub, app)
@@ -102,6 +142,7 @@ export const createYHubServer = async (yhub, conf) => {
     const port = conf.server?.port || 4400
     app.listen(port, (token) => {
       if (token) {
+        yhubServer.listenSocket = token
         log.info({ port }, 'listening')
         resolve()
       } else {
@@ -111,7 +152,7 @@ export const createYHubServer = async (yhub, conf) => {
       }
     })
   })
-  return new YHubServer(yhub, conf, app)
+  return yhubServer
 }
 
 let _idCnt = 0
@@ -356,12 +397,12 @@ export class WSUser {
 }
 
 /**
- * @param {import('./index.js').YHub} yhub
- * @param {uws.TemplatedApp} app
+ * @param {YHubServer} server
  * @param {string} prefix
  * @param {import('./cors.js').ResolvedCors|null} cors
  */
-const registerWebsocketServer = (yhub, app, prefix, cors) => {
+const registerWebsocketServer = (server, prefix, cors) => {
+  const { yhub, uwsApp: app } = server
   const maxDocSize = s.$number.cast(yhub.conf.server?.maxDocSize)
   app.ws(`/${prefix}/ws/v1/:org/:docid`, /** @type {uws.WebSocketBehavior<{ user: WSUser }>} */ ({
     compression: uws.DISABLED,
@@ -433,7 +474,13 @@ const registerWebsocketServer = (yhub, app, prefix, cors) => {
     open: async (ws) => {
       const user = ws.getUserData().user
       user.ws = ws
+      server.users.add(user)
       user.log.info({ ip: Buffer.from(ws.getRemoteAddressAsText()).toString() }, 'client connected')
+      // the upgrade was still being authorized when the server started shutting down
+      if (server.isDestroyed) {
+        user.close(wsCloseDraining, 'server shutting down')
+        return
+      }
       try {
         const doctable = await yhub.getDoc(user.docRef, { gc: user.gc, nongc: !user.gc, awareness: user.permissions.awareness[1] === 'r' }, { gcOnMerge: false })
         // also the upgrade-time check: a reconnecting client is refused here, and so is one whose
@@ -527,6 +574,7 @@ const registerWebsocketServer = (yhub, app, prefix, cors) => {
     },
     close: (ws, code, message) => {
       const user = ws.getUserData().user
+      server.users.delete(user)
       user.isClosed = true
       user.log.info({ code, message: Buffer.from(message).toString() }, 'client connection closed')
       user.destroy()

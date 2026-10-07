@@ -16,7 +16,7 @@ import * as time from 'lib0/time'
 export { createAuthPlugin, createAuthorize, createApiEndpoint, DocDeletedError } from './types.js'
 export { apiError, checkPermissions, encodedAny } from './api.js'
 export { createPermissions, createDocumentPermissions, createBranchPermissions, createOrgPermissions, createGlobalPermissions } from './permissions.js'
-export { wsCloseAuthRevoked, wsCloseDocDeleted } from './server.js'
+export { wsCloseAuthRevoked, wsCloseDocDeleted, wsCloseDraining } from './server.js'
 export { logger } from './logger.js'
 
 const log = logger.child({ module: 'worker' })
@@ -70,36 +70,69 @@ export class YHub {
      */
     this.server = /** @type {any} */ (null)
     this.computePool = createComputePool({ poolSize: conf.computePoolSize, taskTimeout: conf.maxTaskDuration })
+    /**
+     * `stopped` resolves once both worker loops of this context have exited. After a stop, the
+     * leases of the running tasks are renewed until `drainUntil` (unix ms) - see `stopWorker`.
+     *
+     * @type {{ shouldRun: boolean, drainUntil: number, stopped: Promise<unknown> }}
+     */
     this._workerCtx = {
-      shouldRun: false
+      shouldRun: false,
+      drainUntil: 0,
+      stopped: promise.resolve()
     }
-  }
-
-  async startWorker () {
-    if (this._workerCtx.shouldRun || this.conf.worker == null) return
-    // create new worker context
-    const ctx = (this._workerCtx = {
-      shouldRun: true
-    })
     /**
      * The tasks we are currently computing. Their lease is renewed until they are done, so they
      * are neither reclaimed by another worker nor handed back to us by `claimTasks`.
      *
      * @type {Map<string, { started: number, docRef: t.DocRef }>}
      */
-    const inflight = new Map()
+    this._inflight = new Map()
+    /**
+     * @type {Promise<void>|null}
+     */
+    this._destroyed = null
+  }
+
+  /**
+   * Start claiming and computing compaction tasks. Resolves once the worker was stopped again.
+   *
+   * @return {Promise<unknown>}
+   */
+  startWorker () {
+    if (this._workerCtx.shouldRun || this.conf.worker == null) return promise.resolve()
+    // create new worker context
+    const ctx = (this._workerCtx = {
+      shouldRun: true,
+      drainUntil: 0,
+      stopped: promise.resolve()
+    })
+    ctx.stopped = promise.all([
+      this._claimTasks(ctx, this.conf.worker.taskConcurrency),
+      this._renewLeases(ctx).catch(err => log.error({ err }, 'lease renewal failed'))
+    ])
+    return ctx.stopped
+  }
+
+  /**
+   * @param {{ shouldRun: boolean }} ctx
+   * @param {number} taskConcurrency
+   */
+  async _claimTasks (ctx, taskConcurrency) {
+    const inflight = this._inflight
     // taskDebounce is the granularity at which work becomes claimable - a task enqueued now (the
     // successor a completing compaction leaves behind) can only be claimed that much later. Poll
     // a few times per debounce so that just missing the window costs a fraction of it, not a
     // whole poll interval.
     const pollInterval = math.min(1000, math.floor(this.stream.taskDebounce / 3))
-    this._renewLeases(ctx, inflight).catch(err => log.error({ err }, 'lease renewal failed'))
     while (ctx.shouldRun) {
       try {
-        const free = this.conf.worker.taskConcurrency - inflight.size
+        const free = taskConcurrency - inflight.size
         // `claimTasks` hands us back our own in-flight tasks once they idled for longer than
-        // taskDebounce (a renewal that came too late). Don't run them a second time.
-        const tasks = (free > 0 ? await this.stream.claimTasks(free) : []).filter(task => !inflight.has(task.redisClock))
+        // taskDebounce (a renewal that came too late). Don't run them a second time. Nothing is
+        // started once the worker was stopped during the claim - the drain would not cover it, and
+        // the claimed tasks are reclaimed after taskDebounce.
+        const tasks = (free > 0 ? await this.stream.claimTasks(free) : []).filter(task => ctx.shouldRun && !inflight.has(task.redisClock))
         tasks.length && log.info({ taskCount: tasks.length }, 'picked up tasks')
         tasks.forEach(task => {
           const run = { started: time.getUnixTime(), docRef: task.docRef }
@@ -121,14 +154,15 @@ export class YHub {
 
   /**
    * Keep the lease on the tasks we are computing alive. Runs next to the claim loop so that a
-   * slow `claimTasks` or its error backoff can't starve renewals.
+   * slow `claimTasks` or its error backoff can't starve renewals. After a stop, it keeps running
+   * while tasks are left until `ctx.drainUntil`.
    *
-   * @param {{ shouldRun: boolean }} ctx
-   * @param {Map<string, { started: number, docRef: t.DocRef }>} inflight
+   * @param {{ shouldRun: boolean, drainUntil: number }} ctx
    */
-  async _renewLeases (ctx, inflight) {
+  async _renewLeases (ctx) {
+    const inflight = this._inflight
     const interval = math.min(1000, math.floor(this.stream.taskDebounce / 3))
-    while (ctx.shouldRun) {
+    while (ctx.shouldRun || (inflight.size > 0 && time.getUnixTime() < ctx.drainUntil)) {
       await promise.wait(interval)
       if (inflight.size === 0) continue
       const now = time.getUnixTime()
@@ -221,11 +255,45 @@ export class YHub {
   }
 
   /**
-   * Stop claiming tasks and stop renewing the leases of the tasks that are still running - they
-   * go stale and are reclaimed by another worker after `redis.taskDebounce`.
+   * Stop claiming tasks. The running tasks keep their lease for up to `drainMs`; resolves once
+   * they finished or `drainMs` elapsed. A task still running then is no longer renewed - it goes
+   * stale and is reclaimed by another worker after `redis.taskDebounce`.
+   *
+   * @param {object} [opts]
+   * @param {number} [opts.drainMs] (default: 0)
+   * @return {Promise<unknown>}
    */
-  stopWorker () {
+  stopWorker ({ drainMs = 0 } = {}) {
     this._workerCtx.shouldRun = false
+    this._workerCtx.drainUntil = time.getUnixTime() + drainMs
+    return this._workerCtx.stopped
+  }
+
+  /**
+   * Shut down, releasing everything this instance holds - once this resolves, nothing it opened
+   * keeps the process alive. The worker stops claiming and waits up to `drainMs` for its running
+   * tasks, renewing their leases meanwhile; concurrently the server stops accepting connections, closes every websocket with
+   * `wsCloseDraining` (4503, transient: clients reconnect elsewhere) and waits up to `drainMs`
+   * for the clients to acknowledge. Then the compute pool, the redis clients and the postgres
+   * pool are closed. A task still running at that point fails and is reclaimed by another worker
+   * after `redis.taskDebounce`.
+   *
+   * Idempotent: later calls return the promise of the first one.
+   *
+   * @param {object} [opts]
+   * @param {number} [opts.drainMs] (default: 0)
+   * @return {Promise<void>}
+   */
+  destroy ({ drainMs = 0 } = {}) {
+    return (this._destroyed ??= (async () => {
+      log.info({ drainMs }, 'shutting down')
+      await promise.all([
+        this.stopWorker({ drainMs }),
+        this.server?.destroy({ drainMs })
+      ])
+      await promise.all([this.computePool.destroy(), this.stream.destroy(), this.persistence.destroy()])
+      log.info('shut down')
+    })())
   }
 
   /**

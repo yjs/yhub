@@ -16,6 +16,7 @@ import * as permissions from './permissions.tests.js'
 import * as permissionsEnforcement from './permissionsEnforcement.tests.js'
 import * as logger from './logger.tests.js'
 import * as config from './config.tests.js'
+import * as shutdown from './shutdown.tests.js'
 import { runTests } from 'lib0/testing'
 
 runTests({
@@ -34,7 +35,8 @@ runTests({
   ws,
   agents,
   deleteDoc,
-  versions
+  versions,
+  shutdown
 }).then(success => {
   process.exit(success ? 0 : 1)
 })

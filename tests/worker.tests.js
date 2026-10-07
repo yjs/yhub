@@ -149,6 +149,53 @@ export const testTaskLeaseSurvivesLongCompute = async tc => {
 }
 
 /**
+ * `destroy` lets a running compaction finish, keeping its lease alive meanwhile so that no other
+ * worker reclaims it, and is over as soon as the task is done - not only after `drainMs`.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testDestroyDrainsRunningTask = async tc => {
+  const prefix = 'yhub:testing:drain'
+  const taskDebounce = 1000
+  await clearPrefix(prefix)
+  /**
+   * @type {Array<string>}
+   */
+  const started = []
+  const hub = await createWorkerHub({ taskDebounce, taskStart: ({ docRef }) => started.push(docRef.docid) }, prefix)
+  const docRef = { org: utils.defaultOrg, docid: tc.testName + '-index', branch: 'main' }
+  /**
+   * @type {() => void}
+   */
+  let unblock = () => {}
+  blockCompaction(hub, docRef, promise.create(resolve => { unblock = () => resolve(undefined) }))
+  await seedDocRef(hub, docRef, 'drained')
+  await promise.untilAsync(() => started.length === 1, 10000, 50)
+
+  let destroyed = false
+  const destroying = hub.destroy({ drainMs: 60_000 }).then(() => { destroyed = true })
+  // hold the compaction for 3x the lease while the worker drains
+  const blockUntil = Date.now() + taskDebounce * 3
+  while (Date.now() < blockUntil) {
+    await promise.wait(200)
+    const [task] = await utils.yhub.stream.redis.xPendingRange(hub.stream.workerStreamName, hub.stream.workerGroupName, '-', '+', 10)
+    t.assert(task?.consumer === hub.stream.consumername, 'the draining task is still owned by its worker')
+    t.assert(/** @type {number} */ (task?.millisecondsSinceLastDelivery) < taskDebounce, 'the lease of the draining task is renewed')
+  }
+  t.assert(!destroyed, 'destroy waits for the running task')
+  const unblockedAt = Date.now()
+  unblock()
+  await destroying
+  t.assert(Date.now() - unblockedAt < 5000, 'destroy is over once the task is done')
+  // the hub is gone - read back through the shared one, same database
+  const { gcDoc } = await utils.yhub.persistence.retrieveDoc(docRef, { gc: true })
+  const restored = new Y.Doc()
+  gcDoc.forEach(update => Y.applyUpdate(restored, update))
+  t.compare(restored.get('text').toString(), 'drained', 'the drained task was persisted')
+  await clearPrefix(prefix)
+}
+
+/**
  * A compaction that hangs where the compute pool can't kill it - a wedged s3 or postgres socket -
  * is abandoned by the worker after `maxTaskDuration`. It stops being renewed, goes stale, and
  * another worker picks it up: lease renewal must never make a document permanently unreclaimable.

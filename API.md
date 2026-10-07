@@ -58,14 +58,16 @@ when codes are added:
 | Close code | Meaning | Reconnect? |
 |---|---|---|
 | `4400`–`4499` | permanent yhub errors — `4401` permission revoked: the permissions the socket consumes (the ydoc mask, the awareness mask, the effective `ws` endpoint mask, or `gc=false`'s full-history requirement) changed on a re-check (see [`yhub.recheckAuth`](#yhubrecheckauthdocref-opts); exported as `wsCloseAuthRevoked`), `4404` document deleted (see [`yhub.deleteDoc`](#yhubdeletedocdocref-opts); exported as `wsCloseDocDeleted`) | no — act first (e.g. re-authenticate, or drop the local copy), then reconnect deliberately |
-| `4500`–`4599` | reserved for transient yhub errors (none sent today) | yes |
+| `4500`–`4599` | transient yhub errors — `4503` server shutting down (see [`yhub.destroy`](#yhubdestroyopts); exported as `wsCloseDraining`) | yes — another instance behind the load balancer takes the connection |
 | `1011` | internal error — initial sync, message handling, or stream relay failed | yes |
 | `1013` | try again later — backpressure limit exceeded, or `authorize` threw during a re-check (the permission backend is down, not the grant revoked) | yes |
 | `1002` `1003` `1008` | standard permanent codes — yhub never sends them | no |
 | *(none)* | closed without a close frame — browsers report `1006`, `@y/websocket` emits `connection-close` with `event = null` | yes |
 
-A missing close frame is routine: server shutdown, the 120s idle timeout (pings are sent
-automatically — only a dead link times out), and network or proxy failures. Always transient.
+A missing close frame is routine: a server that was killed instead of shut down with
+[`yhub.destroy`](#yhubdestroyopts) (or whose clients did not acknowledge `4503` within `drainMs`),
+the 120s idle timeout (pings are sent automatically — only a dead link times out), and network or
+proxy failures. Always transient.
 
 A denied upgrade is HTTP, never a close code: `401` a credential the auth plugin rejected, or an
 anonymous caller granted ydoc `u` (writing needs an identity), `403` insufficient access
@@ -1179,6 +1181,44 @@ worker: {
     }
   }
 }
+```
+
+#### `yhub.destroy(opts?)`
+
+Shut the instance down gracefully. Once the returned promise resolves, nothing the instance opened
+keeps the process alive, so it exits by itself.
+
+```ts
+yhub.destroy(opts?: { drainMs?: number }): Promise<void>
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `drainMs` | `number` | `0` | How long to wait for running compaction tasks to finish, and for websocket clients to acknowledge the close. |
+
+1. **Worker**: stops claiming tasks and waits up to `drainMs` for the running ones, renewing their
+   leases meanwhile, so no other worker reclaims a long compaction while it drains.
+2. **Server** (at the same time as the worker): stops accepting connections, closes every
+   websocket with `4503` `'server shutting down'` (exported as `wsCloseDraining`) and waits up to
+   `drainMs` for the clients to acknowledge. Whatever is left is then terminated without a close
+   frame, and in-flight REST requests are dropped.
+3. Closes the compute pool, both redis clients and the postgres pool. Commands already sent are
+   answered first, so the departures of the closing connections still reach redis. A task still
+   running at this point fails, and another worker reclaims it after `redis.taskDebounce`.
+
+`4503` is transient: clients reconnect, and land on another instance behind the load balancer.
+Idempotent: later calls return the first call's promise, whatever their `drainMs`.
+
+`bin/server.js`, `bin/worker.js` and `bin/yhub.js` call it on `SIGTERM` and `SIGINT` with
+`drainMs` from `SHUTDOWN_DRAIN_MS` (default 60 000 — an upper bound: the shutdown is over as soon
+as the running compactions are). Pressing Ctrl-C a second time kills the process at once. Wire it
+the same way when you embed y/hub:
+
+```js
+const yhub = await createYHub(config)
+const destroy = () => yhub.destroy({ drainMs: 60_000 })
+process.once('SIGTERM', destroy)
+process.once('SIGINT', destroy)
 ```
 
 #### `yhub.getDoc(docRef, include, opts?)`

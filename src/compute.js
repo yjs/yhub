@@ -240,6 +240,7 @@ class ComputePool {
      * @type {Array<{ task: ComputeTask, transferList: ArrayBuffer[], logContext: Object<string, any>, resolve: (value: any) => void, reject: (reason: any) => void }>}
      */
     this.queue = []
+    this.isDestroyed = false
   }
 
   /**
@@ -250,6 +251,8 @@ class ComputePool {
    */
   run (task, transferList, logContext) {
     $computeTask.expect(task)
+    // a new thread would keep the process alive after `destroy`
+    if (this.isDestroyed) return promise.reject(new Error('compute pool destroyed'))
     return promise.create((resolve, reject) => {
       this.queue.push({ task, transferList, logContext, resolve, reject })
       if (this.queue.length > 1) {
@@ -389,7 +392,14 @@ class ComputePool {
     return this.run({ type: 'rollback', ...opts }, [], logContext)
   }
 
+  /**
+   * Terminate the worker threads. Running and queued tasks are rejected, and so is every task
+   * submitted afterwards.
+   */
   async destroy () {
+    this.isDestroyed = true
+    // emptied first: each terminated thread's `exit` drains the queue, which would spawn a new one
+    this.queue.splice(0).forEach(task => task.reject(new Error('compute pool destroyed')))
     await promise.all(this.workers.map(w => w.terminate()))
   }
 }

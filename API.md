@@ -1210,13 +1210,13 @@ yhub.destroy(opts?: { drainMs?: number }): Promise<void>
 Idempotent: later calls return the first call's promise, whatever their `drainMs`.
 
 `bin/server.js`, `bin/worker.js` and `bin/yhub.js` call it on `SIGTERM` and `SIGINT` with
-`drainMs` from `SHUTDOWN_DRAIN_MS` (default 60 000 — an upper bound: the shutdown is over as soon
+`drainMs` from `SHUTDOWN_DRAIN_MS` (default 15 000 — an upper bound: the shutdown is over as soon
 as the running compactions are). Pressing Ctrl-C a second time kills the process at once. Wire it
 the same way when you embed y/hub:
 
 ```js
 const yhub = await createYHub(config)
-const destroy = () => yhub.destroy({ drainMs: 60_000 })
+const destroy = () => yhub.destroy({ drainMs: 15_000 })
 process.once('SIGTERM', destroy)
 process.once('SIGINT', destroy)
 ```

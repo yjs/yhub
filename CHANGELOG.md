@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+> **Upgrading:** `bin/server.js`, `bin/worker.js` and `bin/yhub.js` now shut down gracefully on
+> `SIGTERM`. A worker can take up to `SHUTDOWN_DRAIN_MS` (default 15 seconds) plus about 13
+> seconds for the S3 plugin's pending deletes, about 28 seconds in all. Kubernetes' default grace
+> period of 30 seconds covers that. Docker's default stop timeout of 10 seconds does not: set
+> `stop_grace_period: 30s` in compose, or pass `docker stop -t 30`.
+
+### New Features
+
+- **Graceful shutdown: `yhub.destroy({ drainMs })`, run on `SIGTERM`/`SIGINT` by the bin scripts.** Previously a shutdown dropped everything at once. `YHubServer.destroy` terminated every connection without a close frame, and nothing closed the redis clients, the postgres pool or the compute pool, so the process never exited after it. The bin scripts had no signal handler: `SIGTERM` killed the process in the middle of whatever it was doing, and a node running as PID 1 in a container ignored the signal altogether until the orchestrator's `SIGKILL`. `destroy` now:
+  - **Worker:** stops claiming tasks and waits up to `drainMs` for the running ones, renewing their leases meanwhile so no other worker reclaims a long compaction while it drains.
+  - **Server** (at the same time): stops accepting connections and closes every websocket with the new close code `4503` `'server shutting down'`, exported as `wsCloseDraining`.
+  - **Then** closes the compute pool, both redis clients and the postgres pool, and resolves. Nothing yhub opened is left holding the event loop, so the process exits by itself.
+
+  `drainMs` is an upper bound: closing the websockets takes milliseconds, and the shutdown is over as soon as the running compactions finish. A compaction still running when it runs out is killed (its compute thread is terminated) and reclaimed by another worker after `redis.taskDebounce`. Nothing is lost, because compaction only trims the stream after the new row is stored. In-flight REST requests are dropped; clients see a connection error and retry. The bin scripts read `drainMs` from the new `SHUTDOWN_DRAIN_MS` (default `15000`). Pressing Ctrl-C a second time kills the process at once. `destroy` is idempotent. `stopWorker({ drainMs })` now returns a promise that resolves once the worker has stopped, after draining its running tasks for up to `drainMs` (default `0`, the previous behavior). `4503` is the first code sent from the transient `4500`–`4599` band: clients that follow the band rule reconnect, and land on another instance. A client that treats every `4xxx` close as permanent would instead stop reconnecting on every deploy. ([API docs](API.md#yhubdestroyopts), [deployment guide](DEPLOYMENT.md#9-shut-down-gracefully), [`src/index.js`](src/index.js), [`src/server.js`](src/server.js))
+
+### Performance
+
+- **A stream batch is encoded once per document, not once per connection.** Every websocket connection subscribed to a document merged the batch's ydoc updates and awareness updates itself, so a document with N connections ran the same `mergeUpdates` N times per batch on the server's main thread. The sync and awareness frames are now computed once and sent to every connection at the same clock. Connections that lag behind get a frame for the part of the batch they haven't seen yet, also shared between them. Presence is still only relayed to connections holding awareness `r`. ([`src/server.js`](src/server.js), [`src/stream.js`](src/stream.js))
+
+### Fixes
+
+- **Idle websocket connections no longer reconnect every 45 seconds when they receive no presence.** `@y/websocket` closes and reconnects a socket that received nothing for `socketTimeout` (45 seconds by default), and websocket pings don't count because they never reach client code. Usually other clients' presence renewals keep a socket alive. A connection without awareness `r`, or one whose document had no other client sending presence, received nothing on a document nobody edited. It reconnected every 45 seconds, and each reconnect sent it the whole document again. The server now sends an empty awareness message to a connection that was sent nothing for `server.wsKeepAliveInterval` ms (new option, default `20000`, `null` disables). The message has zero entries, so it carries no presence and reaches every connection regardless of its awareness facet. ([API docs](API.md#createyhubconfig), [`src/server.js`](src/server.js))
+
 ## [0.9.1]
 
 > **Upgrading: run `npm run start:init` (`bin/init-db.js`) before starting this version.** It adds

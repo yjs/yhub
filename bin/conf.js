@@ -19,10 +19,11 @@ const userIdChoices = [
 ]
 
 /**
- * How long `YHub.destroy` waits for running tasks and closing connections on SIGTERM/SIGINT.
- * Generous, because a compaction can take a while - the shutdown is over as soon as they are done.
+ * How long `YHub.destroy` waits for running tasks and closing connections on SIGTERM/SIGINT - an
+ * upper bound, the shutdown is over as soon as they are done. 15s plus the ~13s of pending S3
+ * deletes fits kubernetes' default grace period of 30s.
  */
-export const shutdownDrainMs = number.parseInt(env.getConf('shutdown-drain-ms') || '60000')
+export const shutdownDrainMs = number.parseInt(env.getConf('shutdown-drain-ms') || '15000')
 
 const bucket = env.getConf('s3-yhub-bucket')
 const corsOrigin = env.getConf('cors-origin') || null

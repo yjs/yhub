@@ -222,7 +222,7 @@ LOG_LEVEL=info
 
 # Graceful shutdown (optional): ms that SIGTERM/SIGINT wait at most for running compaction tasks
 # and for websocket clients to acknowledge the close
-SHUTDOWN_DRAIN_MS=60000
+SHUTDOWN_DRAIN_MS=15000
 ```
 
 ---
@@ -277,21 +277,26 @@ send) and `SIGINT` (Ctrl-C), calling [`yhub.destroy`](API.md#yhubdestroyopts):
 * Then the redis, postgres and compute-pool resources are released and the process exits by
   itself, with code 0.
 
-Both waits are bounded by `SHUTDOWN_DRAIN_MS` (default 60 000) and run at the same time. That is an
+Both waits are bounded by `SHUTDOWN_DRAIN_MS` (default 15 000) and run at the same time. That is an
 upper bound for slow compactions: closing the websockets takes milliseconds, and the process exits
 as soon as the running tasks are done. A task that is still running when the time is up is
-reclaimed by another worker after `REDIS_TASK_DEBOUNCE`. Pressing Ctrl-C a second time kills the process at once.
+reclaimed by another worker after `REDIS_TASK_DEBOUNCE`. Pressing Ctrl-C a second time kills the
+process at once.
 
 The S3 plugin deletes superseded objects 10 seconds after a compaction replaced them. Those
 pending deletes keep the process alive until they have run, so the process can stay up for that
 long after the drain.
 
-Give the process time to finish before it is killed. Set the orchestrator's grace period above
-`SHUTDOWN_DRAIN_MS` plus that delete delay:
+Give the process time to finish before it is killed. In the worst case a worker takes
+`SHUTDOWN_DRAIN_MS` plus about 13 seconds: the delete delay, and one retry of a delete that hit a
+transient S3 error. That is about 28 seconds with the defaults. A server without a worker exits
+within milliseconds, unless a hard deletion just queued S3 deletes.
 
-* Kubernetes: `terminationGracePeriodSeconds: 75` for the defaults. The default of 30 is too short.
-* Docker: the default stop timeout of 10 seconds is too short. Raise `stop_grace_period` in
-  compose (e.g. `75s`), or pass `docker stop -t 75`.
+* Kubernetes: the default `terminationGracePeriodSeconds` of 30 covers the defaults. Raise it by
+  as much as you raise `SHUTDOWN_DRAIN_MS`.
+* Docker: the default stop timeout of 10 seconds is too short for a worker. Set
+  `stop_grace_period: 30s` in compose (the bundled `compose.yaml` does), or pass
+  `docker stop -t 30`. An image can't set this itself.
 
 A process killed with `SIGKILL` drops its connections without a close frame. Its tasks are
 reclaimed after `REDIS_TASK_DEBOUNCE` and nothing is lost, but any pending S3 deletes are

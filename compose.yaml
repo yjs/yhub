@@ -41,6 +41,8 @@ services:
     build: .
     profiles: ["app"]
     command: node ./bin/server.js --no-colors
+    # SHUTDOWN_DRAIN_MS plus the S3 plugin's delete delay - docker's default of 10s cuts the drain
+    stop_grace_period: 30s
     ports:
       - "127.0.0.1:${DOCKER_PORT:-4400}:${DOCKER_PORT:-4400}"
     environment:
@@ -56,6 +58,8 @@ services:
     build: .
     profiles: ["app"]
     command: node ./bin/worker.js --no-colors
+    # SHUTDOWN_DRAIN_MS plus the S3 plugin's delete delay - docker's default of 10s cuts the drain
+    stop_grace_period: 30s
     env_file:
       - .env
       - .env.docker

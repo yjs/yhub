@@ -2,12 +2,34 @@ import * as Y from '@y/y'
 import * as t from 'lib0/testing'
 import * as promise from 'lib0/promise'
 import * as encoding from 'lib0/encoding'
+import * as decoding from 'lib0/decoding'
 import WebSocket from 'ws'
 import * as utils from './utils.js'
+import * as types from '../src/types.js'
 import * as protocol from '../src/protocol.js'
 import { WSUser } from '../src/server.js'
 import { mergeUpdates } from '../src/y-utils.js'
 import { normalizeDocumentPermissions } from '../src/permissions.js'
+
+const keepAlivePort = utils.testHubPort(10)
+
+// grants awareness `u` alone: the socket is never relayed presence, so every awareness message it
+// receives is a keep-alive
+await utils.createTestHub({
+  worker: null,
+  server: {
+    port: keepAlivePort,
+    wsKeepAliveInterval: 200,
+    auth: types.createAuthPlugin({
+      async authenticate () {
+        return { userid: 'user1' }
+      },
+      authorize: types.createAuthorize({
+        document: async () => ({ type: 'permissions:document:v1', ydoc: '-r--', awareness: '--u-', endpoint: { ws: '-r--' } })
+      })
+    })
+  }
+})
 
 /**
  * @param {t.TestCase} tc
@@ -280,4 +302,26 @@ export const testStreamBatchEncodedOnce = async tc => {
   t.info('a single ydoc update is relayed unmerged')
   a.user.onStreamMessage(defaultDocRef, [ms[0]])
   t.compare(a.sent[2], protocol.encodeSyncUpdate(u1))
+}
+
+/**
+ * An idle connection is sent an empty awareness message every `wsKeepAliveInterval` ms - clients
+ * reconnect when they receive nothing for a while (y-websocket: `socketTimeout`).
+ *
+ * @param {t.TestCase} tc
+ */
+export const testKeepAlive = async tc => {
+  const { defaultDocRef } = await utils.createTestCase(tc)
+  const ws = new WebSocket(`${utils.wsUrlFromPort(keepAlivePort)}/${defaultDocRef.docid}`)
+  /**
+   * @type {Array<Uint8Array>}
+   */
+  const awarenessUpdates = []
+  ws.on('message', data => {
+    const decoder = decoding.createDecoder(/** @type {Buffer} */ (data))
+    decoding.readVarUint(decoder) === protocol.messageAwareness && awarenessUpdates.push(decoding.readVarUint8Array(decoder))
+  })
+  await promise.until(1000, () => awarenessUpdates.length > 0)
+  t.assert(decoding.readVarUint(decoding.createDecoder(awarenessUpdates[0])) === 0, 'an awareness update with zero entries')
+  ws.close()
 }

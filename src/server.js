@@ -8,6 +8,7 @@ import * as Y from '@y/y'
 import * as s from 'lib0/schema'
 import * as protocol from './protocol.js'
 import * as math from 'lib0/math'
+import * as time from 'lib0/time'
 import { createContentMap, mergeUpdates } from './y-utils.js'
 import { registerApi, resolveApiPrefix, resolvePermissions, normalizeAuthorizeAnswer, apiError, isApiError, statusLine } from './api.js'
 import { originAllowed, resolveCors } from './cors.js'
@@ -181,6 +182,14 @@ export class WSUser {
     this.isClosed = false
     this.isDestroyed = false
     this.lastReceivedClock = '0'
+    /**
+     * Unix ms of the last message sent to the client - see `keepAlive`.
+     */
+    this.lastSentAt = 0
+    /**
+     * @type {ReturnType<typeof setTimeout>|null}
+     */
+    this.keepAliveTimeout = null
     this.log = log.child({ clientId: this.id, userid: this.userid, gc, ydoc: permissions.ydoc, awareness: permissions.awareness, ws: endpointPermission(permissions, 'ws'), docRef })
   }
 
@@ -249,10 +258,25 @@ export class WSUser {
     }
     this.log.debug({ size: m.byteLength, firstByte: m[0] }, 'sending data to client')
     const sendResult = this.ws.send(m, true, false)
+    this.lastSentAt = time.getUnixTime()
     if (sendResult === 2) {
       this.log.error({ socketBackpressure: this.ws?.getBufferedAmount(), maxDocSize: this.yhub.conf.server?.maxDocSize }, 'message dropped because of backpressure limit')
       this.closeWithError(1013, 'closing because of backpressure limit')
     }
+  }
+
+  /**
+   * Send an empty awareness message whenever nothing was sent for `server.wsKeepAliveInterval` ms
+   * (see the option). Armed after the initial sync; re-arms itself until `destroy`.
+   */
+  keepAlive () {
+    const interval = this.yhub.conf.server?.wsKeepAliveInterval
+    // a backpressure close in `sendData` destroys this user from within the timer callback
+    if (interval == null || this.isDestroyed) return
+    this.keepAliveTimeout = setTimeout(() => {
+      if (time.getUnixTime() - this.lastSentAt >= interval) this.sendData(protocol.awarenessKeepAliveMessage)
+      this.keepAlive()
+    }, this.lastSentAt + interval - time.getUnixTime())
   }
 
   /**
@@ -319,6 +343,7 @@ export class WSUser {
   destroy () {
     if (!this.isDestroyed) {
       this.isDestroyed = true
+      this.keepAliveTimeout !== null && clearTimeout(this.keepAliveTimeout)
       this.yhub.stream.unsubscribe(this.docRef, this)
       this.awarenessId && this.yhub.stream.addMessage(this.docRef, { type: 'awareness:v1', update: protocol.encodeAwarenessUserDisconnected(this.awarenessId, this.awarenessLastClock) }).catch(err => {
         this.log.error({ err }, 'error adding message to redis')
@@ -441,6 +466,7 @@ const registerWebsocketServer = (yhub, app, prefix, cors) => {
         })
         user.lastReceivedClock = doctable.lastClock
         yhub.stream.subscribe(user.docRef, user)
+        user.keepAlive()
       } catch (err) {
         user.log.error({ err }, 'failed to sync initial document')
         user.closeWithError(1011, 'Internal error')

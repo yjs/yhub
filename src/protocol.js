@@ -90,6 +90,14 @@ export const encodeAwareness = (awareness, clients) => encoding.encode(encoder =
 })
 
 /**
+ * An awareness message holding a zero-count awareness update. Receivers apply nothing, but it is
+ * still a message: it resets y-websocket's `socketTimeout` (see `server.wsKeepAliveInterval`).
+ */
+export const awarenessKeepAliveMessage = encoding.encode(encoder => {
+  writeAwarenessUpdate(encoder, new Uint8Array([0])) // varUint 0: no entries
+})
+
+/**
  * @param {number} clientid
  * @param {number} lastClock
  */

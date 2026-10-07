@@ -653,6 +653,13 @@ export const $config = s.$object({
      */
     maxDocSize: s.$number.optional,
     /**
+     * Milliseconds without a message to a client after which the server sends it an empty
+     * awareness message. Clients reconnect when they receive nothing for a while (y-websocket:
+     * `socketTimeout`, 45s) - websocket pings don't reach client code, so an idle document would
+     * otherwise reconnect-loop. `null` disables. (default: 20000)
+     */
+    wsKeepAliveInterval: s.$number.nullable.optional,
+    /**
      * Maximum size of the client's part of a named version: the characters of its `name` plus the
      * bytes of its lib0-any encoded `custom` data. Versions ride along in activity responses, so
      * keep it small. (default: 64K)

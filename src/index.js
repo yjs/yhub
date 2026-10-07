@@ -501,6 +501,8 @@ export const createYHub = async conf => {
   if (conf.server) {
     conf.server.maxDocSize ??= 500 * 1024 * 1024
     conf.server.maxVersionSize ??= 64 * 1024
+    // `null` disables the keep-alive, so `??=` won't do
+    if (conf.server.wsKeepAliveInterval === undefined) conf.server.wsKeepAliveInterval = 20000
   }
   const stream = await strm.createStream(conf)
   const pers = await p.createPersistence(conf.postgres, conf.persistence)

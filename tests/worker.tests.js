@@ -21,16 +21,15 @@ const clearPrefix = async prefix => {
 /**
  * @param {object} conf
  * @param {number} conf.taskDebounce
- * @param {number} [conf.maxTaskDuration]
+ * @param {number} [conf.taskTimeout]
  * @param {(event: { docRef: import('../src/types.js').DocRef, timestamp: number }) => void} [conf.taskStart]
  * @param {(event: { docRef: import('../src/types.js').DocRef, duration: number, error: Error|null }) => void} [conf.taskComplete]
  * @param {string} prefix
  */
-const createWorkerHub = ({ taskDebounce, maxTaskDuration, taskStart, taskComplete }, prefix) =>
+const createWorkerHub = ({ taskDebounce, taskTimeout, taskStart, taskComplete }, prefix) =>
   utils.createTestHub({
     redis: object.assign({}, utils.yhub.conf.redis, { prefix, taskDebounce, minMessageLifetime: 100 }),
-    maxTaskDuration,
-    worker: { taskConcurrency: 10, events: { taskStart, taskComplete } }
+    worker: { taskConcurrency: 10, taskTimeout, events: { taskStart, taskComplete } }
   })
 
 /**
@@ -197,7 +196,7 @@ export const testDestroyDrainsRunningTask = async tc => {
 
 /**
  * A compaction that hangs where the compute pool can't kill it - a wedged s3 or postgres socket -
- * is abandoned by the worker after `maxTaskDuration`. It stops being renewed, goes stale, and
+ * is abandoned by the worker after `worker.taskTimeout`. It stops being renewed, goes stale, and
  * another worker picks it up: lease renewal must never make a document permanently unreclaimable.
  *
  * @param {t.TestCase} tc
@@ -210,10 +209,10 @@ export const testHangingTaskIsAbandonedAndReclaimed = async tc => {
    * @type {Array<string>}
    */
   const startedA = []
-  const hubA = await createWorkerHub({ taskDebounce, maxTaskDuration: 500, taskStart: ({ docRef }) => startedA.push(docRef.docid) }, prefix)
+  const hubA = await createWorkerHub({ taskDebounce, taskTimeout: 500, taskStart: ({ docRef }) => startedA.push(docRef.docid) }, prefix)
   const docRef = { org: utils.defaultOrg, docid: tc.testName + '-index', branch: 'main' }
   // block outside the compute pool: the merge never reaches a worker thread, so nothing can kill
-  // it and only the worker's own maxTaskDuration bound applies
+  // it and only the worker's own taskTimeout bound applies
   blockCompaction(hubA, docRef, promise.create(() => {}))
   /**
    * @type {Array<string>}

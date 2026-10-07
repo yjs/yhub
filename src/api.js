@@ -6,6 +6,7 @@ import * as string from 'lib0/string'
 import * as perm from './permissions.js'
 import * as t from './types.js'
 import { builtinApi } from './builtin-api.js'
+import { isComputeQueueFull } from './compute.js'
 import { originAllowed, resolveCors, writeCorsPreflight, writeCorsResponse } from './cors.js'
 import { logger } from './logger.js'
 
@@ -605,6 +606,9 @@ const createApiHandler = (yhub, { method, handler, scope, requiredEndpoint, path
         sendErrorResponse(res, writeHeaders, statusLine(404), { error: 'Not Found', code: 'doc-deleted' }, acceptsJson)
       } else if (isApiError(err)) {
         sendErrorResponse(res, writeHeaders, statusLine(err.status), { error: err.message, ...err.extra }, acceptsJson)
+      } else if (isComputeQueueFull(err)) {
+        // overload, not a failure - the pool logged it already
+        sendErrorResponse(res, writeHeaders, statusLine(503), { error: 'compute queue full', code: 'compute-queue-full' }, acceptsJson)
       } else {
         log.error({ err, path }, 'error handling api request')
         sendErrorResponse(res, writeHeaders, '500 Internal Server Error', { error: 'Internal server error' }, acceptsJson)

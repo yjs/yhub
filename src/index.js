@@ -69,7 +69,7 @@ export class YHub {
      * @type {Conf['server'] extends null ? null : server.YHubServer}
      */
     this.server = /** @type {any} */ (null)
-    this.computePool = createComputePool({ poolSize: conf.computePoolSize, taskTimeout: conf.maxTaskDuration })
+    this.computePool = createComputePool(conf.computePool)
     /**
      * `stopped` resolves once both worker loops of this context have exited. After a stop, the
      * leases of the running tasks are renewed until `drainUntil` (unix ms) - see `stopWorker`.
@@ -109,7 +109,7 @@ export class YHub {
     })
     ctx.stopped = promise.all([
       this._claimTasks(ctx, this.conf.worker.taskConcurrency),
-      this._renewLeases(ctx).catch(err => log.error({ err }, 'lease renewal failed'))
+      this._renewLeases(ctx, this.conf.worker.taskTimeout ?? 30 * 60 * 1000).catch(err => log.error({ err }, 'lease renewal failed'))
     ])
     return ctx.stopped
   }
@@ -158,21 +158,22 @@ export class YHub {
    * while tasks are left until `ctx.drainUntil`.
    *
    * @param {{ shouldRun: boolean, drainUntil: number }} ctx
+   * @param {number} taskTimeout ms after which a running task is abandoned
    */
-  async _renewLeases (ctx) {
+  async _renewLeases (ctx, taskTimeout) {
     const inflight = this._inflight
     const interval = math.min(1000, math.floor(this.stream.taskDebounce / 3))
     while (ctx.shouldRun || (inflight.size > 0 && time.getUnixTime() < ctx.drainUntil)) {
       await promise.wait(interval)
       if (inflight.size === 0) continue
       const now = time.getUnixTime()
-      // the compute pool kills a compute task that overruns, which rejects it. Getting here means
-      // the task is stuck where we can't kill it - waiting for a wedged s3 or postgres socket, or
-      // queued behind other compute tasks - so all we can do is let go: stop renewing, and the
-      // document is reclaimed by another worker after redis.taskDebounce.
+      // the compute pool kills a compute call that overruns its own taskTimeout. Getting here means
+      // the task is stuck where we can't kill it - waiting for a wedged s3 or postgres socket - or
+      // spent the time across several compute calls, so all we can do is let go: stop renewing,
+      // and the document is reclaimed by another worker after redis.taskDebounce.
       array.from(inflight.entries()).forEach(([taskId, run]) => {
-        if (now - run.started > this.computePool.taskTimeout) {
-          log.error({ docRef: run.docRef, taskDurationMs: now - run.started }, 'task exceeded maxTaskDuration outside of compute, abandoning it')
+        if (now - run.started > taskTimeout) {
+          log.error({ docRef: run.docRef, taskDurationMs: now - run.started }, 'task exceeded worker.taskTimeout, abandoning it')
           inflight.delete(taskId)
         }
       })
@@ -585,7 +586,7 @@ export const createYHub = async conf => {
     redis,
     pluginCount: conf.persistence.length,
     workerConcurrency: conf.worker?.taskConcurrency ?? null,
-    computePoolSize: yhub.computePool.maxPoolSize,
+    computeThreads: yhub.computePool.maxThreads,
     serverPort: conf.server?.port ?? null
   }, 'yhub initialized')
   yhub.startWorker().catch(err => log.error({ err }, 'worker failed'))

@@ -39,7 +39,7 @@ const yhub = await createYHub({
   },
   postgres: settings.dbs.postgres,
   persistence: [persistence],
-  computePoolSize: settings.hub.computePoolSize ?? undefined,
+  computePool: { maxThreads: settings.hub.computePoolSize ?? undefined },
   server: settings.role === 'server'
     ? {
         port: settings.port,

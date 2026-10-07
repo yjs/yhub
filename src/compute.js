@@ -87,6 +87,19 @@ const $computeTask = s.$union(
  */
 
 /**
+ * @typedef {{ task: ComputeTask, transferList: ArrayBuffer[], logContext: Object<string, any>, resolve: (value: any) => void, reject: (reason: any) => void, queueTimeout: NodeJS.Timeout? }} QueuedTask
+ */
+
+/**
+ * `ComputePool.run` rejects with an error whose `code` is `'COMPUTE_QUEUE_FULL'` when
+ * `computePool.maxQueue` tasks are already waiting for a thread. Transient: the rest layer answers it with 503, the websocket
+ * initial sync closes with 1013.
+ *
+ * @param {any} err
+ */
+export const isComputeQueueFull = err => err?.code === 'COMPUTE_QUEUE_FULL'
+
+/**
  * @param {ComputeWorker} cw
  */
 const finishWorker = (cw) => {
@@ -103,7 +116,10 @@ class ComputeWorker {
    */
   constructor (pool) {
     this.pool = pool
-    this.worker = new Worker(workerUrl, { execArgv: [] })
+    // a thread that exceeds its resourceLimits dies on its own ('error', then 'exit' below).
+    // Without them, every thread may grow to the main thread's heap limit - together they can
+    // outgrow the container, whose OOM killer then ends the whole process
+    this.worker = new Worker(workerUrl, { execArgv: [], resourceLimits: pool.resourceLimits })
     this.isComputing = false
     this.isDead = false
     /**
@@ -197,7 +213,7 @@ const getFreeWorker = (pool) => {
     }
     if (!w.isComputing) return w
   }
-  if (pool.workers.length < pool.maxPoolSize) {
+  if (pool.workers.length < pool.maxThreads) {
     const cw = new ComputeWorker(pool)
     pool.workers.push(cw)
     return cw
@@ -211,36 +227,56 @@ const drain = (pool) => {
   while (pool.queue.length > 0) {
     const worker = getFreeWorker(pool)
     if (!worker) break
-    const task = /** @type {{ task: ComputeTask, transferList: ArrayBuffer[], logContext: Object<string, any>, resolve: (value: any) => void, reject: (reason: any) => void }} */ (pool.queue.shift())
+    const task = /** @type {QueuedTask} */ (pool.queue.shift())
+    task.queueTimeout != null && clearTimeout(task.queueTimeout)
     worker.run(task.task, task.transferList, task.logContext, task.resolve, task.reject)
   }
 }
 
 /**
- * @param {{ poolSize?: number, taskTimeout?: number }} [opts]
+ * @param {import('./types.js').YHubConfig['computePool']} [opts]
  */
 export const createComputePool = (opts = {}) => {
-  const poolSize = opts.poolSize ?? math.max(1, cpus().length - 1)
-  return new ComputePool(poolSize, opts.taskTimeout ?? 30 * 60 * 1000)
+  // V8 applies these flags to every thread of the process, over the thread's own limit
+  if (opts.resourceLimits?.maxOldGenerationSizeMb != null && [...process.execArgv, process.env.NODE_OPTIONS ?? ''].some(arg => /--max[-_](old[-_]space|heap)[-_]size/.test(arg))) {
+    log.warn({ maxOldGenerationSizeMb: opts.resourceLimits.maxOldGenerationSizeMb }, 'computePool.resourceLimits.maxOldGenerationSizeMb has no effect: the process runs with --max-old-space-size or --max-heap-size')
+  }
+  return new ComputePool(opts.maxThreads ?? math.max(1, cpus().length - 1), opts.maxQueue ?? Infinity, opts.taskTimeout ?? 30 * 60 * 1000, opts.resourceLimits)
 }
 
 class ComputePool {
   /**
-   * @param {number} maxPoolSize
-   * @param {number} taskTimeout ms after which a running task's worker thread is killed
+   * @param {number} maxThreads
+   * @param {number} maxQueue tasks that may wait for a thread; `run` rejects any further task
+   * @param {number} taskTimeout ms after which a running task's worker thread is killed, and a queued task is rejected
+   * @param {import('node:worker_threads').ResourceLimits} [resourceLimits] of each worker thread
    */
-  constructor (maxPoolSize, taskTimeout) {
-    this.maxPoolSize = maxPoolSize
+  constructor (maxThreads, maxQueue, taskTimeout, resourceLimits) {
+    this.maxThreads = maxThreads
+    this.maxQueue = maxQueue
     this.taskTimeout = taskTimeout
+    this.resourceLimits = resourceLimits
     /**
      * @type {Array<ComputeWorker>}
      */
     this.workers = []
     /**
-     * @type {Array<{ task: ComputeTask, transferList: ArrayBuffer[], logContext: Object<string, any>, resolve: (value: any) => void, reject: (reason: any) => void }>}
+     * @type {Array<QueuedTask>}
      */
     this.queue = []
     this.isDestroyed = false
+  }
+
+  /**
+   * @returns {{ queued: number, busy: number, workers: number }} tasks waiting for a thread,
+   * threads computing a task, and live threads
+   */
+  stats () {
+    return {
+      queued: this.queue.length,
+      busy: this.workers.filter(w => w.isComputing).length,
+      workers: this.workers.filter(w => !w.isDead).length
+    }
   }
 
   /**
@@ -254,11 +290,27 @@ class ComputePool {
     // a new thread would keep the process alive after `destroy`
     if (this.isDestroyed) return promise.reject(new Error('compute pool destroyed'))
     return promise.create((resolve, reject) => {
-      this.queue.push({ task, transferList, logContext, resolve, reject })
-      if (this.queue.length > 1) {
-        log.debug({ taskType: task.type, queueDepth: this.queue.length }, 'task queued, no free worker')
-      }
+      /**
+       * @type {QueuedTask}
+       */
+      const entry = { task, transferList, logContext, resolve, reject, queueTimeout: null }
+      this.queue.push(entry)
       drain(this)
+      if (this.queue.length === 0) return
+      // every queued entry pins its task's buffers - full documents - until a thread takes it
+      if (this.queue.length > this.maxQueue) {
+        this.queue.pop()
+        log.warn({ taskType: task.type, maxQueue: this.maxQueue, ...logContext }, 'compute queue full, rejecting task')
+        reject(Object.assign(new Error('compute queue full'), { code: 'COMPUTE_QUEUE_FULL' }))
+        return
+      }
+      log.debug({ taskType: task.type, queueDepth: this.queue.length }, 'task queued, no free worker')
+      // the caller would otherwise wait unboundedly behind tasks that each may run for taskTimeout
+      entry.queueTimeout = setTimeout(() => {
+        this.queue.splice(this.queue.indexOf(entry), 1)
+        log.error({ taskType: task.type, taskTimeout: this.taskTimeout, ...logContext }, 'compute task waited taskTimeout for a worker thread, rejecting it')
+        reject(new Error('compute task exceeded taskTimeout while queued'))
+      }, this.taskTimeout)
     })
   }
 
@@ -399,7 +451,10 @@ class ComputePool {
   async destroy () {
     this.isDestroyed = true
     // emptied first: each terminated thread's `exit` drains the queue, which would spawn a new one
-    this.queue.splice(0).forEach(task => task.reject(new Error('compute pool destroyed')))
+    this.queue.splice(0).forEach(task => {
+      task.queueTimeout != null && clearTimeout(task.queueTimeout)
+      task.reject(new Error('compute pool destroyed'))
+    })
     await promise.all(this.workers.map(w => w.terminate()))
   }
 }

@@ -14,6 +14,7 @@ import { registerApi, resolveApiPrefix, resolvePermissions, normalizeAuthorizeAn
 import { originAllowed, resolveCors } from './cors.js'
 import { parseCustomAttributionsParam } from './builtin-api.js'
 import { endpointPermission } from './permissions.js'
+import { isComputeQueueFull } from './compute.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'ws' })
@@ -515,8 +516,13 @@ const registerWebsocketServer = (server, prefix, cors) => {
         yhub.stream.subscribe(user.docRef, user)
         user.keepAlive()
       } catch (err) {
-        user.log.error({ err }, 'failed to sync initial document')
-        user.closeWithError(1011, 'Internal error')
+        if (isComputeQueueFull(err)) {
+          // overload, not a failure - the pool logged it already
+          user.close(1013, 'compute queue full')
+        } else {
+          user.log.error({ err }, 'failed to sync initial document')
+          user.closeWithError(1011, 'Internal error')
+        }
       }
     },
     message: (ws, messageBuffer) => {

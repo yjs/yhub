@@ -9,8 +9,8 @@ const password = 'sup3rsecret'
  */
 export const testDescribeUrl = _tc => {
   t.compare(
-    describeUrl(`postgres://alice:${password}@db.example.com:5433/keryx?ssl=require`),
-    { hostname: 'db.example.com', port: '5433', username: 'alice', database: 'keryx' }
+    describeUrl(`postgres://alice:${password}@db.example.com:5433/app?ssl=require`),
+    { hostname: 'db.example.com', port: '5433', username: 'alice', database: 'app' }
   )
   // the db index lives in the path for redis, same as the database name does for postgres
   t.compare(
@@ -19,12 +19,12 @@ export const testDescribeUrl = _tc => {
   )
   // a part the url omits reads as the empty string - no port means the scheme's default
   t.compare(
-    describeUrl('postgres://db.example.com/keryx'),
-    { hostname: 'db.example.com', port: '', username: '', database: 'keryx' }
+    describeUrl('postgres://db.example.com/app'),
+    { hostname: 'db.example.com', port: '', username: '', database: 'app' }
   )
   t.compare(
-    describeUrl(`postgresql://alice:${password}@[::1]:5432/keryx`),
-    { hostname: '[::1]', port: '5432', username: 'alice', database: 'keryx' }
+    describeUrl(`postgresql://alice:${password}@[::1]:5432/app`),
+    { hostname: '[::1]', port: '5432', username: 'alice', database: 'app' }
   )
 }
 
@@ -35,14 +35,14 @@ export const testDescribeUrl = _tc => {
  */
 export const testDescribeUrlOmitsPassword = _tc => {
   for (const url of [
-    `postgres://alice:${password}@db.example.com:5433/keryx`,
+    `postgres://alice:${password}@db.example.com:5433/app`,
     // an unencoded '@' or ':' in the password still parses - the *last* '@' ends the authority
-    `postgres://alice:SEC@${password}@db.example.com:5433/keryx`,
-    `postgres://alice:SEC:${password}@db.example.com:5433/keryx`,
+    `postgres://alice:SEC@${password}@db.example.com:5433/app`,
+    `postgres://alice:SEC:${password}@db.example.com:5433/app`,
     // percent-encoded, which is how a password containing '/', '#' or '?' has to be written
-    `postgres://alice:%2F%23%3F${password}@db.example.com:5433/keryx`,
+    `postgres://alice:%2F%23%3F${password}@db.example.com:5433/app`,
     // a credential in the query string is not one of the four fields either
-    `postgres://alice@db.example.com:5433/keryx?sslpassword=${password}`,
+    `postgres://alice@db.example.com:5433/app?sslpassword=${password}`,
     `rediss://default:${password}@redis.example.com:6380`
   ]) {
     t.assert(!JSON.stringify(describeUrl(url)).includes(password))

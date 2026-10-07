@@ -7,6 +7,23 @@
 > seconds for the S3 plugin's pending deletes, about 28 seconds in all. Kubernetes' default grace
 > period of 30 seconds covers that. Docker's default stop timeout of 10 seconds does not: set
 > `stop_grace_period: 30s` in compose, or pass `docker stop -t 30`.
+>
+> **Rename the compute pool options before deploying** (see Breaking Changes). Unknown config keys
+> are ignored, so a leftover `computePoolSize` or `maxTaskDuration` silently falls back to its
+> default instead of failing at startup.
+
+### Breaking Changes
+
+- **The compute pool options moved under `computePool`, named like the options of worker-pool libraries such as Piscina and Tinypool.** `computePoolSize` is now `computePool.maxThreads`. `maxTaskDuration` did two jobs and is split in two: `computePool.taskTimeout` kills a compute thread that runs a task for too long, and `worker.taskTimeout` abandons a compaction task stuck outside of compute (a wedged S3 or PostgreSQL socket) so another worker reclaims it. Both default to 30 minutes, as before; set both to keep a custom `maxTaskDuration`. The new options below live there too, as `computePool.maxQueue` and `computePool.resourceLimits`. `yhub.computePool.maxPoolSize` is now `yhub.computePool.maxThreads`, and the `yhub initialized` log line reports `computeThreads` instead of `computePoolSize`.
+
+  ```js
+  // before
+  createYHub({ computePoolSize: 4, maxTaskDuration: 600_000, worker: { taskConcurrency: 10 } })
+  // after
+  createYHub({ computePool: { maxThreads: 4, taskTimeout: 600_000 }, worker: { taskConcurrency: 10, taskTimeout: 600_000 } })
+  ```
+
+  ([API docs](API.md#createyhubconfig), [`src/types.js`](src/types.js))
 
 ### New Features
 
@@ -16,6 +33,14 @@
   - **Then** closes the compute pool, both redis clients and the postgres pool, and resolves. Nothing yhub opened is left holding the event loop, so the process exits by itself.
 
   `drainMs` is an upper bound: closing the websockets takes milliseconds, and the shutdown is over as soon as the running compactions finish. A compaction still running when it runs out is killed (its compute thread is terminated) and reclaimed by another worker after `redis.taskDebounce`. Nothing is lost, because compaction only trims the stream after the new row is stored. In-flight REST requests are dropped; clients see a connection error and retry. The bin scripts read `drainMs` from the new `SHUTDOWN_DRAIN_MS` (default `15000`). Pressing Ctrl-C a second time kills the process at once. `destroy` is idempotent. `stopWorker({ drainMs })` now returns a promise that resolves once the worker has stopped, after draining its running tasks for up to `drainMs` (default `0`, the previous behavior). `4503` is the first code sent from the transient `4500`–`4599` band: clients that follow the band rule reconnect, and land on another instance. A client that treats every `4xxx` close as permanent would instead stop reconnecting on every deploy. ([API docs](API.md#yhubdestroyopts), [deployment guide](DEPLOYMENT.md#9-shut-down-gracefully), [`src/index.js`](src/index.js), [`src/server.js`](src/server.js))
+
+- **The compute pool can be bounded: `computePool.maxQueue`, `computePool.resourceLimits`, and a deadline for queued tasks.** Previously the queue of tasks waiting for a compute thread was unbounded, and every queued task holds its full documents in memory until a thread takes it. A queued task also waited without a deadline, because the task timeout only started counting once a thread took it. Each thread could grow to the main thread's heap limit, so a few large merges at once could push the process past the memory of its container, and the OOM killer ended the whole process instead of one thread failing. Now:
+  - **`computePool.maxQueue`** (default: unlimited) caps the tasks waiting for a thread. A task beyond it is rejected right away with an error whose `code` is `'COMPUTE_QUEUE_FULL'`. Rest requests answer `503` with `code: 'compute-queue-full'`, and a websocket's initial sync closes with `1013`. Both are transient, so clients retry. A compaction task rejected this way is retried by the worker later.
+  - **`computePool.resourceLimits`** is passed to each compute thread as Node's `resourceLimits`. A thread that exceeds them dies, which rejects its task, and the pool replaces it; the process survives. `maxOldGenerationSizeMb` has no effect when the process runs with `--max-old-space-size` or `--max-heap-size`, because V8 applies these flags to every thread. yhub logs a warning at startup in that case.
+  - **`computePool.taskTimeout` also bounds the wait for a thread:** a task still queued after it is rejected.
+  - **`yhub.computePool.stats()`** returns `{ queued, busy, workers }`: tasks waiting, threads computing, live threads.
+
+  ([API docs](API.md#createyhubconfig), [`src/compute.js`](src/compute.js))
 
 ### Performance
 

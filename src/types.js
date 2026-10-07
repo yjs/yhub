@@ -606,21 +606,49 @@ export const $config = s.$object({
   postgres: s.$string,
   persistence: s.$array($persistencePlugin),
   /**
-   * Number of worker threads in the compute pool, which performs CPU-intensive
-   * Yjs operations (merging, state vectors, changesets). (default: number of
-   * cpus - 1)
+   * The pool of worker threads that runs CPU-intensive Yjs work (merging, pruning, state vectors,
+   * changesets, activity, rollback). See API.md.
    */
-  computePoolSize: s.$number.optional,
-  /**
-   * Maximum time a single task may run. A compute task that exceeds it has its worker thread
-   * killed - it can't be cancelled cooperatively - which rejects the task so its caller can
-   * retry. A compaction task that exceeds it outside of compute is abandoned by the worker, so
-   * that its document is reclaimed by another worker instead of staying leased forever.
-   * (default: 30 minutes)
-   */
-  maxTaskDuration: s.$number.optional,
+  computePool: s.$object({
+    /**
+     * Number of worker threads. (default: number of cpus - 1)
+     */
+    maxThreads: s.$number.optional,
+    /**
+     * Maximum number of tasks waiting for a free thread. Each one holds its documents in memory
+     * until a thread takes it. A task beyond the limit is rejected with an error whose `code` is
+     * `'COMPUTE_QUEUE_FULL'`: rest requests answer 503, a websocket's initial sync closes with
+     * 1013. (default: unlimited)
+     */
+    maxQueue: s.$number.optional,
+    /**
+     * Maximum time in ms a task may run, and may wait for a thread. A running task that exceeds
+     * it has its thread killed - it can't be cancelled cooperatively - which rejects the task so
+     * its caller can retry; a queued task is rejected. (default: 30 minutes)
+     */
+    taskTimeout: s.$number.optional,
+    /**
+     * node's `resourceLimits` of each thread (see `Worker`). A thread that exceeds them dies,
+     * which rejects its task, and is replaced - the process survives. V8 applies
+     * `--max-old-space-size` and `--max-heap-size` to every thread, so with either flag
+     * `maxOldGenerationSizeMb` has no effect - the pool warns at startup. (default: none)
+     */
+    resourceLimits: s.$object({
+      maxYoungGenerationSizeMb: s.$number.optional,
+      maxOldGenerationSizeMb: s.$number.optional,
+      codeRangeSizeMb: s.$number.optional,
+      stackSizeMb: s.$number.optional
+    }).optional
+  }).optional,
   worker: s.$object({
     taskConcurrency: s.$number,
+    /**
+     * Maximum time in ms a compaction task may run. A task that exceeds it - stuck where it can't
+     * be killed, e.g. on a wedged s3 or postgres socket - is abandoned: its lease is no longer
+     * renewed, so another worker reclaims the document instead of it staying leased forever.
+     * (default: 30 minutes)
+     */
+    taskTimeout: s.$number.optional,
     /**
      * Observability callbacks invoked by the compaction worker. Every payload identifies its
      * document with `docRef`. Called synchronously and never awaited; a synchronous throw

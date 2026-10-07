@@ -2,13 +2,27 @@ import * as t from 'lib0/testing'
 import * as Y from '@y/y'
 import * as decoding from 'lib0/decoding'
 import * as delta from 'lib0/delta'
-import { createComputePool } from '../src/compute.js'
+import * as promise from 'lib0/promise'
+import * as buffer from 'lib0/buffer'
+import { spawn } from 'node:child_process'
+import WebSocket from 'ws'
+import { createComputePool, isComputeQueueFull } from '../src/compute.js'
+import { createContentMap } from '../src/y-utils.js'
+import * as utils from './utils.js'
+
+const queueFullPort = utils.testHubPort(-2)
+
+// no compute thread and no queue: every task this hub offloads is rejected as COMPUTE_QUEUE_FULL
+await utils.createTestHub({
+  computePool: { maxThreads: 0, maxQueue: 0 },
+  server: { ...utils.yhub.conf.server, port: queueFullPort }
+})
 
 /**
  * @param {t.TestCase} _tc
  */
 export const testMergeUpdatesAndGc = async _tc => {
-  const pool = createComputePool({ poolSize: 2 })
+  const pool = createComputePool({ maxThreads: 2 })
   const doc1 = new Y.Doc()
   doc1.get('test').insert(0, 'hello')
   const update1 = Y.encodeStateAsUpdate(doc1)
@@ -30,7 +44,7 @@ export const testMergeUpdatesAndGc = async _tc => {
  * @param {t.TestCase} _tc
  */
 export const testMergeUpdates = async _tc => {
-  const pool = createComputePool({ poolSize: 2 })
+  const pool = createComputePool({ maxThreads: 2 })
   const doc1 = new Y.Doc()
   doc1.get('test').insert(0, 'hello')
   const update1 = Y.encodeStateAsUpdate(doc1)
@@ -52,7 +66,7 @@ export const testMergeUpdates = async _tc => {
  * @param {t.TestCase} _tc
  */
 export const testRollback = async _tc => {
-  const pool = createComputePool({ poolSize: 2 })
+  const pool = createComputePool({ maxThreads: 2 })
   const doc = new Y.Doc({ gc: false })
   doc.get('test').insert(0, 'hello')
   const update1 = Y.encodeStateAsUpdate(doc)
@@ -95,7 +109,7 @@ export const testRollback = async _tc => {
  * @param {t.TestCase} _tc
  */
 export const testActivityGrouping = async _tc => {
-  const pool = createComputePool({ poolSize: 2 })
+  const pool = createComputePool({ maxThreads: 2 })
   const doc = new Y.Doc({ gc: false })
   // three edits by the same user at timestamps 1000, 1500, 2000
   doc.get('test').insert(0, 'hello')
@@ -170,7 +184,7 @@ export const testActivityGrouping = async _tc => {
  * @param {t.TestCase} _tc
  */
 export const testActivityGroupByUser = async _tc => {
-  const pool = createComputePool({ poolSize: 2 })
+  const pool = createComputePool({ maxThreads: 2 })
   const doc = new Y.Doc({ gc: false })
   // three interleaved edits: user1@1000, user2@1500, user1@2000
   doc.get('test').insert(0, 'hello')
@@ -245,7 +259,7 @@ export const testActivityGroupByUser = async _tc => {
  * @param {t.TestCase} _tc
  */
 export const testActivityNamedVersions = async _tc => {
-  const pool = createComputePool({ poolSize: 2 })
+  const pool = createComputePool({ maxThreads: 2 })
   const doc = new Y.Doc({ gc: false })
   // three interleaved edits: user1@1000 'hello', user2@1500 ' world', user1@2000 '!'
   doc.get('test').insert(0, 'hello')
@@ -356,7 +370,7 @@ export const testActivityNamedVersions = async _tc => {
  * @param {t.TestCase} _tc
  */
 export const testInvalidUpdate = async _tc => {
-  const pool = createComputePool({ poolSize: 2 })
+  const pool = createComputePool({ maxThreads: 2 })
   let failed = false
   try {
     const invalidUpdate = new Uint8Array([])
@@ -383,7 +397,7 @@ export const testInvalidUpdate = async _tc => {
  * @param {t.TestCase} _tc
  */
 export const testComputePruneSet = async _tc => {
-  const pool = createComputePool({ poolSize: 2 })
+  const pool = createComputePool({ maxThreads: 2 })
   const doc = new Y.Doc({ gc: false })
   const tp = doc.get('test')
   /** @type {Array<Y.ContentMap>} */
@@ -443,7 +457,7 @@ export const testTaskTimeoutKillsWorkerThread = async _tc => {
   Y.applyUpdate(doc2, update1)
   doc2.get('test').insert(0, 'b'.repeat(10000))
   const update2 = Y.encodeStateAsUpdate(doc2)
-  const pool = createComputePool({ poolSize: 1, taskTimeout: 1 })
+  const pool = createComputePool({ maxThreads: 1, taskTimeout: 1 })
   await t.failsAsync(() => pool.mergeUpdates(true, [update1, update2]))
   t.assert(pool.workers.every(w => w.isDead), 'the worker thread was terminated')
   // the pool replaces the dead thread and keeps working
@@ -459,6 +473,139 @@ export const testTaskTimeoutKillsWorkerThread = async _tc => {
 }
 
 /**
+ * The queue is bounded: with one thread and `maxQueue: 1`, the first task runs, the second waits
+ * and the third is rejected right away. The admitted tasks are unaffected.
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testComputeQueueLimit = async _tc => {
+  const doc = new Y.Doc()
+  doc.get('test').insert(0, 'a'.repeat(10000))
+  const update = Y.encodeStateAsUpdate(doc)
+  const pool = createComputePool({ maxThreads: 1, maxQueue: 1 })
+  const first = pool.mergeUpdates(true, [update, update])
+  const second = pool.mergeUpdates(true, [update, update])
+  t.compare(pool.stats(), { queued: 1, busy: 1, workers: 1 })
+  const err = await pool.mergeUpdates(true, [update, update]).then(() => null, err => err)
+  t.assert(isComputeQueueFull(err), 'the third task is rejected with COMPUTE_QUEUE_FULL')
+  t.compare(pool.stats(), { queued: 1, busy: 1, workers: 1 }, 'the rejected task was never queued')
+  for (const merged of await promise.all([first, second])) {
+    const resultDoc = new Y.Doc()
+    Y.applyUpdate(resultDoc, merged)
+    t.assert(resultDoc.get('test').toString().length === 10000)
+    resultDoc.destroy()
+  }
+  t.compare(pool.stats(), { queued: 0, busy: 0, workers: 1 })
+  doc.destroy()
+  await pool.destroy()
+}
+
+/**
+ * A full compute queue is overload, not a failure: rest requests answer 503 and a websocket's
+ * initial sync closes with 1013 - both transient, so clients retry.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testComputeQueueFullIsTransient = async tc => {
+  const { yhub, org, defaultDocRef } = await utils.createTestCase(tc)
+  // two updates of more than 5120 bytes in all - reading the document merges them in a thread
+  const doc = new Y.Doc()
+  doc.get('test').insert(0, 'a'.repeat(6000))
+  const update1 = Y.encodeStateAsUpdate(doc)
+  const sv = Y.encodeStateVector(doc)
+  doc.get('test').insert(0, 'b')
+  const update2 = Y.encodeStateAsUpdate(doc, sv)
+  for (const update of [update1, update2]) {
+    await yhub.stream.addMessage(defaultDocRef, { type: 'ydoc:update:v1', update, contentmap: createContentMap(Y.createContentIdsFromUpdate(update), 'user1', []) })
+  }
+  for (const endpoint of ['ydoc', 'changeset', 'activity']) {
+    const res = await fetch(`http://localhost:${queueFullPort}/api/${endpoint}/v1/${org}/${defaultDocRef.docid}`)
+    t.assert(res.status === 503, `${endpoint} must 503`)
+    t.compare(buffer.decodeAny(new Uint8Array(await res.arrayBuffer())), { error: 'compute queue full', code: 'compute-queue-full' })
+  }
+  const ws = new WebSocket(`${utils.wsUrlFromPort(queueFullPort)}/${defaultDocRef.docid}`)
+  const closed = await promise.create(resolve => ws.once('close', (code, reason) => resolve({ code, reason: reason.toString() })))
+  t.compare(closed, { code: 1013, reason: 'compute queue full' })
+  doc.destroy()
+}
+
+/**
+ * `taskTimeout` also bounds the wait for a thread: a task still queued when it elapses is
+ * rejected, instead of waiting behind tasks that may each run that long.
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testQueuedTaskTimeout = async _tc => {
+  const doc = new Y.Doc()
+  doc.get('test').insert(0, 'a'.repeat(10000))
+  const update = Y.encodeStateAsUpdate(doc)
+  const pool = createComputePool({ maxThreads: 1, taskTimeout: 1 })
+  const [running, queued] = await Promise.allSettled([pool.mergeUpdates(true, [update, update]), pool.mergeUpdates(true, [update, update])])
+  t.assert(running.status === 'rejected' && running.reason.message === 'Worker terminated', 'the running task was killed')
+  t.assert(queued.status === 'rejected' && queued.reason.message === 'compute task exceeded taskTimeout while queued', 'the queued task timed out waiting')
+  t.compare(pool.stats().queued, 0)
+  doc.destroy()
+  await pool.destroy()
+}
+
+/**
+ * `resourceLimits` cap each thread's heap. A merge that exceeds them kills only its thread - the
+ * 'error'/'exit' path rejects the task and the pool replaces the thread - long before the threads
+ * together could outgrow the memory of the process. In child processes: V8 applies `--max-old-space-size`,
+ * which the test runner sets, to every thread, overriding `maxOldGenerationSizeMb` - the second
+ * run checks that the pool warns about it.
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testWorkerResourceLimits = async _tc => {
+  /**
+   * @param {Array<string>} execArgv
+   * @return {Promise<{ exitCode: number|null, logs: Array<{ msg: string }>, result: { code: string|null, stats: any, recovered: boolean } }>}
+   */
+  const run = async execArgv => {
+    const child = spawn(process.execPath, [...execArgv, '--input-type=module', '-e', `
+      import * as Y from '@y/y'
+      import { createComputePool } from '${new URL('../src/compute.js', import.meta.url)}'
+      // inserting at the front never extends the previous item, so the document has n items -
+      // each an object on the worker's heap during a gc merge
+      const build = n => {
+        const doc = new Y.Doc()
+        doc.transact(() => {
+          for (let i = 0; i < n; i++) doc.get('test').insert(0, 'x')
+        })
+        return Y.encodeStateAsUpdate(doc)
+      }
+      const small = build(1000)
+      const large = build(100000)
+      const pool = createComputePool({ maxThreads: 1, resourceLimits: { maxOldGenerationSizeMb: 16 } })
+      await pool.mergeUpdates(true, [small, small])
+      const err = await pool.mergeUpdates(true, [large, large]).then(() => null, err => err)
+      const stats = pool.stats()
+      const doc = new Y.Doc()
+      Y.applyUpdate(doc, await pool.mergeUpdates(true, [small, small]))
+      process.stdout.write(JSON.stringify({ code: err?.code ?? null, stats, recovered: doc.get('test').toString().length === 1000 }) + '\\n')
+      await pool.destroy()
+    `], { env: { ...process.env, NODE_OPTIONS: '', LOG_LEVEL: 'warn' }, stdio: ['ignore', 'pipe', 'inherit'] })
+    let out = ''
+    child.stdout.on('data', data => { out += data })
+    const exitCode = await promise.create(resolve => child.once('close', resolve))
+    // pino's log lines, then the result
+    const lines = out.trim().split('\n').map(line => JSON.parse(line))
+    return { exitCode, logs: lines.slice(0, -1), result: lines[lines.length - 1] }
+  }
+  const limited = await run([])
+  t.assert(limited.exitCode === 0, 'the process survived')
+  t.assert(limited.result.code === 'ERR_WORKER_OUT_OF_MEMORY', 'the large merge exceeded the heap limit')
+  t.compare(limited.result.stats, { queued: 0, busy: 0, workers: 0 }, 'only the thread died')
+  t.assert(limited.result.recovered, 'the pool replaced the dead thread and keeps working')
+  t.assert(limited.logs.every(log => !log.msg.includes('has no effect')), 'no warning without the flag')
+  const flagged = await run(['--max-old-space-size=8192'])
+  t.assert(flagged.exitCode === 0)
+  t.assert(flagged.result.code === null, 'the flag overrode the limit of the thread')
+  t.assert(flagged.logs.some(log => log.msg.includes('has no effect')), 'the pool warned at startup')
+}
+
+/**
  * A whole-document update from a gc'd client (the GET -> edit -> PATCH body) carries a
  * ContentDeleted stub for every deleted id the nongc history holds with content. Merged after the
  * persisted history - the order getDoc uses - the stub must not replace the content, otherwise
@@ -468,7 +615,7 @@ export const testTaskTimeoutKillsWorkerThread = async _tc => {
  * @param {t.TestCase} _tc
  */
 export const testMergeUpdatesKeepsDeletedContent = async _tc => {
-  const pool = createComputePool({ poolSize: 2 })
+  const pool = createComputePool({ maxThreads: 2 })
   /**
    * @param {string} padding long enough to leave the inline path (> 5120 bytes)
    */

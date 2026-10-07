@@ -189,7 +189,7 @@ export default {
       name: 'Structured-clone a buffer of size S to a compute worker',
       /** @param {{ report: import('../report.js').Reporter }} ctx */
       run: async ({ report }) => {
-        const pool = createComputePool({ poolSize: 1 })
+        const pool = createComputePool({ maxThreads: 1 })
         try {
           for (const targetBytes of config.scale.primitiveDocSizes) {
             const { gcUpdate } = getFixture({ targetBytes })

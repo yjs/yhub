@@ -13,6 +13,7 @@ import { redisClockToMs } from './stream.js'
 // time, never during module evaluation
 import { apiError, checkPermissions, encodedAny } from './api.js'
 import { createContentMap } from './y-utils.js'
+import { isComputeQueueFull } from './compute.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'api' })
@@ -54,8 +55,9 @@ const ydocEndpoint = createApiEndpoint('ydoc', {
         }
         return body
       } catch (err) {
-        // a deleted document is not a server error - registerApi turns this into a 404
-        if (err instanceof DocDeletedError) throw err
+        // a deleted document is not a server error - registerApi turns this into a 404, and a full
+        // compute queue into a 503
+        if (err instanceof DocDeletedError || isComputeQueueFull(err)) throw err
         log.error({ err, docRef: req.docRef }, 'error handling ydoc request')
         throw apiError(500, 'Failed to retrieve document')
       }
@@ -192,9 +194,9 @@ const changesetEndpoint = createApiEndpoint('changeset', {
           return req.yhub.computePool.changeset({ nongcDoc, contentmapBin, from: from === 0 ? null : from, to: to === number.MAX_SAFE_INTEGER ? null : to, by, withCustomAttributions, includeYdoc, includeDelta, includeAttributions }, { docRef })
         }))
       } catch (err) {
-        // before the log: a deleted document is not a server error, and polling one should not
-        // fill the error log. registerApi turns this into a 404.
-        if (err instanceof DocDeletedError) throw err
+        // before the log: a deleted document is not a server error, and polling one should not fill
+        // the error log. registerApi turns this into a 404, and a full compute queue into a 503.
+        if (err instanceof DocDeletedError || isComputeQueueFull(err)) throw err
         log.error({ err, docRef }, 'error handling changeset request')
         throw apiError(500, 'Failed to compute changeset')
       }
@@ -268,7 +270,7 @@ const activityEndpoint = createApiEndpoint('activity', {
         }))
       } catch (err) {
         // see the changeset endpoint
-        if (err instanceof DocDeletedError) throw err
+        if (err instanceof DocDeletedError || isComputeQueueFull(err)) throw err
         log.error({ err, docRef }, 'error handling activity request')
         throw apiError(500, 'Failed to compute activity')
       }

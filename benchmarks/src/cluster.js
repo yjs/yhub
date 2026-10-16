@@ -1,4 +1,5 @@
 import { fork } from 'node:child_process'
+import * as path from 'node:path'
 import { createClient } from 'redis'
 import postgres from 'postgres'
 import * as promise from 'lib0/promise'
@@ -14,7 +15,7 @@ import { sumProcessMetrics } from './metrics.js'
  * so a full sweep does not pay a boot per row.
  */
 
-const hubEntry = new URL('./proc/hub.js', import.meta.url).pathname
+const hubEntry = path.join(import.meta.dirname, 'proc/hub.js')
 
 /**
  * @param {any} child

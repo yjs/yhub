@@ -1,4 +1,5 @@
 import { fork } from 'node:child_process'
+import * as path from 'node:path'
 import * as Y from '@y/y'
 import * as promise from 'lib0/promise'
 import { mergeUpdates } from '../../../src/y-utils.js'
@@ -91,7 +92,7 @@ export const runY14 = () => {
  * cannot be made inside one process.
  */
 const runNative = () => promise.create((resolve, reject) => {
-  const child = fork(new URL('../proc/y-native.js', import.meta.url).pathname, [], {
+  const child = fork(path.join(import.meta.dirname, '../proc/y-native.js'), [], {
     env: { ...process.env, USE_Y_NATIVE: '1' },
     execArgv: ['--expose-gc', '--max-old-space-size=8192'],
     stdio: ['ignore', 'inherit', 'inherit', 'ipc']

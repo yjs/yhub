@@ -1,5 +1,5 @@
 import * as fs from 'node:fs'
-import { Transform } from 'node:stream'
+import { Readable } from 'node:stream'
 import { monitorEventLoopDelay } from 'node:perf_hooks'
 
 /**
@@ -66,12 +66,13 @@ export const countS3Ops = (plugin, counters) => {
   client.getObject = async (...args) => {
     counters.gets++
     const stream = await get(...args)
-    // count through a Transform rather than a 'data' listener: a listener would
-    // put the stream into flowing mode and race the caller's `for await`
-    const counting = new Transform({
-      transform (chunk, _enc, cb) { counters.getBytes += chunk.length; cb(null, chunk) }
-    })
-    return stream.pipe(counting)
+    const counted = async function * () {
+      for await (const chunk of stream) {
+        counters.getBytes += chunk.length
+        yield chunk
+      }
+    }
+    return Readable.from(counted())
   }
   /** @param {any[]} args */
   client.removeObject = (...args) => {

@@ -17,19 +17,27 @@ import { logger, describeUrl } from './logger.js'
 const log = logger.child({ module: 'persistence' })
 
 /**
- * @param {string} postgresUrl - postgres://username:password@host:port/database
+ * @param {string|undefined} postgresUrl - postgres://username:password@host:port/database
  * @param {t.PersistencePlugin[]} plugins
  * @param {import('postgres').Options<{}>} [postgresOptions] - spread over the defaults
  */
 export const createPersistence = async (postgresUrl, plugins, postgresOptions) => {
-  // parsed before connecting, so a malformed url fails here rather than inside the catch below
-  const endpoint = describeUrl(postgresUrl)
   // If a specific database is requested, ensure it exists
-  const sql = postgres(postgresUrl, { connect_timeout: 60, ...postgresOptions })
+  const opts = { connect_timeout: 60, ...postgresOptions }
+  const sql = postgresUrl ? postgres(postgresUrl, opts) : postgres(opts)
   try {
     await sql`SELECT 1 as connected`
   } catch (err) {
-    throw new Error(`Can't connect to postgres at ${endpoint.hostname}:${endpoint.port}/${endpoint.database}.\n${err}`)
+    // Only parse URL if it exists.
+    // It's also possible to configure the `postgres` library with custom
+    // env variables, i.e. `PGHOST` et al.. This is relevant for e.g.
+    // UNIX socket authentication.
+    if (postgresUrl) {
+      const endpoint = describeUrl(postgresUrl)
+      throw new Error(`Can't connect to postgres at ${endpoint.hostname}:${endpoint.port}/${endpoint.database}.\n${err}`)
+    } else {
+      throw new Error('Can\'t connect to postgres. A DB URL couldn\'t be read from env or CLI')
+    }
   }
   return new Persistence(sql, plugins)
 }

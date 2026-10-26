@@ -102,7 +102,7 @@ const initTables = async sql => {
  * @param {string} postgresUrl - postgres://username:password@host:port/database
  */
 async function init (postgresUrl) {
-  log.info({ postgres: describeUrl(postgresUrl) }, 'initializing database')
+  log.info({ postgres: postgresUrl ? describeUrl(postgresUrl) : 'configured from env' }, 'initializing database')
   // Extract database from URL path
   const database = new URL(postgresUrl).pathname.slice(1)
   if (database !== '') {
@@ -140,7 +140,7 @@ async function init (postgresUrl) {
   } finally {
     await sql.end({ timeout: 5 })
   }
-  log.info({ postgres: describeUrl(postgresUrl) }, 'initialization done')
+  log.info({ postgres: postgresUrl ? describeUrl(postgresUrl) : 'configured from env' }, 'initialization done')
 }
 
 /**

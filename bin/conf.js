@@ -38,7 +38,11 @@ export const conf = {
     taskDebounce: number.parseInt(env.getConf('redis-task-debounce') || '10000'),
     minMessageLifetime: number.parseInt(env.getConf('redis-min-message-lifetime') || '60000')
   },
-  postgres: env.ensureConf('postgres'),
+  // Postgres is optional (i.e. no ensureConf) on purpose since it's also
+  // possible to configure the 'postgres' library via environment variables,
+  // i.e. PGHOST et al.. This is relevant for advanced use-cases such as connection
+  // via UNIX domain-socket.
+  postgres: env.getConf('postgres') ?? undefined,
   persistence: bucket == null
     ? []
     : [

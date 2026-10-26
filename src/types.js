@@ -614,7 +614,7 @@ export const $config = s.$object({
      */
     socket: /** @type {s.$Optional<s.Schema<import('@redis/client').RedisClientOptions['socket']>>} */ (s.$any.optional)
   }),
-  postgres: s.$string,
+  postgres: s.$string.optional,
   /**
    * Options passed to the postgres.js client, spread over yhub's `{ connect_timeout: 60 }` - e.g.
    * `{ max: 20, idle_timeout: 60, connection: { statement_timeout: 30000 } }`. See API.md.

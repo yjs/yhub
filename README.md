@@ -198,6 +198,9 @@ S3_YHUB_BUCKET=yhub               # Bucket for document storage
 POSTGRES=postgres://user:pass@localhost:5432/yhub
 ```
 
+For configuration via UNIX domain-socket it's recommended to leave `POSTGRES`
+unset and use the [environment variables from the 'postgres'-library instead.](https://github.com/porsager/postgres#environmental-variables)
+
 ### Optional Settings
 
 ```bash

@@ -581,9 +581,6 @@ export class YHub {
  */
 export const createYHub = async conf => {
   t.$config.expect(conf)
-  // parsed here, before the redis client sees the url: node's ERR_INVALID_URL carries the
-  // offending string - password included - in `err.input`, which pino copies onto the log record
-  const postgres = describeUrl(conf.postgres)
   const redis = describeUrl(conf.redis.url)
   // sanitize conf
   if (conf.server) {
@@ -602,7 +599,7 @@ export const createYHub = async conf => {
   }
   log.info({
     redisPrefix: conf.redis.prefix,
-    postgres,
+    postgres: conf.postgres ? describeUrl(conf.postgres) : 'configured from env',
     redis,
     pluginCount: conf.persistence.length,
     workerConcurrency: conf.worker?.taskConcurrency ?? null,

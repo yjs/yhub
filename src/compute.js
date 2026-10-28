@@ -2,9 +2,8 @@ import { Worker } from 'node:worker_threads'
 import { cpus } from 'node:os'
 import * as s from 'lib0/schema'
 import * as promise from 'lib0/promise'
-import * as Y from '@y/y'
 import * as math from 'lib0/math'
-import { mergeUpdates } from './y-utils.js'
+import { mergeUpdates, computeSyncSteps } from './y-utils.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'compute' })
@@ -28,8 +27,10 @@ const $computeTask = s.$union(
     withCustomAttributions: s.$array(s.$object({ k: s.$string, v: s.$string })).nullable.optional
   }),
   s.$object({
-    type: s.$literal('computeStateVector'),
-    update: s.$uint8Array
+    type: s.$literal('computeSyncSteps'),
+    update: s.$uint8Array,
+    sv: s.$uint8Array,
+    withSv: s.$boolean
   }),
   s.$object({
     type: s.$literal('changeset'),
@@ -143,8 +144,10 @@ class ComputeWorker {
     this._taskTimeout = null
     this.worker.on('message', (result) => {
       const resolve = this._cbResolve
+      const reject = this._cbReject
       finishWorker(this)
-      resolve?.(result)
+      // the thread posts the error of a task that threw (see compute-worker.js)
+      result instanceof Error ? reject?.(result) : resolve?.(result)
       this._logContext = null
       drain(pool)
     })
@@ -363,24 +366,28 @@ class ComputePool {
   }
 
   /**
-   * Computes the state vector from an encoded update.
+   * The server's part of the sync handshake: the diff of `update` against the client's state
+   * vector and - only `withSv` - the state vector of `update` (see `computeSyncSteps` in
+   * y-utils.js).
    *
-   * `encodeStateVectorFromUpdate` is a full linear scan of the update binary
-   * (measured at ~30-40 MB/s), so it runs synchronously for updates < 512kb
-   * (under ~15ms). Larger updates are offloaded to a worker. The buffer can't
-   * be transferred (the caller reuses it for syncStep2), so the main thread
-   * still pays a structured-clone copy on postMessage — but that copy is
-   * ~32x cheaper than the scan (e.g. ~0.8ms vs ~25ms for a 1mb update).
+   * Both are linear scans of the update and the client's state vector, so they run synchronously
+   * when both together are < 512kb, and so does a handshake with nothing to compute (no state
+   * vector for a client without state). Larger ones are offloaded to a worker. The buffer isn't transferred (it may be a view of
+   * a buffer that is still in use), so the main thread still pays a structured-clone copy on
+   * postMessage — but that copy is ~32x cheaper than the scan (e.g. ~0.8ms vs ~25ms for a 1mb
+   * update).
    *
    * @param {Uint8Array<ArrayBuffer>} update
+   * @param {Uint8Array<ArrayBuffer>} clientSv
+   * @param {boolean} withSv
    * @param {Object<string, any>} logContext
-   * @returns {Promise<Uint8Array<ArrayBuffer>>}
+   * @returns {Promise<{ diff: Uint8Array<ArrayBuffer>, sv: Uint8Array<ArrayBuffer>|null }>}
    */
-  computeStateVector (update, logContext = {}) {
-    if (update.byteLength < 512 * 1024) {
-      return promise.resolveWith(Y.encodeStateVectorFromUpdate(update))
+  computeSyncSteps (update, clientSv, withSv, logContext = {}) {
+    if (update.byteLength + clientSv.byteLength < 512 * 1024 || (!withSv && clientSv[0] === 0)) {
+      return promise.resolveWith(computeSyncSteps(update, clientSv, withSv))
     }
-    return this.run({ type: 'computeStateVector', update }, [], logContext)
+    return this.run({ type: 'computeSyncSteps', update, sv: clientSv, withSv }, [], logContext)
   }
 
   /**

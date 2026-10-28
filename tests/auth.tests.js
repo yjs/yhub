@@ -321,6 +321,26 @@ export const testRecheckAuthPendingCheckOnConnect = async tc => {
 }
 
 /**
+ * A connection whose sync step 1 comes late re-checks its permissions unconditionally: until its
+ * initial sync it misses re-checks, which the initial sync replays from the stream - and the
+ * stream keeps them only for `redis.minMessageLifetime`. The revocation here leaves no entry at
+ * all, like one that was trimmed already.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testLateSyncStep1Rechecked = async tc => {
+  resetKickPerms()
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
+  const ws = new WebSocket(`${utils.wsUrlFromPort(kickHubPort)}/${defaultDocRef.docid}?user=dave`)
+  const closed = promise.create(resolve => ws.once('close', resolve))
+  await promise.create(resolve => ws.once('open', resolve))
+  kickPerms.dave = null
+  await promise.wait(yhub.stream.minMessageLifetime / 3)
+  ws.send(utils.syncStep1)
+  t.assert(await closed === wsCloseAuthRevoked, 'the late initial sync re-checked')
+}
+
+/**
  * An auth plugin failure during a recheck must fail closed: the connection whose access can no
  * longer be verified is disconnected - but with the transient close code 1013, not the revoke
  * code 4401, so the client keeps reconnecting and recovers once the auth backend does.

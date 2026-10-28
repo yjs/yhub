@@ -50,6 +50,24 @@ export const mergeUpdates = (gc, updates, prune) => {
 }
 
 /**
+ * The server's part of the sync handshake with a client that sent the state vector `clientSv`:
+ * `diff`, the part of `update` the client lacks (the server's sync step 2), and - only `withSv` -
+ * `sv`, the state vector of `update` (the server's sync step 1). A client without state gets
+ * `update` itself - diffing against an empty state vector would only re-encode the whole
+ * document. An encoded state vector starts with its number of clients as a varuint, whose first
+ * byte is 0 only for 0.
+ *
+ * @param {Uint8Array<ArrayBuffer>} update
+ * @param {Uint8Array<ArrayBuffer>} clientSv
+ * @param {boolean} withSv
+ * @return {{ diff: Uint8Array<ArrayBuffer>, sv: Uint8Array<ArrayBuffer>|null }}
+ */
+export const computeSyncSteps = (update, clientSv, withSv) => ({
+  diff: clientSv[0] === 0 ? update : Y.diffUpdate(update, clientSv),
+  sv: withSv ? Y.encodeStateVectorFromUpdate(update) : null
+})
+
+/**
  * The contentmap of an update: every id it inserts or deletes, attributed to `userid` now plus the
  * caller's custom attributions. The map may cover a whole-document body - `getDoc` keeps only the
  * ids it has not accepted before.

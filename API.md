@@ -33,6 +33,24 @@ version as well.
   * `branch=string`: Optionally, define a custom branch. Changes won't be automatically synced with other branches.
   * `customAttributions=string`: optional comma-separated `key:value` pairs (e.g. `source:ai,model:gpt4`). All updates sent through this connection will include these custom attributions in the contentmap, stored as `insert:<key>` / `delete:<key>` attribution attributes alongside the standard ones.
 
+The initial sync starts with the client's sync step 1, which `@y/websocket` sends on connect;
+every message a client sends before it is ignored. Until its initial sync a connection misses
+[permission re-checks](#yhubrecheckauthdocref-opts); the initial sync replays them from the
+stream, which keeps them only for `redis.minMessageLifetime`. So an initial sync that reads the
+stream later than a third of it after connecting (a late sync step 1, or a slow document load)
+asks `authorize` again unconditionally. The server answers with its own sync step 1
+(only on connections that may write), then with the part of the document the client lacks as
+sync step 2, so a reconnecting client doesn't download the document again. Because the server's
+step 1 comes first, a client without state answers it with an empty update. Updates are accepted
+only from that answer on: the server sends its step 1 once the initial sync checked the
+document's deletion and the permissions. An update sent before it is dropped and isn't lost —
+the server's step 1 predates it, so the answer carries it. A client that
+already holds the document re-sends every delete it knows (a state vector can't describe
+deletes); the deletes the server had already accepted are not appended again, so a reconnect
+neither adds attributions nor lists the document in [updated documents](#updated-documents).
+Later sync step 1 messages (`@y/websocket`'s `resyncInterval`) are ignored: every update reaches
+the client through the stream.
+
 Permissions on the socket (see [Permissions](#permissions)): the websocket route is the endpoint
 named `ws` in the `endpoint` facet (resolved through `'*'` like any other name). The upgrade
 requires ydoc `r` and `endpoint.ws` `r`, and `gc=false` additionally requires full history access
@@ -50,7 +68,8 @@ Every yhub error is either **transient** — retry with backoff — or **permane
 yields the same result until the app acts. Classification is by range, so clients stay correct
 when codes are added:
 
-* **WebSocket:** reconnect with backoff — unless `code >= 4400 && code < 4500`, then stop.
+* **WebSocket:** reconnect with backoff — unless `code >= 4400 && code < 4500`, or the code is one
+  of the standard permanent codes `1002` `1003` `1008` `1009`, then stop.
 * **REST:** retry `5xx` and `429` with backoff; every other `4xx` is permanent.
 
 #### WebSocket close codes
@@ -59,10 +78,11 @@ when codes are added:
 |---|---|---|
 | `4400`–`4499` | permanent yhub errors — `4401` permission revoked: the permissions the socket consumes (the ydoc mask, the awareness mask, the effective `ws` endpoint mask, or `gc=false`'s full-history requirement) changed on a re-check (see [`yhub.recheckAuth`](#yhubrecheckauthdocref-opts); exported as `wsCloseAuthRevoked`), `4404` document deleted (see [`yhub.deleteDoc`](#yhubdeletedocdocref-opts); exported as `wsCloseDocDeleted`) | no — act first (e.g. re-authenticate, or drop the local copy), then reconnect deliberately |
 | `4500`–`4599` | transient yhub errors — `4503` server shutting down (see [`yhub.destroy`](#yhubdestroyopts); exported as `wsCloseDraining`) | yes — another instance behind the load balancer takes the connection |
+| `1009` | permanent error — message too big: the client's sync step 1 carries a state vector of 10% of `server.maxDocSize` or more (see [`createYHub`](#createyhubconfig)) | no — a new connection sends the same state vector; raise `server.maxDocSize` |
 | `1011` | internal error — initial sync, message handling, or stream relay failed | yes |
 | `1013` | try again later — backpressure limit exceeded, `authorize` threw or exceeded `server.authTimeout` during a re-check (the permission backend is down, not the grant revoked), or the initial sync found the compute queue full (see `computePool.maxQueue` in [`createYHub`](#createyhubconfig)) | yes |
-| `1002` `1003` `1008` | standard permanent codes — yhub never sends them | no |
-| *(none)* | closed without a close frame — browsers report `1006`, `@y/websocket` emits `connection-close` with `event = null` | yes |
+| `1002` `1003` `1008` | other standard permanent codes — yhub never sends them | no |
+| *(none)* | closed without a close frame — the client reports `1006` (`@y/websocket` reports `event = null` to `connection-close` when its own socket timeout closed a dead link) | yes |
 
 A missing close frame is routine: a server that was killed instead of shut down with
 [`yhub.destroy`](#yhubdestroyopts) (or whose clients did not acknowledge `4503` within `drainMs`),
@@ -77,16 +97,20 @@ branded `apiError` it threw, e.g. `503` while its backend is down. Browsers can'
 statuses — the client only sees a failed connection attempt. `4401` is the explicit stop signal; a client that ignores it reconnects into a `403`
 loop against your auth backend.
 
-`@y/websocket` reconnects after **every** close, regardless of code — apply the rule in the app:
+`@y/websocket` applies these rules by default (see its `shouldReconnect` option): on a permanent
+close code it stops reconnecting and emits `closed`. The provider is idle, not destroyed —
+`provider.connect()` resumes it once the app acted:
 
 ```js
-provider.on('connection-close', event => {
-  // event == null: closed without a close frame - transient, keep reconnecting
-  if (event != null && event.code >= 4400 && event.code < 4500) {
-    provider.disconnect() // permanent - stop; provider.connect() re-arms after e.g. re-auth
-  }
+provider.on('closed', ({ code, reason }) => {
+  // e.g. 4401 permission revoked: re-authenticate, then reconnect deliberately
+  // await refreshToken()
+  // provider.connect()
 })
 ```
+
+Versions before `4.0.0-rc.4` reconnect after every close, regardless of code — call
+`provider.disconnect()` from a `connection-close` handler instead.
 
 Future yhub close codes follow the band rule: the band is normative, the trailing digits are an
 HTTP mnemonic only — a retryable rate-limit close would be `45xx`, never `4429`.
@@ -1157,7 +1181,7 @@ const yhub = await createYHub(config)
 | `server.auth` | `AuthPlugin` | yes* | Auth plugin created with `createAuthPlugin`: `authenticate(req)` establishes identity, `authorize(scope, resourceId, user)` answers a typed permission object per scope — see [Permissions](#permissions). |
 | `server.api` | `ApiSpec[]` | no | Custom rest endpoints served under `/{apiPrefix}/{name}/{version}/...`, next to the built-in ones. See [Custom API endpoints](#custom-api-endpoints). |
 | `server.apiPrefix` | `string` | no | First path segment under which all endpoints are served — built-in and custom rest endpoints plus the websocket route `/{apiPrefix}/ws/v1/...` — e.g. `'collaboration'` → `/collaboration/{name}/{version}/...`. A single path segment. Default: `'api'` |
-| `server.maxDocSize` | `number` | no | Maximum Ydoc size in bytes, used for WebSocket payload limits (`maxPayloadLength`, and `maxBackpressure` at 1.2x). Updates are never split across frames, so this must exceed the largest document — a client that sends a bigger frame is closed with 1009. Default: 500 MB |
+| `server.maxDocSize` | `number` | no | Maximum Ydoc size in bytes, used for WebSocket payload limits (`maxPayloadLength`, and `maxBackpressure` at 1.2x). Updates are never split across frames, so this must exceed the largest document — a client that sends a bigger frame is disconnected without a close frame (the client reports `1006`). One whose sync step 1 carries a state vector of 10% of it or more is closed with the permanent `1009`. Default: 500 MB |
 | `server.wsKeepAliveInterval` | `number \| null` | no | Milliseconds without a message to a client after which the server sends it an empty awareness message (zero entries — it carries no presence, so every connection gets it regardless of the awareness facet). Clients reconnect when they receive nothing for a while (`@y/websocket`: `socketTimeout`, 45 s), and websocket pings don't reach client code, so an idle document would reconnect-loop without it. `null` disables. Default: `20000` |
 | `server.authTimeout` | `number` | no | Milliseconds the auth plugin's `authenticate` and `authorize` may take. A hook that doesn't settle in time is abandoned: rest requests answer `503 { error: 'auth timeout', code: 'auth-timeout' }`, the websocket upgrade `503`, and a [re-check](#yhubrecheckauthdocref-opts) closes the live socket with `1013`. All three are transient, so clients retry. The timeout applies per call — a request that issues several ([`GET /updated`](#updated-documents) asks `authorize` once per listed document) can take several. Must be finite: Node runs a delay above 2³¹−1 ms (about 24.8 days) after 1 ms, so `Infinity` would time out every call. Default: `10000` |
 | `server.maxVersionSize` | `number` | no | Maximum size of the client's part of a [named version](#versions) — the characters of its `name` plus the bytes of its lib0-any encoded `custom` data; larger writes answer `413`. Versions ride along in activity responses. Default: 64 KB |

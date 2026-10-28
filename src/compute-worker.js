@@ -2,7 +2,7 @@ import { parentPort } from 'node:worker_threads'
 import * as Y from '@y/y'
 import * as encoding from 'lib0/encoding'
 import * as delta from 'lib0/delta'
-import { createContentMap, mergeUpdates } from './y-utils.js'
+import { createContentMap, mergeUpdates, computeSyncSteps } from './y-utils.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'compute-worker' })
@@ -51,7 +51,11 @@ const filterContentMap = (contentMap, from, to, by, requestedIds, customAttribut
 }
 
 const port = parentPort
-port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg => {
+
+/**
+ * @param {import('./compute.js').ComputeTask} msg
+ */
+const runTask = msg => {
   log.debug({ type: msg.type }, 'new compute task')
   switch (msg.type) {
     case 'mergeUpdates': {
@@ -74,9 +78,9 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       }
       break
     }
-    case 'computeStateVector': {
-      const result = Y.encodeStateVectorFromUpdate(msg.update)
-      port.postMessage(result, [result.buffer])
+    case 'computeSyncSteps': {
+      const result = computeSyncSteps(msg.update, msg.sv, msg.withSv)
+      port.postMessage(result, result.sv === null ? [result.diff.buffer] : [result.diff.buffer, result.sv.buffer])
       break
     }
     case 'changeset': {
@@ -323,5 +327,15 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       }
       break
     }
+  }
+}
+
+port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg => {
+  try {
+    runTask(msg)
+  } catch (err) {
+    // a task that throws - on malformed input, like a client's state vector - fails alone: the
+    // error rejects it (see `ComputeWorker`) and the thread stays alive for the next task
+    port.postMessage(err)
   }
 })

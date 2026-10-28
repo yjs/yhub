@@ -177,6 +177,25 @@ const batchFrames = new WeakMap()
  */
 export class WSUser {
   /**
+   * `syncStep`: no sync step received - every message but the client's sync step 1 is ignored.
+   */
+  static syncStepNone = /** @type {const} */ (0)
+  /**
+   * `syncStep`: the client's sync step 1 was received and started `initialSync`.
+   */
+  static syncStep1Received = /** @type {const} */ (1)
+  /**
+   * `syncStep`: `initialSync` passed its checks and sent our sync step 1. A connection that may not
+   * write is sent none and stays at `syncStep1Received`.
+   */
+  static syncStep1Sent = /** @type {const} */ (2)
+  /**
+   * `syncStep`: the client's sync step 2 answered our sync step 1 - only from now on are its
+   * updates accepted.
+   */
+  static syncStep2Received = /** @type {const} */ (3)
+
+  /**
    * @param {import('./index.js').YHub} yhub
    * @param {uws.WebSocket<{ user: WSUser }>|null} ws
    * @param {import('./types.js').DocRef} docRef
@@ -224,6 +243,25 @@ export class WSUser {
     this.isClosed = false
     this.isDestroyed = false
     this.lastReceivedClock = '0'
+    /**
+     * How far the sync handshake got - one of the `WSUser.syncStep*` constants.
+     *
+     * @type {0|1|2|3}
+     */
+    this.syncStep = WSUser.syncStepNone
+    /**
+     * The encoded content ids the server had accepted when it sent this connection its sync step
+     * 1, held until the client's sync step 2 answers it - only their deletes are used, see
+     * `initialSync`. Kept as the binary `getDoc` returns: decoding waits for the answer.
+     *
+     * @type {Uint8Array<ArrayBuffer>|null}
+     */
+    this.syncContentIds = null
+    /**
+     * Unix ms the websocket was created at - a late initial sync re-checks the permissions, see
+     * `initialSync`.
+     */
+    this.createdAt = time.getUnixTime()
     /**
      * Unix ms of the last message sent to the client - see `keepAlive`.
      */
@@ -288,6 +326,14 @@ export class WSUser {
         frames.awareness !== null && this.sendData(frames.awareness)
       }
     }
+  }
+
+  /**
+   * Whether the document updates of this connection are accepted: ydoc `u` together with
+   * endpoint `ws` `u`.
+   */
+  get mayUpdate () {
+    return this.permissions.ydoc[2] === 'u' && endpointPermission(this.permissions, 'ws')[2] === 'u'
   }
 
   /**
@@ -399,6 +445,80 @@ export class WSUser {
 }
 
 /**
+ * Answer the client's sync step 1 (its state vector `clientSv`): send a connection that may
+ * write our own sync step 1, then the part of the document the client lacks as sync step 2,
+ * then subscribe to the stream.
+ *
+ * Step 1 goes first, so the client answers it before it applied our step 2: a client without
+ * state answers with an empty update. A client that already holds the document still re-sends
+ * every delete it knows - a state vector can't describe deletes - so the deletes we had
+ * already accepted are kept in `syncContentIds` until that answer arrives and are not appended
+ * again (see the sync message handler). The client's updates are accepted only from that answer
+ * on (`WSUser.syncStep2Received`): our step 1 is sent once the checks below passed.
+ *
+ * @param {WSUser} user
+ * @param {Uint8Array<ArrayBuffer>} clientSv
+ */
+const initialSync = async (user, clientSv) => {
+  try {
+    const mayUpdate = user.mayUpdate
+    const doctable = await user.yhub.getDoc(user.docRef, { gc: user.gc, nongc: !user.gc, awareness: user.permissions.awareness[1] === 'r', contentids: mayUpdate }, { gcOnMerge: false })
+    // also the upgrade-time check: a reconnecting client is refused here, and so is one whose
+    // document was deleted between the upgrade and this initial sync - a window the stream
+    // cannot cover, because `lastReceivedClock` is only set below
+    if (doctable.tombstone != null) {
+      user.log.info('document deleted, refusing to sync')
+      user.closeDocDeleted()
+      return
+    }
+    const ydoc = doctable.gcDoc || doctable.nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
+    const { diff, sv } = await user.yhub.computePool.computeSyncSteps(ydoc, clientSv, mayUpdate, { docRef: user.docRef })
+    // the initial `lastReceivedClock` (below) is past any pending auth:check entry, so a
+    // check added between the upgrade's auth check and the stream read above would be
+    // silently consumed - re-check once here instead. `forceDisconnect` entries are
+    // deliberately replayed as a plain re-check: kicking on replay would loop a
+    // legitimately re-authorized user until the entry ages out of the stream.
+    // The stream keeps those entries only for `redis.minMessageLifetime`, so a late initial
+    // sync - a client that sent its sync step 1 late, or a slow document load - re-checks
+    // unconditionally: the entries it missed may be trimmed already. Late is a third of it after
+    // the websocket was created; the margin covers a check issued while the upgrade was still
+    // being authorized.
+    if (time.getUnixTime() - user.createdAt > user.yhub.stream.minMessageLifetime / 3 || doctable.authChecks.some(m => m.users == null || m.users.some(u => matchesAuthInfo(u, user.authInfo)))) {
+      await user.recheckAuth()
+    }
+    if (user.isClosed) return
+    // the content ids hold every id the server ever accepted - gc'd and pruned content too
+    user.syncContentIds = doctable.contentids
+    user.ws?.cork(() => {
+      if (sv !== null) {
+        user.sendData(protocol.encodeSyncStep1(sv))
+        user.syncStep = WSUser.syncStep1Sent
+      }
+      user.sendData(protocol.encodeSyncStep2(diff))
+      user.log.debug('sent syncstep2 to client')
+      const aw = doctable.awareness
+      if (aw != null && aw.byteLength > 3) {
+        user.sendData(aw)
+      }
+    })
+    // a backpressure close in `sendData` above destroyed the user already - subscribing it now
+    // would leak it: `destroy` unsubscribed before there was anything to unsubscribe
+    if (user.isDestroyed) return
+    user.lastReceivedClock = doctable.streamClock
+    user.yhub.stream.subscribe(user.docRef, user)
+    user.keepAlive()
+  } catch (err) {
+    if (isComputeQueueFull(err)) {
+      // overload, not a failure - the pool logged it already
+      user.close(1013, 'compute queue full')
+    } else {
+      user.log.error({ err }, 'failed to sync initial document')
+      user.closeWithError(1011, 'Internal error')
+    }
+  }
+}
+
+/**
  * @param {YHubServer} server
  * @param {string} prefix
  * @param {import('./cors.js').ResolvedCors|null} cors
@@ -473,57 +593,15 @@ const registerWebsocketServer = (server, prefix, cors) => {
         }
       }
     },
-    open: async (ws) => {
+    open: (ws) => {
       const user = ws.getUserData().user
       user.ws = ws
       server.users.add(user)
       user.log.info({ ip: Buffer.from(ws.getRemoteAddressAsText()).toString() }, 'client connected')
-      // the upgrade was still being authorized when the server started shutting down
+      // the upgrade was still being authorized when the server started shutting down. Otherwise
+      // the initial sync waits for the client's sync step 1 - see `initialSync`.
       if (server.isDestroyed) {
         user.close(wsCloseDraining, 'server shutting down')
-        return
-      }
-      try {
-        const doctable = await yhub.getDoc(user.docRef, { gc: user.gc, nongc: !user.gc, awareness: user.permissions.awareness[1] === 'r' }, { gcOnMerge: false })
-        // also the upgrade-time check: a reconnecting client is refused here, and so is one whose
-        // document was deleted between the upgrade and this initial sync - a window the stream
-        // cannot cover, because `lastReceivedClock` is only set below
-        if (doctable.tombstone != null) {
-          user.log.info('document deleted, refusing to sync')
-          user.closeDocDeleted()
-          return
-        }
-        const ydoc = doctable.gcDoc || doctable.nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
-        const sv = await yhub.computePool.computeStateVector(ydoc, { docRef: user.docRef })
-        // the initial `lastReceivedClock` (below) is past any pending auth:check entry, so a
-        // check added between the upgrade's auth check and the stream read above would be
-        // silently consumed - re-check once here instead. `forceDisconnect` entries are
-        // deliberately replayed as a plain re-check: kicking on replay would loop a
-        // legitimately re-authorized user until the entry ages out of the stream.
-        if (doctable.authChecks.some(m => m.users == null || m.users.some(u => matchesAuthInfo(u, user.authInfo)))) {
-          await user.recheckAuth()
-        }
-        if (user.isClosed) return
-        ws.cork(() => {
-          user.sendData(protocol.encodeSyncStep1(sv))
-          user.sendData(protocol.encodeSyncStep2(ydoc))
-          user.log.debug('sent syncstep2 to client')
-          const aw = doctable.awareness
-          if (aw != null && aw.byteLength > 3) {
-            user.sendData(aw)
-          }
-        })
-        user.lastReceivedClock = doctable.streamClock
-        yhub.stream.subscribe(user.docRef, user)
-        user.keepAlive()
-      } catch (err) {
-        if (isComputeQueueFull(err)) {
-          // overload, not a failure - the pool logged it already
-          user.close(1013, 'compute queue full')
-        } else {
-          user.log.error({ err }, 'failed to sync initial document')
-          user.closeWithError(1011, 'Internal error')
-        }
       }
     },
     message: (ws, messageBuffer) => {
@@ -541,28 +619,64 @@ const registerWebsocketServer = (server, prefix, cors) => {
         const decoder = decoding.createDecoder(message)
         switch (decoding.readVarUint(decoder)) {
           case 0: { // sync message
+            const syncMessageType = decoding.readVarUint(decoder)
+            if (syncMessageType === protocol.messageSyncStep1) {
+              // the client's state vector starts the initial sync. Later ones (y-websocket's
+              // `resyncInterval`) are ignored: the stream relays every update to the client.
+              if (user.syncStep === WSUser.syncStepNone) {
+                const clientSv = /** @type {Uint8Array<ArrayBuffer>} */ (decoding.readVarUint8Array(decoder))
+                // a state vector takes a few bytes per client - a huge one would only burn the
+                // cpu that decodes it
+                if (clientSv.byteLength >= maxDocSize / 10) {
+                  user.log.warn({ size: clientSv.byteLength }, 'state vector too large, closing')
+                  user.close(1009, 'state vector too large')
+                  return
+                }
+                user.syncStep = WSUser.syncStep1Received
+                initialSync(user, clientSv)
+              }
+              break
+            }
             // silently dropped without update access on both the data (ydoc `u`) and the route
             // (endpoint `ws` `u`) - same treatment as the old blanket gate
-            if (user.permissions.ydoc[2] !== 'u' || endpointPermission(user.permissions, 'ws')[2] !== 'u') return
-            const syncMessageType = decoding.readVarUint(decoder)
+            if (!user.mayUpdate) return
             if (syncMessageType === protocol.messageSyncUpdate || syncMessageType === protocol.messageSyncStep2) {
+              /**
+               * @type {Uint8Array<ArrayBuffer>|null}
+               */
+              let syncContentIds = null
+              // updates are accepted only from the client's answer to our sync step 1 on: before it,
+              // the initial sync hadn't checked the document's deletion and the permissions, nor
+              // subscribed to the stream. A dropped update isn't lost - our sync step 1 predates
+              // it, so the answer carries it.
+              if (user.syncStep < WSUser.syncStep2Received) {
+                if (user.syncStep !== WSUser.syncStep1Sent || syncMessageType !== protocol.messageSyncStep2) return
+                // released before the size check: a client without state answers with an empty update
+                user.syncStep = WSUser.syncStep2Received
+                syncContentIds = user.syncContentIds
+                user.syncContentIds = null
+              }
               const update = decoding.readVarUint8Array(decoder)
               if (update.byteLength > 3) {
+                let contentids = Y.createContentIdsFromUpdate(update)
+                // the answer re-sends every delete the client knows - only those we hadn't
+                // accepted yet are its own
+                if (syncContentIds !== null) contentids = Y.createContentIds(contentids.inserts, Y.diffIdSet(contentids.deletes, Y.decodeContentIds(syncContentIds).deletes))
+                if (contentids.inserts.isEmpty() && contentids.deletes.isEmpty()) return
                 // an anonymous socket never holds ydoc `u` and ws `u` together (upgrade invariant,
                 // kept by recheckAuth: a newly granted mask differs from the stored one and closes
                 // the connection)
-                const contentmap = createContentMap(Y.createContentIdsFromUpdate(update), /** @type {string} */ (user.userid), user.customAttributions)
+                const contentmap = createContentMap(contentids, /** @type {string} */ (user.userid), user.customAttributions)
                 yhub.stream.addMessage(user.docRef, { type: 'ydoc:update:v1', contentmap, update }).catch(handleErr)
               }
-            } else if (syncMessageType === protocol.messageSyncStep1) {
-              // can be safely ignored because we send the full initial state at the beginning
             } else {
               user.log.warn({ syncMessageType }, 'unknown sync message type')
             }
             break
           }
           case 1: { // awareness message - read-only connections may broadcast presence when granted
-            if (user.permissions.awareness[2] !== 'u') return
+            // ignored before the client's sync step 1
+            if (user.syncStep === WSUser.syncStepNone || user.permissions.awareness[2] !== 'u') return
             const update = decoding.readVarUint8Array(decoder)
             const awDecoder = decoding.createDecoder(update)
             const alen = decoding.readVarUint(awDecoder) // number of awareness updates

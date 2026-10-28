@@ -534,6 +534,28 @@ export const testTaskTimeoutKillsWorkerThread = async _tc => {
 }
 
 /**
+ * A task that throws - here on a malformed state vector, which comes from a client - rejects with
+ * the error, and the thread stays alive for the next task.
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testFailingTaskKeepsWorkerThread = async _tc => {
+  const doc = new Y.Doc()
+  doc.get('test').insert(0, 'a')
+  const update = Y.encodeStateAsUpdate(doc)
+  const pool = createComputePool({ maxThreads: 1 })
+  const err = await pool.run({ type: 'computeSyncSteps', update, sv: new Uint8Array([2, 5]), withSv: false }, [], {}).then(() => null, err => err)
+  t.assert(err instanceof Error && err.message === 'Unexpected end of array', 'the task rejects with the error')
+  const worker = pool.workers[0]
+  t.assert(!worker.isDead, 'the thread survived')
+  const { diff } = await pool.run({ type: 'computeSyncSteps', update, sv: Y.encodeStateVector(new Y.Doc()), withSv: false }, [], {})
+  t.assert(pool.workers[0] === worker, 'the same thread runs the next task')
+  t.compare(diff, update)
+  doc.destroy()
+  await pool.destroy()
+}
+
+/**
  * The queue is bounded: with one thread and `maxQueue: 1`, the first task runs, the second waits
  * and the third is rejected right away. The admitted tasks are unaffected.
  *
@@ -585,6 +607,7 @@ export const testComputeQueueFullIsTransient = async tc => {
     t.compare(buffer.decodeAny(new Uint8Array(await res.arrayBuffer())), { error: 'compute queue full', code: 'compute-queue-full' })
   }
   const ws = new WebSocket(`${utils.wsUrlFromPort(queueFullPort)}/${defaultDocRef.docid}`)
+  ws.on('open', () => ws.send(utils.syncStep1))
   const closed = await promise.create(resolve => ws.once('close', (code, reason) => resolve({ code, reason: reason.toString() })))
   t.compare(closed, { code: 1013, reason: 'compute queue full' })
   doc.destroy()

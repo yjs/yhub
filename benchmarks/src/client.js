@@ -1,4 +1,5 @@
 import { WebSocket } from 'ws'
+import * as Y from '@y/y'
 import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 import * as promise from 'lib0/promise'
@@ -14,13 +15,18 @@ import { makeNonceUpdate } from './fixtures.js'
  * memory. This reads the leading varuints of each frame, records the syncStep2
  * byte count and arrival time, and discards the payload without ever copying it.
  *
- * This is protocol-legal rather than a shortcut: the server ignores client
- * syncStep1 (`src/server.js:789`) and reacts only to syncStep2/syncUpdate, so a
- * passive client never owes the server a diff. A few real `@y/websocket` clients
- * are run alongside (see `verify.js`) to confirm edits actually arrive.
+ * This is protocol-legal rather than a shortcut: on open it sends the syncStep1 of
+ * a client without state, which starts the server's initial sync and gets it the
+ * whole document as syncStep2. It answers the server's syncStep1 with the empty
+ * update a client without state answers with: the server drops it, but accepts
+ * a client's updates only once it arrived. A few real `@y/websocket` clients are
+ * run alongside (see `verify.js`) to confirm edits actually arrive.
  */
 
 const MAX_PAYLOAD = 500 * 1024 * 1024
+
+const syncStep1 = protocol.encodeSyncStep1(Y.encodeStateVector(new Y.Doc()))
+const syncStep2 = protocol.encodeSyncStep2(Y.encodeStateAsUpdate(new Y.Doc()))
 
 export class RawClient {
   /**
@@ -61,6 +67,7 @@ export class RawClient {
       this.ws = ws
       ws.binaryType = 'nodebuffer'
       let synced = false
+      ws.on('open', () => ws.send(syncStep1))
       ws.on('message', /** @param {Buffer} data */ data => {
         this.bytesReceived += data.length
         const decoder = decoding.createDecoder(data)
@@ -68,7 +75,9 @@ export class RawClient {
         if (messageType === protocol.messageSync) {
           const syncType = decoding.readVarUint(decoder)
           const len = decoding.readVarUint(decoder)
-          if (syncType === protocol.messageSyncStep2 && !synced) {
+          if (syncType === protocol.messageSyncStep1) {
+            ws.send(syncStep2)
+          } else if (syncType === protocol.messageSyncStep2 && !synced) {
             synced = true
             this.syncBytes = len
             this.syncTimeMs = performance.now() - started

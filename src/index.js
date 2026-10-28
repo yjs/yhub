@@ -330,7 +330,7 @@ export class YHub {
     const contentmap = persistedDoc.contentmap?.map(Y.decodeContentMap)
     const contentids = /** @type {Array<Uint8Array>} */ (persistedDoc.contentids).map(Y.decodeContentIds)
     const references = persistedDoc.references
-    const awareness = /** @type {Include['awareness'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.awareness ? protocol.mergeAwarenessUpdates(cachedMessages.messages.filter(m => m.type === 'awareness:v1').map(m => m.update)) : null)
+    const awareness = /** @type {t.IfHasConf<Include, 'awareness', Uint8Array<ArrayBuffer>>} */ (includeContent.awareness ? protocol.mergeAwarenessUpdates(cachedMessages.messages.filter(m => m.type === 'awareness:v1').map(m => m.update)) : null)
     // `streamClock` is the last stream entry read, of any type - where a subscriber resumes.
     // `lastClock` is the last message that changed the document - what compaction persists at
     // and what the updated-documents listing reports; awareness after it doesn't count.
@@ -376,10 +376,10 @@ export class YHub {
     }
     const pruneBin = pruneSet != null ? Y.encodeIdSet(pruneSet) : undefined
     return {
-      gcDoc: /** @type {Include['gc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (gcDoc ? await this.computePool.mergeUpdates(gcOnMerge, gcDoc, { docRef }) : null),
-      nongcDoc: /** @type {Include['nongc'] extends true ? Uint8Array<ArrayBuffer> : null} */ (nongcDoc ? await this.computePool.mergeUpdates(false, nongcDoc, { docRef }, pruneBin) : null),
-      contentmap: /** @type {Include['contentmap'] extends true ? Uint8Array<ArrayBuffer> : null} */ (mergedContentmap != null ? Y.encodeContentMap(mergedContentmap) : null),
-      contentids: /** @type {Include['contentids'] extends true ? Uint8Array<ArrayBuffer> : null} */ (includeContent.contentids === true ? Y.encodeContentIds(mergedCids) : null),
+      gcDoc: /** @type {t.IfHasConf<Include, 'gc', Uint8Array<ArrayBuffer>>} */ (gcDoc ? await this.computePool.mergeUpdates(gcOnMerge, gcDoc, { docRef }) : null),
+      nongcDoc: /** @type {t.IfHasConf<Include, 'nongc', Uint8Array<ArrayBuffer>>} */ (nongcDoc ? await this.computePool.mergeUpdates(false, nongcDoc, { docRef }, pruneBin) : null),
+      contentmap: /** @type {t.IfHasConf<Include, 'contentmap', Uint8Array<ArrayBuffer>>} */ (mergedContentmap != null ? Y.encodeContentMap(mergedContentmap) : null),
+      contentids: /** @type {t.IfHasConf<Include, 'contentids', Uint8Array<ArrayBuffer>>} */ (includeContent.contentids === true ? Y.encodeContentIds(mergedCids) : null),
       lastClock,
       streamClock,
       lastPersistedClock: persistedDoc.lastClock,

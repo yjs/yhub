@@ -13,6 +13,7 @@ import postgres from 'postgres'
 import * as object from 'lib0/object'
 import * as types from '../src/types.js'
 import { encodeRoomName } from '../src/stream.js'
+import * as protocol from '../src/protocol.js'
 
 // Clean up test data. Nothing here creates the schema - the databases are expected to be
 // initialized with `npm run dev:up`, exactly like a deployment. The tombstone table matters
@@ -243,6 +244,12 @@ export const yhubHost = `localhost:${yhubPort}`
 export const wsUrl = wsUrlFromPort(yhubPort)
 
 /**
+ * The sync step 1 of a client without state. The server starts the initial sync only once it
+ * received the client's sync step 1, so a raw socket that expects one sends this on open.
+ */
+export const syncStep1 = protocol.encodeSyncStep1(Y.encodeStateVector(new Y.Doc()))
+
+/**
  * @template {boolean} WaitForSync
  * @param {t.TestCase} tc
  * @param {object} params
@@ -280,7 +287,15 @@ const createWsClient = (tc, { docid = 'index', branch = 'main', gc = true, syncA
     provider.awareness.destroy()
   }
   if (waitForSync) {
-    return /** @type {WaitForSync extends true ? Promise<{ ydoc: Y.Doc, provider: WebsocketProvider }> : { ydoc: Y.Doc, provider: WebsocketProvider }} */ (ydoc.whenSynced.then(() => ({ ydoc, provider })))
+    // a client that never syncs (e.g. refused, and reconnecting forever) fails the test instead
+    // of hanging the suite
+    return /** @type {WaitForSync extends true ? Promise<{ ydoc: Y.Doc, provider: WebsocketProvider }> : { ydoc: Y.Doc, provider: WebsocketProvider }} */ (promise.create((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('failed to sync')), 60_000)
+      ydoc.whenSynced.then(() => {
+        clearTimeout(timeout)
+        resolve({ ydoc, provider })
+      })
+    }))
   }
   return /** @type {WaitForSync extends true ? Promise<{ ydoc: Y.Doc, provider: WebsocketProvider }> : { ydoc: Y.Doc, provider: WebsocketProvider }} */ ({ ydoc, provider })
 }

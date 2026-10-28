@@ -7,8 +7,8 @@ import WebSocket from 'ws'
 import * as utils from './utils.js'
 import * as types from '../src/types.js'
 import * as protocol from '../src/protocol.js'
-import { WSUser } from '../src/server.js'
-import { mergeUpdates } from '../src/y-utils.js'
+import { WSUser, wsCloseDocDeleted } from '../src/server.js'
+import { mergeUpdates, createContentMap } from '../src/y-utils.js'
 import { normalizeDocumentPermissions } from '../src/permissions.js'
 
 const keepAlivePort = utils.testHubPort(10)
@@ -29,6 +29,14 @@ await utils.createTestHub({
       })
     })
   }
+})
+
+const smallDocPort = utils.testHubPort(13)
+
+// backpressure limit at 1.2 MB: a larger document trips it during the initial sync
+const smallDocHub = await utils.createTestHub({
+  worker: null,
+  server: { ...utils.yhub.conf.server, port: smallDocPort, maxDocSize: 1_000_000 }
 })
 
 /**
@@ -313,6 +321,7 @@ export const testStreamBatchEncodedOnce = async tc => {
 export const testKeepAlive = async tc => {
   const { defaultDocRef } = await utils.createTestCase(tc)
   const ws = new WebSocket(`${utils.wsUrlFromPort(keepAlivePort)}/${defaultDocRef.docid}`)
+  ws.on('open', () => ws.send(utils.syncStep1))
   /**
    * @type {Array<Uint8Array>}
    */
@@ -324,4 +333,279 @@ export const testKeepAlive = async tc => {
   await promise.until(1000, () => awarenessUpdates.length > 0)
   t.assert(decoding.readVarUint(decoding.createDecoder(awarenessUpdates[0])) === 0, 'an awareness update with zero entries')
   ws.close()
+}
+
+/**
+ * The updates `ydoc` sends - its own changes, not the ones the provider applied.
+ *
+ * @param {Y.Doc} ydoc
+ * @param {any} provider
+ */
+const recordEdits = (ydoc, provider) => {
+  /**
+   * @type {Array<Uint8Array<ArrayBuffer>>}
+   */
+  const edits = []
+  ydoc.on('update', (update, origin) => { origin !== provider && edits.push(update) })
+  return edits
+}
+
+/**
+ * @param {Y.ContentIds} a
+ * @param {Y.ContentIds} b
+ */
+const equalContentIds = (a, b) => [Y.excludeContentIds(a, b), Y.excludeContentIds(b, a)].every(d => d.inserts.isEmpty() && d.deletes.isEmpty())
+
+/**
+ * Waits until each of `edits` is on the stream of `docRef`, attributed with exactly its own ids,
+ * then checks that no other update is. Compaction must be disabled for the document, so that
+ * nothing is trimmed meanwhile.
+ *
+ * @param {import('../src/index.js').YHub} yhub
+ * @param {types.DocRef} docRef
+ * @param {Array<Uint8Array<ArrayBuffer>>} edits
+ */
+const expectStreamedEdits = async (yhub, docRef, edits) => {
+  const expected = edits.map(edit => Y.createContentIdsFromUpdate(edit))
+  /**
+   * @type {Array<Y.ContentIds>}
+   */
+  let streamed = []
+  await promise.untilAsync(async () => {
+    const messages = (await yhub.stream.getMessages([{ docRef, clock: '0' }]))[0]?.messages ?? []
+    streamed = messages.flatMap(m => m.type === 'ydoc:update:v1' ? [Y.createContentIdsFromContentMap(Y.decodeContentMap(m.contentmap))] : [])
+    return expected.every(e => streamed.some(s => equalContentIds(s, e)))
+  }, 10000)
+  t.assert(streamed.length === expected.length, `only the edits are on the stream (${streamed.length} updates for ${expected.length} edits)`)
+}
+
+/**
+ * A resync appends nothing to the stream. The server sends its sync step 1 before its step 2, so
+ * a client without state answers it with an empty update. A client that already holds the
+ * document re-sends every delete it knows (a state vector can't describe deletes) - deletes the
+ * server had accepted already. Before, every reconnect of a writer appended its whole delete set,
+ * attributed to the reconnecting user.
+ *
+ * Each socket delivers in order, so once an edit made after a handshake is on the stream, the
+ * answer to that handshake was processed before it.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testResyncAppendsNothing = async tc => {
+  const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
+  await yhub.stream.disableCompaction(defaultDocRef)
+  try {
+    const { ydoc: doc1, provider: provider1 } = await createWsClient({ waitForSync: true })
+    const edits = recordEdits(doc1, provider1)
+    doc1.get().insert(0, 'hello world')
+    doc1.get().delete(0, 6)
+    await expectStreamedEdits(yhub, defaultDocRef, edits)
+    t.info('a writer that holds the document reconnects')
+    provider1.disconnect()
+    provider1.connect()
+    await promise.until(10000, () => provider1.synced)
+    t.info('a writer without state connects')
+    const { ydoc: doc2, provider: provider2 } = await createWsClient({ waitForSync: true })
+    const edits2 = recordEdits(doc2, provider2)
+    doc1.get().insert(0, 'a')
+    doc2.get().insert(0, 'b')
+    await expectStreamedEdits(yhub, defaultDocRef, [...edits, ...edits2])
+  } finally {
+    await yhub.stream.enableCompaction(defaultDocRef)
+  }
+}
+
+/**
+ * Edits made offline reach the server with the answer to its sync step 1, together with every
+ * delete the client knows. Only the offline edits are attributed to the client.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testOfflineEditsAttributedOnce = async tc => {
+  const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
+  await yhub.stream.disableCompaction(defaultDocRef)
+  try {
+    const { ydoc: doc1, provider: provider1 } = await createWsClient({ waitForSync: true })
+    const { ydoc: doc2 } = await createWsClient({ waitForSync: true })
+    const edits = recordEdits(doc1, provider1)
+    doc1.get().insert(0, 'hello world')
+    doc1.get().delete(0, 6)
+    await expectStreamedEdits(yhub, defaultDocRef, edits)
+    provider1.disconnect()
+    doc1.get().insert(5, '!!')
+    doc1.get().delete(0, 2)
+    provider1.connect()
+    await utils.waitDocsSynced(doc1, doc2)
+    t.compare(doc2.get().toString(), 'rld!!')
+    // both offline edits arrive in the one answer
+    await expectStreamedEdits(yhub, defaultDocRef, [...edits.slice(0, 2), Y.mergeUpdates(edits.slice(2))])
+  } finally {
+    await yhub.stream.enableCompaction(defaultDocRef)
+  }
+}
+
+/**
+ * Every message before the client's sync step 1 is ignored: the connection is subscribed to the
+ * stream (auth checks, the document's deletion) only by the initial sync that step starts.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testMessagesBeforeSyncStep1Ignored = async tc => {
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
+  const doc = new Y.Doc()
+  doc.get().insert(0, 'ignored')
+  const ws = new WebSocket(`${utils.wsUrl}/${defaultDocRef.docid}`)
+  let received = 0
+  ws.on('message', () => { received++ })
+  ws.on('open', () => {
+    ws.send(protocol.encodeSyncUpdate(Y.encodeStateAsUpdate(doc)))
+    ws.send(encoding.encode(encoder => protocol.writeAwarenessUpdate(encoder, protocol.encodeAwarenessUserDisconnected(doc.clientID, 0))))
+    ws.send(utils.syncStep1)
+  })
+  // the socket delivers in order: once the sync step 1 is answered, the messages before it were read
+  await promise.until(5000, () => received > 0)
+  const messages = (await yhub.stream.getMessages([{ docRef: defaultDocRef, clock: '0' }]))[0]?.messages ?? []
+  t.assert(messages.length === 0, 'nothing reached the stream')
+  ws.close()
+  doc.destroy()
+}
+
+/**
+ * The server answers a client's sync step 1 with its own step 1, then with the part of the
+ * document the client lacks - a reconnecting client is not sent the whole document again.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testResyncSendsDiff = async tc => {
+  const { createWsClient, defaultDocRef } = await utils.createTestCase(tc)
+  const { ydoc: doc1 } = await createWsClient({ waitForSync: true })
+  doc1.get().insert(0, 'hello world')
+  const { ydoc: doc2 } = await createWsClient({ waitForSync: true })
+  await utils.waitDocsSynced(doc1, doc2)
+  const ws = new WebSocket(`${utils.wsUrl}/${defaultDocRef.docid}`)
+  /**
+   * @type {Array<{ type: number, payload: Uint8Array }>}
+   */
+  const received = []
+  ws.on('message', data => {
+    const decoder = decoding.createDecoder(/** @type {Buffer} */ (data))
+    decoding.readVarUint(decoder) === protocol.messageSync && received.push({ type: decoding.readVarUint(decoder), payload: decoding.readVarUint8Array(decoder) })
+  })
+  ws.on('open', () => ws.send(protocol.encodeSyncStep1(Y.encodeStateVector(doc1))))
+  await promise.until(5000, () => received.length >= 2)
+  t.assert(received[0].type === protocol.messageSyncStep1 && received[1].type === protocol.messageSyncStep2, 'step 1, then step 2')
+  t.assert(Y.createContentIdsFromUpdate(received[1].payload).inserts.isEmpty(), 'nothing the client already holds')
+  ws.close()
+}
+
+/**
+ * Updates are accepted only from the client's answer to the server's sync step 1 on. An update
+ * sent before it is dropped and isn't lost: the server's sync step 1 predates it, so the answer
+ * carries it. Before, it was appended twice - on its own and with the answer.
+ *
+ * The edit made after the answer is on the stream only once the answer was processed - the socket
+ * delivers in order.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testUpdateBeforeAnswerArrivesWithAnswer = async tc => {
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
+  await yhub.stream.disableCompaction(defaultDocRef)
+  try {
+    const doc = new Y.Doc()
+    /**
+     * @type {Array<Uint8Array<ArrayBuffer>>}
+     */
+    const edits = []
+    doc.on('update', update => { edits.push(update) })
+    doc.get().insert(0, 'hello')
+    const ws = new WebSocket(`${utils.wsUrl}/${defaultDocRef.docid}`)
+    ws.on('message', data => {
+      const decoder = decoding.createDecoder(/** @type {Buffer} */ (data))
+      if (decoding.readVarUint(decoder) === protocol.messageSync && decoding.readVarUint(decoder) === protocol.messageSyncStep1) {
+        ws.send(protocol.encodeSyncStep2(Y.encodeStateAsUpdate(doc, decoding.readVarUint8Array(decoder))))
+        doc.get().insert(0, '!')
+        ws.send(protocol.encodeSyncUpdate(edits[1]))
+      }
+    })
+    ws.on('open', () => {
+      ws.send(utils.syncStep1)
+      ws.send(protocol.encodeSyncUpdate(edits[0]))
+    })
+    await promise.until(5000, () => edits.length === 2)
+    await expectStreamedEdits(yhub, defaultDocRef, edits)
+    ws.close()
+    doc.destroy()
+  } finally {
+    await yhub.stream.enableCompaction(defaultDocRef)
+  }
+}
+
+/**
+ * A client that keeps its socket open without syncing until the document is deleted, then sends
+ * its sync step 1 followed right away by updates, gets nothing onto the stream: the initial sync
+ * refuses the deleted document before it sends the sync step 1 that updates have to answer. A
+ * revocation is refused the same way, by the initial sync's permission re-check.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testUpdatesBeforeInitialSyncChecksIgnored = async tc => {
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
+  const ws = new WebSocket(`${utils.wsUrl}/${defaultDocRef.docid}`)
+  await promise.create(resolve => ws.once('open', resolve))
+  const closed = promise.create(resolve => ws.once('close', resolve))
+  await yhub.deleteDoc(defaultDocRef)
+  const doc = new Y.Doc()
+  doc.get().insert(0, 'ignored')
+  ws.send(utils.syncStep1)
+  ws.send(protocol.encodeSyncUpdate(Y.encodeStateAsUpdate(doc)))
+  ws.send(protocol.encodeSyncStep2(Y.encodeStateAsUpdate(doc)))
+  t.assert(await closed === wsCloseDocDeleted, 'refused by the initial sync')
+  const messages = (await yhub.stream.getMessages([{ docRef: defaultDocRef, clock: '0' }]))[0]?.messages ?? []
+  t.assert(messages.every(m => m.type !== 'ydoc:update:v1'), 'no update reached the stream')
+  doc.destroy()
+}
+
+/**
+ * A sync step 1 whose state vector takes 10% of `server.maxDocSize` or more closes the connection
+ * before the state vector is decoded.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testHugeStateVectorRefused = async tc => {
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
+  const ws = new WebSocket(`${utils.wsUrl}/${defaultDocRef.docid}`)
+  const closed = promise.create(resolve => ws.once('close', resolve))
+  ws.on('open', () => ws.send(protocol.encodeSyncStep1(new Uint8Array(/** @type {number} */ (/** @type {types.YHubConfig} */ (yhub.conf).server?.maxDocSize) / 10))))
+  t.assert(await closed === 1009, 'closed with 1009')
+}
+
+/**
+ * An initial sync that trips the backpressure limit closes the connection from within its own
+ * sends - the destroyed user must not be subscribed to the stream afterwards, nothing would ever
+ * unsubscribe it.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testBackpressureCloseDoesNotLeakSubscription = async tc => {
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
+  const doc = new Y.Doc()
+  doc.get().insert(0, 'x'.repeat(20_000_000))
+  const update = Y.encodeStateAsUpdate(doc)
+  await yhub.stream.addMessage(defaultDocRef, { type: 'ydoc:update:v1', update, contentmap: createContentMap(Y.createContentIdsFromUpdate(update), 'user1', []) })
+  // sent after the document's sync step 2, which fills the buffer - this send is dropped
+  const awareness = encoding.encode(encoder => {
+    encoding.writeVarUint(encoder, 1)
+    encoding.writeVarUint(encoder, 0xfeed)
+    encoding.writeVarUint(encoder, 1)
+    encoding.writeVarString(encoder, JSON.stringify({ user: 'alice' }))
+  })
+  await yhub.stream.addMessage(defaultDocRef, { type: 'awareness:v1', update: awareness })
+  const ws = new WebSocket(`${utils.wsUrlFromPort(smallDocPort)}/${defaultDocRef.docid}`)
+  const closed = promise.create(resolve => ws.once('close', resolve))
+  ws.on('open', () => ws.send(utils.syncStep1))
+  // the close frame queues behind the full buffer - the client doesn't reliably see 1013
+  await closed
+  t.assert(smallDocHub.stream.subUpdates.size === 0, 'no subscription left behind')
+  doc.destroy()
 }

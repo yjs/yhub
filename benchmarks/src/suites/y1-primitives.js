@@ -195,7 +195,7 @@ export default {
             const { gcUpdate } = getFixture({ targetBytes })
             const clone = timeIt(() => structuredClone(gcUpdate))
             const local = timeIt(() => Y.encodeStateVectorFromUpdate(gcUpdate))
-            const roundTrip = await timeItAsync(() => pool.run({ type: 'computeStateVector', update: gcUpdate }, [], {}))
+            const roundTrip = await timeItAsync(() => pool.run({ type: 'computeSyncSteps', update: gcUpdate, sv: Y.encodeStateVector(new Y.Doc()), withSv: true }, [], {}))
             report.row({
               S: sizeLabel(targetBytes),
               'clone (ms)': clone,
@@ -207,7 +207,7 @@ export default {
         } finally {
           await pool.destroy()
         }
-        report.note('Payloads are sent without transfer (`src/compute.js:286`) because the caller reuses the buffer for syncStep2, so the main thread pays the clone on every offloaded merge and state-vector computation. What the clone costs the *main thread* is the `clone (ms)` column; `pool round-trip` is the wall-clock the caller waits, which is close to `local scan` because the work itself dominates — the offload buys event-loop availability, not latency.')
+        report.note('Payloads are sent without transfer (`src/compute.js:390`) because the buffer may be a view of one that is still in use, so the main thread pays the clone on every offloaded merge and sync-step computation. What the clone costs the *main thread* is the `clone (ms)` column; `pool round-trip` is the wall-clock the caller waits, which is close to `local scan` because the work itself dominates — the offload buys event-loop availability, not latency.')
       }
     },
     {

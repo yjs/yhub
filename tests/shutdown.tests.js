@@ -19,6 +19,7 @@ const shutdownPort = utils.testHubPort(-1)
  */
 const connect = (url, retries = 300) => promise.create(/** @param {(ws: WebSocket) => void} resolve */ (resolve, reject) => {
   const ws = new WebSocket(url)
+  ws.once('open', () => ws.send(utils.syncStep1))
   ws.once('message', () => resolve(ws))
   ws.once('error', reject)
 }).catch(err => retries > 0 ? promise.wait(100).then(() => connect(url, retries - 1)) : promise.reject(err))

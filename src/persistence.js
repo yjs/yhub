@@ -249,7 +249,7 @@ export class Persistence {
    * The document's tombstone is returned unconditionally - reading a document and learning whether it
    * was deleted is one round trip, never two.
    *
-   * @return {Promise<{ lastClock: string, tombstone: t.Tombstone|null, gcDoc: Include['gc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null, nongcDoc: Include['nongc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null, contentmap: Include['contentmap'] extends true ? Array<Uint8Array<ArrayBuffer>> : null, references: Include['references'] extends true ? Array<{ assetId: t.AssetId, asset: t.Asset|null }> : null, contentids: Include['contentids'] extends true ? Array<Uint8Array<ArrayBuffer>> : null }>}
+   * @return {Promise<{ lastClock: string, tombstone: t.Tombstone|null, gcDoc: t.IfHasConf<Include, 'gc', Array<Uint8Array<ArrayBuffer>>>, nongcDoc: t.IfHasConf<Include, 'nongc', Array<Uint8Array<ArrayBuffer>>>, contentmap: t.IfHasConf<Include, 'contentmap', Array<Uint8Array<ArrayBuffer>>>, references: t.IfHasConf<Include, 'references', Array<{ assetId: t.AssetId, asset: t.Asset|null }>>, contentids: t.IfHasConf<Include, 'contentids', Array<Uint8Array<ArrayBuffer>>> }>}
    */
   async retrieveDoc (docRef, includeContent) {
     const { lastClock, tombstone, assets } = await this.retrieveAssets(docRef, includeContent)
@@ -275,10 +275,10 @@ export class Persistence {
     return {
       lastClock,
       tombstone,
-      gcDoc: /** @type {Include['gc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeContent.gc === true ? gcUpdates : null),
-      nongcDoc: /** @type {Include['nongc'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeContent.nongc === true ? nongcUpdates : null),
-      contentmap: /** @type {Include['contentmap'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeContent.contentmap === true ? contentmaps : null),
-      contentids: /** @type {Include['contentids'] extends true ? Array<Uint8Array<ArrayBuffer>> : null} */ (includeContent.contentids === true ? contentidss : null),
+      gcDoc: /** @type {t.IfHasConf<Include, 'gc', Array<Uint8Array<ArrayBuffer>>>} */ (includeContent.gc === true ? gcUpdates : null),
+      nongcDoc: /** @type {t.IfHasConf<Include, 'nongc', Array<Uint8Array<ArrayBuffer>>>} */ (includeContent.nongc === true ? nongcUpdates : null),
+      contentmap: /** @type {t.IfHasConf<Include, 'contentmap', Array<Uint8Array<ArrayBuffer>>>} */ (includeContent.contentmap === true ? contentmaps : null),
+      contentids: /** @type {t.IfHasConf<Include, 'contentids', Array<Uint8Array<ArrayBuffer>>>} */ (includeContent.contentids === true ? contentidss : null),
       references: /** @type {any} */ (refs)
     }
   }

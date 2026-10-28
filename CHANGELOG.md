@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **The websocket initial sync starts with the client's sync step 1.** The server used to push its sync step 1 and the whole document on connect; it now waits for the client's state vector, which `@y/websocket` (and every y-protocols client) sends on connect. Every message before it is ignored. Until its initial sync a connection misses permission re-checks, which the initial sync replays from the stream; the stream keeps them only for `redis.minMessageLifetime`. So an initial sync that reads the stream later than a third of it after connecting (a late sync step 1, or a slow document load) asks `authorize` again unconditionally. A client's updates are accepted only from its answer to the server's sync step 1 on, which the server sends once the initial sync checked the document's deletion and the permissions; an update sent before it is dropped, and arrives with the answer. A sync step 1 whose state vector takes 10% of `server.maxDocSize` or more is closed with 1009. Later sync step 1 messages (`@y/websocket`'s `resyncInterval`) are still ignored. ([API docs](API.md#websocket), [`src/server.js`](src/server.js))
+
+### Performance
+
+- **A reconnecting client downloads only what it lacks.** The server answers the client's sync step 1 with the diff against its state vector instead of the whole document (a 2 MB document whose client is up to date: 30 KB, its delete set). A client without state still gets the document as is. The server's sync step 1 is now sent only to connections that may write — a read-only one could only answer it with an update the server drops — so its state vector isn't computed for the others. `computePool.computeStateVector` is replaced by `computeSyncSteps`, which computes the diff and, when asked, the server's state vector in one call. ([`src/server.js`](src/server.js), [`src/compute.js`](src/compute.js))
+
+### Fixes
+
+- **A reconnect no longer counts as an edit.** A writer that already held the document answered the server's sync step 1 with every delete it knew — a state vector can't describe deletes — and that answer was appended to the stream as an update attributed to the reconnecting user. Every reconnect therefore listed the document in the updated-documents listing, ran a compaction that had nothing new to persist, and showed the user as having deleted the document's delete history to anything reading the stream. The server now keeps the deletes it had accepted when it sent its sync step 1 until the client's answer arrives, and filters them out of that answer: only deletes it didn't have yet are attributed, and an answer with nothing new is not appended at all. Edits made offline are still appended, attributed to exactly what the client changed. A client without state was never affected: the server's sync step 1 reaches it before the document does, so it answers with an empty update, which was dropped then too. ([`src/server.js`](src/server.js))
+- **A compute task that throws no longer kills its worker thread.** A task that threw on its input — such as a client's malformed state vector, which `computeSyncSteps` decodes in a thread once the document and the state vector together take 512 KB or more — ended the thread: the pool logged `worker failed` and started a new thread for the next task. The thread now catches the error and sends it back, so only that task rejects and the thread keeps serving. Threads that crash (e.g. over their `resourceLimits`) or exceed `taskTimeout` are still replaced. ([`src/compute-worker.js`](src/compute-worker.js), [`src/compute.js`](src/compute.js))
+
 ## [0.10.1]
 
 > **Upgrading:** run `npm run start:init` (`bin/init-db.js`) before starting this version. It adds

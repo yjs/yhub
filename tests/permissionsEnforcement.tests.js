@@ -230,6 +230,8 @@ export const testWsRecheckComparesWsLeaves = async tc => {
   /** @type {Array<number>} */
   const closeCodes = []
   recordCloseCodes(eve.provider, closeCodes)
+  // 4401 is permanent: `@y/websocket` stops reconnecting - an app reconnects deliberately
+  eve.provider.on('closed', () => eve.provider.connect())
   await t.groupAsync('rest-only facet changes do not bounce the connection', async () => {
     permTable.eve = { document: docPerms({ ydoc: 'cru-', awareness: '-ru-', history: { from: 5 }, endpoint: { '*': 'crud', comments: '-r--' } }) }
     await yhub.recheckAuth(defaultDocRef, { users: ['eve'] })

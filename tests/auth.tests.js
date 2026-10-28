@@ -210,6 +210,16 @@ const recordCloseCodes = (provider, closeCodes) => {
 }
 
 /**
+ * `4401` is permanent: `@y/websocket` stops reconnecting and emits `closed`. An app acts first
+ * (e.g. re-authenticates), then reconnects deliberately - these tests have nothing to act on.
+ *
+ * @param {import('@y/websocket').WebsocketProvider} provider
+ */
+const reconnectOnClosed = provider => {
+  provider.on('closed', () => provider.connect())
+}
+
+/**
  * @param {t.TestCase} tc
  */
 export const testRecheckAuthKicksRevokedUser = async tc => {
@@ -251,6 +261,7 @@ export const testRecheckAuthClosesOnDowngrade = async tc => {
   /** @type {Array<number>} */
   const aliceCloseCodes = []
   recordCloseCodes(alice.provider, aliceCloseCodes)
+  reconnectOnClosed(alice.provider)
   kickPerms.alice = docPermissionsPreset('r')
   // the userid string shorthand, end-to-end
   await yhub.recheckAuth(defaultDocRef, { users: ['alice'] })
@@ -284,6 +295,8 @@ export const testRecheckAuthForceDisconnect = async tc => {
   const closeCodes = []
   recordCloseCodes(alice.provider, closeCodes)
   recordCloseCodes(bob.provider, closeCodes)
+  reconnectOnClosed(alice.provider)
+  reconnectOnClosed(bob.provider)
   // the update can land in the same stream batch as the auth:check - a force disconnect midway
   // through the batch must not trip the 1011/backpressure error paths (see WSUser.sendData)
   alice.ydoc.get().setAttr('a', 42)

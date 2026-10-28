@@ -1,3 +1,4 @@
+import * as path from 'node:path'
 import config from './config.js'
 import { Reporter, freeDiskGiB } from './report.js'
 import { stopCluster, reclaimStorage, takeTaskFailures } from './cluster.js'
@@ -89,7 +90,7 @@ const run = async () => {
     }
   }
   await stopCluster()
-  const outPath = new URL('../' + config.run.outFile, import.meta.url).pathname
+  const outPath = path.join(import.meta.dirname, '..', config.run.outFile)
   report.write(outPath, derivedSection(report))
 }
 

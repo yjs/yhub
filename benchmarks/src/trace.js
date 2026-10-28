@@ -1,4 +1,5 @@
 import * as fs from 'node:fs'
+import * as path from 'node:path'
 import * as decoding from 'lib0/decoding'
 import config from './config.js'
 
@@ -19,7 +20,7 @@ import config from './config.js'
  * @typedef {{ type: string, updateFormat: string, gc: boolean, source: any, users: Array<string>, totalBytes: number, updates: Array<TraceStep> }} Trace
  */
 
-const tracePath = new URL(`../${config.trace.file}`, import.meta.url).pathname
+const tracePath = path.join(import.meta.dirname, '..', config.trace.file)
 
 export const traceAvailable = () => fs.existsSync(tracePath)
 

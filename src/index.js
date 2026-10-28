@@ -251,6 +251,16 @@ export class YHub {
         await this.stream.trimMessages(task.docRef, d.streamClock, this.stream.minMessageLifetime, task.redisClock)
         return
       }
+      // the messages are new, their content may not be: a client that kept a local copy answers
+      // sync step 1 with its whole delete set (a delete set can't be diffed by state vector), so
+      // every reconnect queues an update the document already holds. Persisting it would move
+      // the document's clock and report an edit nobody made.
+      if (!d.hasNewContent) {
+        taskLog.debug('no new content on the stream, trimming only')
+        await this.stream.trimMessages(task.docRef, d.streamClock, this.stream.minMessageLifetime, task.redisClock)
+        taskLog.info('task completed (trim only)')
+        return
+      }
       this.conf.worker?.events?.docUpdate?.(object.assign({}, d, { references: null, docRef: task.docRef }))
       // the row is keyed by `lastClock`, the last content message: trailing awareness must not
       // move `created`, which the updated-documents listing reports as the document's last
@@ -337,13 +347,18 @@ export class YHub {
     const streamClock = strm.maxRedisClock(persistedDoc.lastClock, cachedMessages.lastClock)
     const lastClock = lastContentClock(cachedMessages.messages, persistedDoc.lastClock)
     const mergedContentIds = Y.mergeContentIds(contentids)
+    // whether the stream holds anything the persisted document doesn't: an insert or a delete it
+    // has not seen, a prune, a deletion
+    let hasNewContent = false
     cachedMessages.messages.forEach(m => {
+      if (t.$tombstoneMessage.check(m) && strm.isSmallerRedisClock(persistedDoc.lastClock, m.redisClock)) hasNewContent = true
       // only add update messages that are newer that what we currently know
       if (t.$updateMessage.check(m) && strm.isSmallerRedisClock(persistedDoc.lastClock, m.redisClock)) {
         const msgContentmap = Y.decodeContentMap(m.contentmap)
         // attributions can only be assigned once. Filter out "known" attributions
         const mcontentmap = Y.excludeContentMap(msgContentmap, mergedContentIds)
         const mcontentids = Y.createContentIdsFromContentMap(mcontentmap)
+        hasNewContent ||= !mcontentids.inserts.isEmpty() || !mcontentids.deletes.isEmpty()
         // a message may re-send structs the document already holds - a whole-document body carries
         // every deleted id as a gc'd stub, a replayed message its original content. The encoding
         // the server accepted first is the one that stays: content is never replaced by a stub, and
@@ -384,6 +399,7 @@ export class YHub {
       streamClock,
       lastPersistedClock: persistedDoc.lastClock,
       tombstone: persistedDoc.tombstone,
+      hasNewContent: hasNewContent || pruneSet != null,
       references,
       awareness,
       authChecks: cachedMessages.messages.filter(m => t.$authCheckMessage.check(m))

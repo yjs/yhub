@@ -132,6 +132,31 @@ export const testIndexFollowsTheStream = async tc => {
 }
 
 /**
+ * A client that kept a local copy answers sync step 1 with its whole delete set, on every
+ * connect: no struct the server lacks, only deletes it already holds. The socket queues it like
+ * any update, but compaction must not persist it - that would move the document's clock and fire
+ * `docUpdate` for an edit nobody made.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testRedundantDeleteSetIsNotAnEdit = async tc => {
+  const { defaultDocRef: docRef } = await utils.createTestCase(tc)
+  const ydoc = new Y.Doc()
+  await appendEdit(docRef, ydoc, () => ydoc.get().insert(0, 'hello world'))
+  await appendEdit(docRef, ydoc, () => ydoc.get().delete(5, 6))
+  await utils.waitTasksProcessed(yhub)
+  const persisted = (await yhub.persistence.retrieveDoc(docRef, {})).lastClock
+  const deleteSet = Y.encodeStateAsUpdate(ydoc, Y.encodeStateVector(ydoc))
+  t.assert(deleteSet.byteLength > 3, 'big enough for the socket to queue it')
+  await yhub.stream.addMessage(docRef, { type: 'ydoc:update:v1', update: deleteSet, contentmap: createContentMap(Y.createContentIdsFromUpdate(deleteSet), 'user1', []) })
+  await utils.waitTasksProcessed(yhub)
+  t.assert((await yhub.persistence.retrieveDoc(docRef, {})).lastClock === persisted, 'the persisted clock did not move')
+  const edited = await appendEdit(docRef, ydoc, () => ydoc.get().insert(5, '!'))
+  await utils.waitTasksProcessed(yhub)
+  t.assert(stream.redisClockToMs((await yhub.persistence.retrieveDoc(docRef, {})).lastClock) === edited, 'a real edit still persists')
+}
+
+/**
  * `unquarantine` appends through the same script (in a MULTI) and must keep indexing.
  *
  * @param {t.TestCase} tc

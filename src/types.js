@@ -301,6 +301,7 @@ export const $task = $compactTask
  *   streamClock: string,
  *   lastPersistedClock: string,
  *   tombstone: Tombstone|null,
+ *   hasNewContent: boolean,
  *   gcDoc: IfHasConf<Include, 'gc', Uint8Array<ArrayBuffer>>,
  *   nongcDoc: IfHasConf<Include, 'nongc', Uint8Array<ArrayBuffer>>,
  *   contentmap: IfHasConf<Include, 'contentmap', Uint8Array<ArrayBuffer>>,

@@ -12,7 +12,7 @@ import * as s from 'lib0/schema'
  *                               {org, docid, branch}: full facet vocabulary
  *   'permissions:branch:v1'   - {org, branch}: a branch spans documents; endpoint-only in v1
  *   'permissions:org:v1'      - {org}: endpoint-only in v1
- *   'permissions:global:v1'   - {}: endpoint-only in v1
+ *   'permissions:global:v1'   - {}: endpoint, plus `orgs` - the orgs the subject has access to
  *
  * Access is encoded as positional CRUD masks ('cr--', '-r--', ..): a fixed position per verb, so
  * checks are single char compares and every mask has exactly one spelling. `'----'` is the
@@ -143,7 +143,14 @@ export const $documentPermissionsV1 = s.$object({
 
 export const $branchPermissionsV1 = s.$object({ type: s.$literal('permissions:branch:v1'), endpoint: $deniable($endpointFacet).optional })
 export const $orgPermissionsV1 = s.$object({ type: s.$literal('permissions:org:v1'), endpoint: $deniable($endpointFacet).optional })
-export const $globalPermissionsV1 = s.$object({ type: s.$literal('permissions:global:v1'), endpoint: $deniable($endpointFacet).optional })
+/**
+ * The orgs a subject has access to: `'*'` for every org, or a list. The first floor key of the
+ * deferred chain `global.orgs → org.branches → ..` (proposals/permissions.md) - so far only the
+ * global updated listing (`GET /updated/v1`) reads it; it implies nothing about org or document
+ * permissions.
+ */
+const $orgsFacet = s.$union(s.$literal('*'), s.$array(s.$string))
+export const $globalPermissionsV1 = s.$object({ type: s.$literal('permissions:global:v1'), orgs: $deniable($orgsFacet).optional, endpoint: $deniable($endpointFacet).optional })
 export const $permissions = s.$union($globalPermissionsV1, $orgPermissionsV1, $branchPermissionsV1, $documentPermissionsV1)
 
 /**
@@ -331,7 +338,10 @@ const canonicalEndpointMap = endpoint => {
  * @typedef {EndpointPermissionsNormalized<'permissions:org:v1'>} OrgPermissionsV1Normalized
  */
 /**
- * @typedef {EndpointPermissionsNormalized<'permissions:global:v1'>} GlobalPermissionsV1Normalized
+ * The global view additionally carries `orgs`: `'*'`, a sorted and deduplicated list, or `false`
+ * (absent, `false` and `[]` grant no org).
+ *
+ * @typedef {EndpointPermissionsNormalized<'permissions:global:v1'> & { orgs: '*' | false | Array<string> }} GlobalPermissionsV1Normalized
  */
 
 /**
@@ -342,6 +352,7 @@ const canonicalEndpointMap = endpoint => {
 const createNormalizedEndpointPermissions = p => {
   const n = Object.create(null)
   n.type = p.type
+  if (p.type === 'permissions:global:v1') n.orgs = p.orgs === '*' ? '*' : ((p.orgs && p.orgs.length > 0) ? Array.from(new Set(p.orgs)).sort() : false)
   n.endpoint = canonicalEndpointMap(p.endpoint || {})
   return n
 }
@@ -543,15 +554,26 @@ export const normalizePermissions = permissions => createNormalizedPermissions($
  * @param {Permissions} p2
  * @return {Permissions}
  */
-const permissionsIntersect = (p1, p2) => p1.type === 'permissions:document:v1'
-  ? documentPermissionsIntersect(p1, /** @type {DocumentPermissionsV1} */ (p2))
-  : /** @type {Permissions} */ ({
-      type: assertSameType(p1, p2),
-      endpoint: deniableIntersect(p1.endpoint, p2.endpoint, (e1, e2) => mergeEndpointFacets(e1, e2, (a, b) => deniableIntersect(a, b, crudIntersect)))
-    })
+const permissionsIntersect = (p1, p2) => {
+  if (p1.type === 'permissions:document:v1') return documentPermissionsIntersect(p1, /** @type {DocumentPermissionsV1} */ (p2))
+  /**
+   * @type {any}
+   */
+  const result = {
+    type: assertSameType(p1, p2),
+    endpoint: deniableIntersect(p1.endpoint, p2.endpoint, (e1, e2) => mergeEndpointFacets(e1, e2, (a, b) => deniableIntersect(a, b, crudIntersect)))
+  }
+  if (p1.type === 'permissions:global:v1') {
+    // '*' is every org - the other side survives
+    result.orgs = deniableIntersect(p1.orgs, /** @type {GlobalPermissionsV1} */ (p2).orgs, (o1, o2) => o1 === '*' ? o2 : (o2 === '*' ? o1 : o1.filter(org => o2.includes(org))))
+  }
+  return result
+}
 
-// the facets a requirement may name per scope (document carries them all; the rest are endpoint-only)
+// the facets a requirement may name per scope (document carries them all; branch and org are
+// endpoint-only)
 const documentRequirableFacets = ['ydoc', 'awareness', 'history', 'delete', 'endpoint']
+const globalRequirableFacets = ['orgs', 'endpoint']
 
 /**
  * Validate a code-authored requirement loudly - a caller bug throws, never silently checks less
@@ -565,7 +587,7 @@ const assertValidRequirement = (required, type) => {
   if (required.type !== type) {
     throw error.create(`requirement of type ${JSON.stringify(required.type)} checked against ${type} permissions`)
   }
-  const allowed = type === 'permissions:document:v1' ? documentRequirableFacets : ['endpoint']
+  const allowed = type === 'permissions:document:v1' ? documentRequirableFacets : (type === 'permissions:global:v1' ? globalRequirableFacets : ['endpoint'])
   object.forEach(required, (value, key) => {
     if (key === 'type') return
     if (!allowed.includes(key)) {
@@ -593,8 +615,9 @@ const assertValidRequirement = (required, type) => {
  * `required ⊆ granted`, decided in the merge algebra: the intersection of the two normalizes to
  * exactly `required`. Facet semantics follow from that: crud masks are positional subsets, a
  * `history.from` requirement is satisfied by any granted ray reaching at least as far back (so
- * `from: Number.MAX_SAFE_INTEGER` asks for "any history at all"), `delete` kinds are a subset
- * check, and endpoint names resolve through the `'*'` fallback on both sides. An empty `required`
+ * `from: Number.MAX_SAFE_INTEGER` asks for "any history at all"), `delete` kinds and global
+ * `orgs` lists are a subset check (`orgs: '*'` contains every list, and only `'*'` contains
+ * `'*'`), and endpoint names resolve through the `'*'` fallback on both sides. An empty `required`
  * is vacuously true.
  *
  * Requiring `history.rollback`/`prune` also requires the ydoc write it rides on - the

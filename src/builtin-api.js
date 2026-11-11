@@ -288,16 +288,21 @@ const activityEndpoint = createApiEndpoint('activity', {
  * deletion), the number the changeset response carries as `t` too. A poller stores `next` as its
  * cursor and `t` per document, and fetches a listed document when its `t` moved. The protocol is
  * documented in API.md ("Updated documents"): `since` is exclusive, a page never splits a
- * millisecond (so `limit` is soft), `next === since` means caught up (a page can be empty while
- * `next` advanced: every document on it was filtered out), a document may be listed twice across
- * pages but is never missed.
+ * millisecond (so `limit` is soft, as in the global listing below), `next === since` means caught
+ * up (a page can be empty while `next` advanced: every document on it was filtered out), a
+ * document may be listed twice across pages but is never missed.
  *
- * Two sources - the redis index of live streams and the persisted rows - are read with the page's
- * `limit` each and merged. A source that returned fewer rows than `limit` is complete; one that
- * returned `limit` rows is complete below the last clock it returned. So the merged list is complete
- * below the clock at the cut, and the millisecond *at* the cut is re-read whole whenever the page
- * is full. Deduplication happens after that: a document present in both sources (the redis entry
- * at its last update, a later postgres row) must not move the cut.
+ * Two sources - the redis index of live streams and the persisted rows - are read concurrently
+ * with the page's `limit` each and merged. A source that returned fewer rows than `limit` is
+ * complete; one that returned `limit` rows is complete below the last clock it returned. So the
+ * merged list is complete below the clock at the cut, and the millisecond *at* the cut is re-read
+ * whole whenever the page is full. Deduplication happens after that: a document present in both
+ * sources (the redis entry at its last update, a postgres row at the same or a later clock) must
+ * not move the cut.
+ *
+ * The page also ends before `now`, the redis time read right after the index. That millisecond is
+ * still open: a document listed in it could change again at the same `t`, which a poller comparing
+ * `t` would not fetch, and a write landing in it would be behind a `next` that named it.
  */
 const updatedEndpoint = createApiEndpoint('updated', {
   scope: 'org',
@@ -306,23 +311,26 @@ const updatedEndpoint = createApiEndpoint('updated', {
     handler: async req => {
       const { yhub, org, authInfo } = req
       const since = req.query.since ?? 0
-      const limit = math.min(math.max(req.query.limit ?? 100, 1), 1000)
-      // the current millisecond is still open: a write landing in it after this read would be
-      // skipped by the next page's `since`, so the page ends before it
-      const to = (await yhub.stream.getTime()) - 1
+      const limit = math.max(req.query.limit ?? 10000, 1)
       /**
        * @param {number} from
-       * @param {number} to
+       * @param {number} [to]
        * @param {number} [limit]
        */
-      const fetchBoth = async (from, to, limit) => (await promise.all([yhub.stream.getUpdatedDocs(org, { from, to, limit }), yhub.persistence.retrieveUpdatedDocs(org, { from, to, limit })])).flat().sort((a, b) => a.t - b.t)
-      let docs = await fetchBoth(since + 1, to, limit)
-      if (docs.length >= limit) {
-        // a full page: either source may have cut the millisecond at its end short, so that
-        // millisecond is re-read whole and the page ends at a boundary
-        const cut = docs[limit - 1].t
-        docs = docs.filter(d => d.t < cut).concat(await fetchBoth(cut, cut))
+      const read = async (from, to, limit) => {
+        const [{ docs: live, now }, persisted] = await promise.all([yhub.stream.getUpdatedDocs(org, { from, to, limit }), yhub.persistence.retrieveUpdatedDocs(org, { from, to, limit })])
+        return { docs: persisted.concat(live).sort((a, b) => a.t - b.t), now }
       }
+      let { docs, now } = await read(since + 1, undefined, limit)
+      if (docs.length >= limit && docs[limit - 1].t < now) {
+        // a full page: either source may have cut the millisecond at its end short, so that
+        // millisecond is re-read whole and the page ends at a boundary. A cut at or after `now`
+        // is dropped below anyway.
+        const cut = docs[limit - 1].t
+        docs = docs.filter(d => d.t < cut).concat((await read(cut, cut)).docs)
+      }
+      // the millisecond of the read is still open
+      docs = docs.filter(d => d.t < now)
       const next = docs.length > 0 ? array.last(docs).t : since
       /**
        * @type {Map<string, { docid: string, branch: string, t: number }>}
@@ -344,6 +352,39 @@ const updatedEndpoint = createApiEndpoint('updated', {
         answers.forEach((answer, j) => { hasPermissions(normalizeAuthorizeAnswer('document', answer), readable) && visible.push(chunk[j]) })
       }
       return { docs: visible, next }
+    }
+  }
+})
+
+/**
+ * The orgs the index learned a change of after `since`, oldest first, as `{ org, t }` - `t` being
+ * the org's last-change clock (the max over its documents' `t` in the org-level listing above), the
+ * trigger to page `GET /updated/{org}` with a per-org cursor. `since` and `next` are learn clocks,
+ * not change clocks (see `encodeOrgUpdatedKey`): a change that reached the index late - another
+ * process's batch, a crash repaired by the worker - is stamped when it arrives, so it is listed
+ * after every cursor that came before it. Paging as in the org-level listing - `since` is exclusive,
+ * `next === since` means caught up, a page never splits a millisecond (so `limit` is soft) -
+ * except that it lists every org learned so far, while `next` never names the millisecond the
+ * page was read in (see `Stream.getUpdatedOrgs`). The default limit is large (10000): every restamp
+ * moves an org to the end, so a consumer that reads small pages and falls behind never reaches the
+ * orgs that change more often than it lags (API.md, "Updated orgs").
+ *
+ * The global `endpoint.updated` grant gates the route, and the listing covers only the orgs of the
+ * caller's global `orgs` facet - every org for `'*'`. Without `orgs` the request is refused with the
+ * missing-permission 403 - without `required`, since any list satisfies the route. One
+ * permission answer for the whole page, no per-org `authorize` call.
+ */
+const updatedOrgsEndpoint = createApiEndpoint('updated', {
+  scope: 'global',
+  get: {
+    $query: { since: s.$uint.optional, limit: s.$uint.optional },
+    handler: async req => {
+      const since = req.query.since ?? 0
+      const limit = math.max(req.query.limit ?? 10000, 1)
+      const access = req.permissions?.orgs ?? false
+      // no `required`: any list satisfies the route, which a permission object cannot express
+      if (access === false) throw apiError(403, "requires the global orgs permission: '*' or a list of orgs", { code: 'missing-permission' })
+      return req.yhub.stream.getUpdatedOrgs({ since, limit, orgs: access })
     }
   }
 })
@@ -488,4 +529,4 @@ const versionEndpoint = createApiEndpoint('version', {
  *
  * @type {Array<import('./types.js').ApiEndpoint>}
  */
-export const builtinApi = [ydocEndpoint, rollbackEndpoint, pruneEndpoint, changesetEndpoint, activityEndpoint, versionEndpoint, updatedEndpoint]
+export const builtinApi = [ydocEndpoint, rollbackEndpoint, pruneEndpoint, changesetEndpoint, activityEndpoint, versionEndpoint, updatedEndpoint, updatedOrgsEndpoint]

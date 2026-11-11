@@ -176,6 +176,38 @@ export const testNormalizeEndpointOnly = _tc => {
 }
 
 /**
+ * The global `orgs` facet: `'*'` or a list, one spelling once normalized. As a requirement it is a
+ * subset check - `'*'` contains every list, and only `'*'` contains `'*'`.
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testGlobalOrgsFacet = _tc => {
+  const global = /** @type {'permissions:global:v1'} */ ('permissions:global:v1')
+  t.assert(p.normalizeGlobalPermissions({ type: global }).orgs === false)
+  t.assert(p.normalizeGlobalPermissions({ type: global, orgs: false }).orgs === false)
+  t.assert(p.normalizeGlobalPermissions({ type: global, orgs: [] }).orgs === false, 'an empty list grants no org')
+  t.assert(p.normalizeGlobalPermissions({ type: global, orgs: '*' }).orgs === '*')
+  t.compare(p.normalizeGlobalPermissions({ type: global, orgs: ['b', 'a', 'b'] }).orgs, ['a', 'b'], 'sorted and deduplicated')
+  t.fails(() => p.normalizeGlobalPermissions(/** @type {any} */ ({ type: global, orgs: 'acme' })))
+  /**
+   * @param {any} orgs
+   * @param {any} required
+   */
+  const has = (orgs, required) => p.hasPermissions(p.normalizeGlobalPermissions({ type: global, orgs }), p.createGlobalPermissions({ orgs: required }))
+  t.assert(has('*', ['acme']), "'*' contains every list")
+  t.assert(has(['acme', 'b'], ['acme']))
+  t.assert(!has(['b'], ['acme']))
+  t.assert(!has(['acme'], ['acme', 'b']))
+  t.assert(has('*', '*'))
+  t.assert(!has(['acme'], '*'), "only '*' contains '*'")
+  t.assert(!has(undefined, ['acme']))
+  t.assert(p.hasPermissions(p.normalizeGlobalPermissions({ type: global, endpoint: { updated: '-r--' } }), p.createGlobalPermissions({ endpoint: { updated: '-r--' } })), 'an endpoint requirement does not ask for orgs')
+  t.fails(() => has('*', [])) // a pure denial
+  t.fails(() => has('*', false))
+  t.fails(() => p.hasPermissions(p.normalizeOrgPermissions({ type: 'permissions:org:v1' }), p.createOrgPermissions(/** @type {any} */ ({ orgs: '*' })))) // orgs is a global facet
+}
+
+/**
  * @param {t.TestCase} _tc
  */
 export const testKnownPermissionsType = _tc => {

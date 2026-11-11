@@ -19,11 +19,24 @@ import * as utils from './utils.js'
 const { yhub, defaultOrg: org } = utils
 const redis = yhub.stream.redis
 const indexKey = stream.encodeDocUpdatedKey(org, yhub.stream.prefix)
+const orgIndexKey = stream.encodeOrgUpdatedKey(yhub.stream.prefix)
+const orgLastChangeKey = stream.encodeOrgLastChangeKey(yhub.stream.prefix)
+
+/**
+ * The learn clock of `o` - the score of the member its last-change clock names.
+ *
+ * @param {string} o
+ */
+const learnedOf = async o => {
+  const lastChange = await redis.hGet(orgLastChangeKey, o)
+  return lastChange == null ? null : redis.zScore(orgIndexKey, stream.encodeOrgUpdatedMember(o, lastChange))
+}
 
 /**
  * A hub whose auth plugin answers per document: docids ending in `-secret` are unreadable, `nobody`
- * holds no org grant, and `broken`'s document checks fail. Same redis and postgres as the shared
- * hub, so what is written there is listed here.
+ * holds no org grant and no orgs, `noglobal` no global grant, and `broken`'s document checks fail.
+ * Globally, `reader` has every org (`orgs: '*'`) and `orgs=a,b` the listed ones. Same redis and
+ * postgres as the shared hub, so what is written there is listed here.
  */
 const authPort = utils.testHubPort(12)
 await utils.createTestHub({
@@ -36,6 +49,15 @@ await utils.createTestHub({
         return userid === null ? null : { userid }
       },
       authorize: types.createAuthorize({
+        global: async (_resource, user) => {
+          const userid = user?.userid ?? ''
+          if (userid === 'noglobal') return null
+          /**
+           * @type {'*' | Array<string> | undefined}
+           */
+          const orgs = userid.startsWith('orgs=') ? userid.slice(5).split(',') : (userid === 'reader' ? '*' : undefined)
+          return { type: 'permissions:global:v1', endpoint: { updated: '-r--' }, ...(orgs === undefined ? {} : { orgs }) }
+        },
         org: async (_org, user) => user?.userid === 'nobody' ? null : { type: 'permissions:org:v1', endpoint: { updated: '-r--' } },
         document: async (docRef, user) => {
           if (user?.userid === 'broken') throw new Error('permission backend down')
@@ -117,7 +139,9 @@ export const testIndexFollowsTheStream = async tc => {
   await promise.wait(5)
   const t2 = await appendEdit(docRef, ydoc, () => ydoc.get().insert(5, ' world'))
   t.assert(t2 > t1 && await redis.zScore(indexKey, member) === t2, 'the score follows the last update')
-  t.compare(await yhub.stream.getUpdatedDocs(org, { from: t1, to: t2 }), [{ docid: docRef.docid, branch: docRef.branch, t: t2 }])
+  const { docs, now } = await yhub.stream.getUpdatedDocs(org, { from: t1 })
+  t.compare(docs, [{ docid: docRef.docid, branch: docRef.branch, t: t2 }])
+  t.assert(now >= t2, 'with the redis time after the read')
   await promise.wait(5)
   const t3 = stream.redisClockToMs(await yhub.stream.addMessage(docRef, { type: 'prune:v1', prune: Y.encodeIdSet(Y.createIdSet()) }))
   t.assert(t3 > t2 && await redis.zScore(indexKey, member) === t3, 'a prune changes the document too')
@@ -197,6 +221,14 @@ export const testUpdatedListing = async tc => {
     t.compare((await list(`since=${since}`)).docs.map(d => [d.docid, d.t]), [[aRef.docid, ta], [bRef.docid, tb]], 'same documents, same clocks')
     t.assert(stream.redisClockToMs((await yhub.persistence.retrieveDoc(bRef, {})).lastClock) === tb, 'the row is keyed by the last update')
     t.assert((await get(`/changeset/v1/${org}/${bRef.docid}`)).body.t === tb)
+    // a document in both sources at one clock - a redis entry at its last update, the row at the
+    // same clock - fills a page of one twice over; it is listed once and the cursor moves past it
+    await redis.zAdd(indexKey, { score: tb, value: stream.encodeDocUpdatedMember(bRef) })
+    const p1 = await list(`since=${ta}&limit=1`)
+    t.compare(p1.docs.map(d => d.docid), [bRef.docid])
+    t.assert(p1.next === tb)
+    t.assert((await list(`since=${tb}&limit=1`)).next === tb, 'caught up')
+    await redis.zRem(indexKey, stream.encodeDocUpdatedMember(bRef))
   })
   await t.groupAsync('the consumer loop: a new edit, then the diff since the stored clock', async () => {
     const b2 = await createWsClient({ docid: 'b', waitForSync: true })
@@ -231,8 +263,32 @@ export const testUpdatedListing = async tc => {
 }
 
 /**
+ * All pages of `limit` after `since`, each ending at its last document's clock.
+ *
+ * @param {number} since
+ * @param {number} limit
+ */
+const pagesOf = async (since, limit) => {
+  /**
+   * @type {Array<Listing['docs']>}
+   */
+  const pages = []
+  let cursor = since
+  while (pages.length < 5) {
+    const page = await list(`since=${cursor}&limit=${limit}`)
+    if (page.docs.length === 0) break
+    t.assert(page.next === array.last(page.docs).t)
+    pages.push(page.docs)
+    cursor = page.next
+  }
+  return pages
+}
+
+/**
  * Documents written in one MULTI share a millisecond (or at worst two). A page never splits one -
- * `limit` is soft - so paging with `limit=1` lists each document exactly once.
+ * `limit` is soft - so paging with `limit=1` lists each document exactly once. Likewise in the
+ * persisted half: deletions recorded at one `deletedAt` are more than a page of one or two holds,
+ * and none is skipped.
  *
  * @param {t.TestCase} tc
  */
@@ -251,20 +307,44 @@ export const testPagesNeverSplitAMillisecond = async tc => {
   })
   await multi.exec()
   await promise.wait(5)
-  /**
-   * @type {Array<Listing['docs']>}
-   */
-  const pages = []
-  let cursor = since
-  while (pages.length < 5) {
-    const page = await list(`since=${cursor}&limit=1`)
-    if (page.docs.length === 0) break
-    t.assert(page.next === array.last(page.docs).t)
-    pages.push(page.docs)
-    cursor = page.next
-  }
+  const pages = await pagesOf(since, 1)
   t.compare(pages.flat().map(d => d.docid).sort(), docids.slice().sort(), 'every document listed exactly once')
   t.assert(pages.every((page, i) => i === 0 || page[0].t > array.last(pages[i - 1]).t), 'no millisecond is split across pages')
+  await t.groupAsync('the persisted half', async () => {
+    const gone = ['p', 'q', 'r'].map(s => ({ org, docid: `${tc.testName}-${s}`, branch: 'main' }))
+    await promise.all(gone.map(docRef => yhub.persistence.deleteTombstone(docRef)))
+    const deletedAt = await yhub.stream.getTime()
+    await promise.all(gone.map(docRef => yhub.persistence.storeTombstone(docRef, { deletedAt, hard: false, by: null })))
+    await promise.wait(5)
+    for (const limit of [1, 2]) {
+      const pages = await pagesOf(deletedAt - 1, limit)
+      t.assert(pages.length === 1 && pages[0].every(d => d.t === deletedAt), 'one page holds the whole millisecond')
+      t.compare(pages[0].map(d => d.docid).sort(), gone.map(d => d.docid), `limit=${limit}: none is skipped`)
+    }
+    await promise.all(gone.map(docRef => yhub.persistence.deleteTombstone(docRef)))
+  })
+  t.compare((await list(`since=${since}&limit=5000`)).docs.map(d => d.docid).sort(), docids.slice().sort(), 'a limit above 1000 is accepted')
+}
+
+/**
+ * A page ends before the millisecond it was read in: that millisecond is still open, and a
+ * document listed in it could change again at the same `t`. A document whose last change is ahead
+ * of redis's time - a stream clock after a clock step-back - waits until the clock passed it.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testPageEndsBeforeTheOpenMillisecond = async tc => {
+  const { defaultDocRef: docRef } = await utils.createTestCase(tc)
+  const since = (await yhub.stream.getTime()) - 1
+  const ydoc = new Y.Doc()
+  const t1 = await appendEdit(docRef, ydoc, () => ydoc.get().insert(0, 'hello'))
+  await promise.wait(5)
+  const ahead = stream.encodeDocUpdatedMember({ org, docid: `${tc.testName}-ahead`, branch: 'main' })
+  await redis.zAdd(indexKey, { score: (await yhub.stream.getTime()) + 60000, value: ahead })
+  const page = await list(`since=${since}`)
+  await redis.zRem(indexKey, ahead)
+  t.compare(page.docs.map(d => d.docid), [docRef.docid], 'a closed millisecond is listed, a later one is not')
+  t.assert(page.next === t1, 'and next stays before it')
 }
 
 /**
@@ -294,4 +374,278 @@ export const testPerDocumentAuthorization = async tc => {
   t.assert((await get(`/updated/v1/${org}?since=${since}`, { host, user: 'nobody' })).status === 403, 'no org grant')
   const broken = await get(`/updated/v1/${org}?since=${since}`, { host, user: 'broken' })
   t.assert(broken.status === 503 && broken.body.code === 'auth-unavailable', 'a failing plugin fails the request')
+}
+
+/**
+ * A content message marks its org in memory at its stream clock, awareness does not. A flush raises
+ * the org's last-change clock (`org_last_change`) and stamps the org with the time the index learned
+ * of it (`org_updated`) - but only when its clock went up: a lower or equal clock changes neither.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testOrgIndexFlush = async tc => {
+  await utils.createTestCase(tc)
+  const o = `${tc.testName}-org`
+  const quiet = `${tc.testName}-quiet`
+  await yhub.stream.addMessage({ org: quiet, docid: 'd', branch: 'main' }, { type: 'awareness:v1', update: presence() })
+  const ydoc = new Y.Doc()
+  const t1 = await appendEdit({ org: o, docid: 'a', branch: 'main' }, ydoc, () => ydoc.get().insert(0, 'hello'))
+  t.assert(yhub.stream._orgUpdates.get(o) === t1, 'collected in memory at the stream clock')
+  await stream.flushOrgUpdates(yhub.stream)
+  t.assert(yhub.stream._orgUpdates.size === 0, 'cleared by the flush')
+  t.assert(Number(await redis.hGet(orgLastChangeKey, o)) === t1)
+  const learned1 = /** @type {number} */ (await learnedOf(o))
+  t.assert(learned1 >= t1, 'stamped when the index learned of it')
+  t.assert(await redis.hGet(orgLastChangeKey, quiet) == null && await learnedOf(quiet) === null, 'awareness does not mark the org')
+  await promise.wait(5)
+  const other = new Y.Doc()
+  const t2 = await appendEdit({ org: o, docid: 'b', branch: 'main' }, other, () => other.get().insert(0, 'x'))
+  await stream.flushOrgUpdates(yhub.stream)
+  const learned2 = /** @type {number} */ (await learnedOf(o))
+  t.assert(t2 > t1 && Number(await redis.hGet(orgLastChangeKey, o)) === t2 && learned2 > learned1, 'the last change over all documents of the org, stamped anew')
+  await promise.wait(5)
+  for (const tLower of [t1, t2]) {
+    stream.markOrgUpdated(yhub.stream, o, tLower)
+    await stream.flushOrgUpdates(yhub.stream)
+  }
+  t.assert(Number(await redis.hGet(orgLastChangeKey, o)) === t2 && await learnedOf(o) === learned2, 'a lower or equal clock restamps nothing')
+  const members = (await redis.zRange(orgIndexKey, 0, -1)).filter(m => stream.decodeOrgUpdatedMember(m).org === o)
+  t.compare(members, [stream.encodeOrgUpdatedMember(o, t2)], 'one member per org - the restamp swapped it')
+}
+
+/**
+ * A failed flush is merged back and written by the next one. While redis is not ready the write is
+ * not even sent - node-redis would queue it, and `destroy` would wait for it.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testOrgIndexFlushFailure = async tc => {
+  await utils.createTestCase(tc)
+  const o = `${tc.testName}-org`
+  const tm = await yhub.stream.getTime()
+  const anyRedis = /** @type {any} */ (redis)
+  anyRedis.updateOrgs = () => promise.reject(new Error('redis down'))
+  try {
+    stream.markOrgUpdated(yhub.stream, o, tm)
+    await stream.flushOrgUpdates(yhub.stream)
+  } finally {
+    delete anyRedis.updateOrgs
+  }
+  t.assert(yhub.stream._orgUpdates.get(o) === tm, 'merged back')
+  Object.defineProperty(redis, 'isReady', { value: false, configurable: true })
+  try {
+    await stream.flushOrgUpdates(yhub.stream)
+  } finally {
+    delete anyRedis.isReady
+  }
+  // the shared redis keeps the orgs of earlier runs
+  t.assert(yhub.stream._orgUpdates.get(o) === tm && Number(await redis.hGet(orgLastChangeKey, o) ?? 0) < tm, 'not sent while redis is not ready - merged back')
+  await stream.flushOrgUpdates(yhub.stream)
+  t.assert(Number(await redis.hGet(orgLastChangeKey, o)) === tm && await learnedOf(o) !== null, 'written by the next flush')
+}
+
+/**
+ * A batch lost before its flush (a crashed process) is repaired by the worker, which reports the
+ * org before it trims the stream - while a compaction of a change the index already knows restamps
+ * nothing. `unsafePersistDoc` has no stream message and writes right away. `destroy` flushes what
+ * is left.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testOrgIndexRepair = async tc => {
+  await utils.createTestCase(tc)
+  await t.groupAsync('the worker repairs a lost batch, and restamps nothing it already knows', async () => {
+    const lost = `${tc.testName}-lost`
+    const known = `${tc.testName}-known`
+    const ydoc = new Y.Doc()
+    const t1 = await appendEdit({ org: lost, docid: 'a', branch: 'main' }, ydoc, () => ydoc.get().insert(0, 'hello'))
+    yhub.stream._orgUpdates.delete(lost)
+    const other = new Y.Doc()
+    await appendEdit({ org: known, docid: 'a', branch: 'main' }, other, () => other.get().insert(0, 'hello'))
+    await stream.flushOrgUpdates(yhub.stream)
+    const learned = await learnedOf(known)
+    // the shared redis keeps the orgs of earlier runs
+    const lostBefore = (await learnedOf(lost)) ?? 0
+    t.assert(Number(await redis.hGet(orgLastChangeKey, lost) ?? 0) < t1, 'the batch never arrived')
+    await utils.waitTasksProcessed(yhub)
+    t.assert(Number(await redis.hGet(orgLastChangeKey, lost)) === t1 && /** @type {number} */ (await learnedOf(lost)) > lostBefore, 'repaired')
+    t.assert(await learnedOf(known) === learned, 'not restamped by its compaction')
+  })
+  await t.groupAsync('unsafePersistDoc', async () => {
+    const docRef = { org: `${tc.testName}-unsafe`, docid: 'a', branch: 'main' }
+    const ydoc = new Y.Doc()
+    ydoc.get().insert(0, 'x')
+    await yhub.unsafePersistDoc(docRef, Y.encodeStateAsUpdate(ydoc), {})
+    const created = stream.redisClockToMs((await yhub.persistence.retrieveDoc(docRef, {})).lastClock)
+    t.assert(!yhub.stream._orgUpdates.has(docRef.org) && Number(await redis.hGet(orgLastChangeKey, docRef.org)) === created)
+  })
+  await t.groupAsync('destroy flushes', async () => {
+    const hub = await utils.createTestHub({})
+    const o = `${tc.testName}-destroyed`
+    const ydoc = new Y.Doc()
+    ydoc.get().insert(0, 'x')
+    const update = Y.encodeStateAsUpdate(ydoc)
+    const id = await hub.stream.addMessage({ org: o, docid: 'a', branch: 'main' }, { type: 'ydoc:update:v1', update, contentmap: createContentMap(Y.createContentIdsFromUpdate(update), 'user1', []) })
+    await hub.destroy()
+    t.assert(Number(await redis.hGet(orgLastChangeKey, o)) === stream.redisClockToMs(id))
+    // a mark after destroy (a write that finished late) is dropped - no timer against the closed client
+    stream.markOrgUpdated(hub.stream, o, stream.redisClockToMs(id) + 1)
+    t.assert(hub.stream._orgUpdatesTimeout === null && hub.stream._orgUpdates.size === 0, 'dropped after destroy')
+    // a write still waiting for redis when destroy starts (the server does not await its writes) -
+    // its mark reaches the final flush
+    const s = await stream.createStream(yhub.conf)
+    const inflight = `${tc.testName}-inflight`
+    const pending = s.addMessage({ org: inflight, docid: 'a', branch: 'main' }, { type: 'ydoc:update:v1', update, contentmap: createContentMap(Y.createContentIdsFromUpdate(update), 'user1', []) })
+    await s.destroy()
+    t.assert(Number(await redis.hGet(orgLastChangeKey, inflight)) === stream.redisClockToMs(await pending), 'a write in flight is flushed by destroy')
+  })
+}
+
+/**
+ * `GET /updated/v1` (global scope): the orgs the index learned a change of after `since`, oldest
+ * first, with their last-change clock `t` - `next` is a learn clock. The global endpoint grant gates
+ * it, the global `orgs` facet restricts it - and without that facet the request is refused.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testUpdatedOrgsListing = async tc => {
+  await utils.createTestCase(tc)
+  // the marks of earlier tests must not be stamped after `since`
+  await stream.flushOrgUpdates(yhub.stream)
+  const since = (await yhub.stream.getTime()) - 1
+  const orgs = ['a', 'b'].map(s => `${tc.testName}-${s}`)
+  /**
+   * @type {Array<number>}
+   */
+  const ts = []
+  for (const o of orgs) {
+    const ydoc = new Y.Doc()
+    ts.push(await appendEdit({ org: o, docid: 'd', branch: 'main' }, ydoc, () => ydoc.get().insert(0, 'x')))
+    await stream.flushOrgUpdates(yhub.stream)
+    await promise.wait(5)
+  }
+  const learned = await promise.all(orgs.map(o => learnedOf(o)))
+  const host = `localhost:${authPort}`
+  const page = await get(`/updated/v1?since=${since}`, { host, user: 'reader' })
+  t.assert(page.status === 200)
+  t.compare(page.body, { orgs: orgs.map((org, i) => ({ org, t: ts[i] })), next: learned[1] }, "orgs: '*' - both orgs, oldest first")
+  t.compare((await get(`/updated/v1?since=${since}&limit=1`, { host, user: 'reader' })).body, { orgs: [{ org: orgs[0], t: ts[0] }], next: learned[0] }, 'an explicit limit')
+  t.compare((await get(`/updated/v1?since=${since}`, { host, user: 'reader', json: true })).body, page.body, 'json mode')
+  t.compare((await get(`/updated/v1?since=${learned[1]}`, { host, user: 'reader' })).body, { orgs: [], next: learned[1] }, 'next === since: caught up')
+  t.compare((await get(`/updated/v1?since=${since}`, { host, user: `orgs=${orgs[0]},${tc.testName}-unknown` })).body, { orgs: [{ org: orgs[0], t: ts[0] }], next: learned[0] }, 'a list - only the listed orgs')
+  t.compare(await yhub.stream.getUpdatedOrgs({ since, orgs: [] }), { orgs: [], next: since }, 'an empty list - no org')
+  const noOrgs = await get(`/updated/v1?since=${since}`, { host, user: 'nobody' })
+  t.assert(noOrgs.status === 403 && noOrgs.body.code === 'missing-permission' && noOrgs.body.required === undefined, 'no orgs facet - refused, without `required`')
+  t.assert((await get(`/updated/v1?since=${since}`, { host, user: 'noglobal' })).status === 403, 'no global grant')
+}
+
+/**
+ * What the learn clock is for: a change that reaches the index after a cursor moved past its own
+ * clock - another process's batch, a crash the worker repairs - is still listed, at its own `t`.
+ * And `next` never names the millisecond a page was read in: a stamp at or after it is listed, and
+ * listed again on the next page, so one minted later in that millisecond is never behind it. A
+ * clock behind the latest stamp (redis's clock stepped back) stamps past it, and a change clock
+ * ahead of every stamp (a stream's clock after such a step) stamps at it. The stamp ahead of the
+ * clock goes to an index of its own: on the shared one, every org stamped meanwhile - by any
+ * process - would be stamped past it, and outlive the cleanup.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testUpdatedOrgsLateChange = async tc => {
+  await utils.createTestCase(tc)
+  const host = `localhost:${authPort}`
+  await stream.flushOrgUpdates(yhub.stream)
+  const now = await yhub.stream.getTime()
+  const early = `${tc.testName}-early`
+  const late = `${tc.testName}-late`
+  await stream.writeOrgsUpdated(yhub.stream, new Map([[early, now - 1000]]))
+  await promise.wait(2)
+  const p1 = (await get(`/updated/v1?since=${now - 1}`, { host, user: 'reader' })).body
+  t.compare(p1.orgs, [{ org: early, t: now - 1000 }])
+  // arrives after the cursor moved on, with a change clock far behind it
+  await stream.writeOrgsUpdated(yhub.stream, new Map([[late, now - 2000]]))
+  await promise.wait(2)
+  const p2 = (await get(`/updated/v1?since=${p1.next}`, { host, user: 'reader' })).body
+  t.compare(p2.orgs, [{ org: late, t: now - 2000 }], 'listed after the cursor, at its own clock')
+  t.assert(p2.next > p1.next)
+  const ahead = await stream.createStream({ ...yhub.conf, redis: { ...yhub.conf.redis, prefix: `${yhub.stream.prefix}:${tc.testName}` } })
+  try {
+    const future = `${tc.testName}-future`
+    const stepped = `${tc.testName}-stepped`
+    await ahead.redis.zAdd(ahead.orgUpdatedKey, { value: stream.encodeOrgUpdatedMember(future, now), score: now + 60000 })
+    await ahead.redis.hSet(ahead.orgLastChangeKey, future, String(now))
+    const p3 = await ahead.getUpdatedOrgs({ since: now, orgs: '*' })
+    t.compare(p3.orgs, [{ org: future, t: now }], 'a stamp ahead of the read is listed')
+    t.assert(p3.next >= now && p3.next < now + 60000, 'but next stays before the millisecond of the read')
+    t.compare((await ahead.getUpdatedOrgs({ since: p3.next, orgs: '*' })).orgs, [{ org: future, t: now }], 'so it is listed again')
+    await stream.writeOrgsUpdated(ahead, new Map([[stepped, now]]))
+    t.assert(await ahead.redis.zScore(ahead.orgUpdatedKey, stream.encodeOrgUpdatedMember(stepped, now)) === now + 60001, 'a clock behind the latest stamp - stamped past it')
+    // after a step a stream's clock runs ahead of redis's - the org-level listing shows the change
+    // only once the clock passed it, so the cursor must not pass the org before then
+    const streamAhead = `${tc.testName}-stream-ahead`
+    await stream.writeOrgsUpdated(ahead, new Map([[streamAhead, now + 120000]]))
+    t.assert(await ahead.redis.zScore(ahead.orgUpdatedKey, stream.encodeOrgUpdatedMember(streamAhead, now + 120000)) === now + 120000, 'a change clock ahead of every stamp - stamped at it')
+    const p4 = await ahead.getUpdatedOrgs({ since: now + 60001, orgs: '*' })
+    t.compare(p4.orgs, [{ org: streamAhead, t: now + 120000 }])
+    t.assert(p4.next < now + 120000, 'and next stays before it')
+  } finally {
+    await ahead.redis.del([ahead.orgUpdatedKey, ahead.orgLastChangeKey, ahead.workerStreamName])
+    await ahead.destroy()
+  }
+}
+
+/**
+ * Orgs learned in the same millisecond are never split across pages - `limit` is soft. One flush
+ * stamps all its orgs alike. Both for `orgs: '*'` (a range read of the index) and for a list (the
+ * listed orgs' entries).
+ *
+ * @param {t.TestCase} tc
+ */
+export const testUpdatedOrgsPagesNeverSplitAMillisecond = async tc => {
+  await utils.createTestCase(tc)
+  await stream.flushOrgUpdates(yhub.stream)
+  const tm = (await yhub.stream.getTime()) - 1
+  const orgs = ['x', 'y', 'z'].map(s => `${tc.testName}-${s}`)
+  await stream.writeOrgsUpdated(yhub.stream, new Map([[orgs[0], tm], [orgs[1], tm]]))
+  await stream.writeOrgsUpdated(yhub.stream, new Map([[orgs[2], tm + 1]]))
+  await promise.wait(2)
+  const [lx, ly, lz] = /** @type {Array<number>} */ (await promise.all(orgs.map(o => learnedOf(o))))
+  t.assert(lx === ly && lz > lx, 'one flush, one learned millisecond - the next flush strictly after it, even within the same millisecond')
+  const host = `localhost:${authPort}`
+  for (const user of ['reader', `orgs=${orgs.join(',')}`]) {
+    await t.groupAsync(user, async () => {
+      const p1 = (await get(`/updated/v1?since=${lx - 1}&limit=1`, { host, user })).body
+      t.compare(p1.orgs.map((/** @type {{ org: string }} */ o) => o.org).sort(), [orgs[0], orgs[1]], 'the millisecond at the end is read whole')
+      t.assert(p1.next === lx)
+      const p2 = (await get(`/updated/v1?since=${p1.next}&limit=1`, { host, user })).body
+      t.compare(p2, { orgs: [{ org: orgs[2], t: tm + 1 }], next: lz })
+      const p3 = (await get(`/updated/v1?since=${p2.next}&limit=1`, { host, user })).body
+      t.compare(p3, { orgs: [], next: lz }, 'caught up')
+    })
+  }
+}
+
+/**
+ * Without `limit` one page lists up to 10000 orgs learned after `since`. Each org is stamped in a
+ * millisecond of its own, so it is the large default, not a whole millisecond, that keeps them on
+ * one page.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testUpdatedOrgsDefaultLimit = async tc => {
+  await utils.createTestCase(tc)
+  await stream.flushOrgUpdates(yhub.stream)
+  const since = (await yhub.stream.getTime()) - 1
+  const orgs = array.unfold(101, i => `${tc.testName}-${i}`)
+  for (const o of orgs) {
+    await stream.writeOrgsUpdated(yhub.stream, new Map([[o, since]]))
+    await promise.wait(1)
+  }
+  const host = `localhost:${authPort}`
+  /**
+   * @param {string} query
+   */
+  const listed = async query => (await get(`/updated/v1?since=${since}${query}`, { host, user: 'reader' })).body.orgs.map((/** @type {{ org: string }} */ o) => o.org).filter((/** @type {string} */ o) => o.startsWith(`${tc.testName}-`))
+  t.compare(await listed(''), orgs, 'every org, oldest first')
+  t.compare(await listed('&limit=100'), orgs.slice(0, 100), 'an explicit limit still pages')
 }

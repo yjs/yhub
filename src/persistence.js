@@ -406,8 +406,9 @@ export class Persistence {
   }
 
   /**
-   * The documents of `org` whose persisted state or deletion has a clock in `[from, to]` (unix
-   * ms, inclusive), oldest first - the persisted half of the updated-documents listing. `created`
+   * The documents of `org` whose persisted state or deletion has a clock at or after `from` (unix
+   * ms) - and up to `to`, inclusive, when a single millisecond is read whole - oldest first: the
+   * persisted half of the updated-documents listing. `created`
    * is the stream clock of the last change a compaction persisted; a deletion is reported at its
    * `deleted_at`. Rows are not deduplicated: a document appears twice while the row a compaction
    * superseded is still being deleted.
@@ -420,7 +421,7 @@ export class Persistence {
    * @param {string} org
    * @param {object} range
    * @param {number} range.from
-   * @param {number} range.to
+   * @param {number} [range.to]
    * @param {number} [range.limit]
    * @return {Promise<Array<{ docid: string, branch: string, t: number }>>}
    */
@@ -428,10 +429,10 @@ export class Persistence {
     const lim = limit == null ? this.sql`` : this.sql`LIMIT ${limit}`
     const rows = await this.sql`
       (SELECT docid, branch, created AS t FROM yhub_ydoc_v1
-       WHERE org = ${org} AND created BETWEEN ${from} AND ${to} ORDER BY created ${lim})
+       WHERE org = ${org} AND created >= ${from} ${to == null ? this.sql`` : this.sql`AND created <= ${to}`} ORDER BY created ${lim})
       UNION ALL
       (SELECT docid, branch, deleted_at AS t FROM yhub_ydoc_tombstones_v1
-       WHERE org = ${org} AND deleted_at BETWEEN ${from} AND ${to} ORDER BY deleted_at ${lim})
+       WHERE org = ${org} AND deleted_at >= ${from} ${to == null ? this.sql`` : this.sql`AND deleted_at <= ${to}`} ORDER BY deleted_at ${lim})
       ORDER BY t ${lim}
     `
     return rows.map(row => ({ docid: row.docid, branch: row.branch, t: number.parseInt(row.t) }))

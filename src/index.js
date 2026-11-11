@@ -225,6 +225,11 @@ export class YHub {
         this.persistence.retrieveDoc(task.docRef, {})
       ])
       const lastClock = lastContentClock(cachedMessages.messages, persisted.lastClock)
+      // before any trim: the org's last change must not leave the stream before it reached the
+      // global org index - this repairs a batch of `markOrgUpdated` that a crashed process lost.
+      // Not awaited: redis runs the commands of this client in the order they were sent, so the
+      // write is ahead of every trim below.
+      lastClock !== '0' && strm.writeOrgsUpdated(this.stream, new Map([[task.docRef.org, strm.redisClockToMs(lastClock)]])).catch(err => taskLog.error({ err }, 'error writing updated org'))
       // a hard-deleted document is never persisted again - its content is thrown away and its
       // stream trimmed down to nothing. `store` refuses it regardless (that guard is what
       // closes the race against a merge that is already running); skipping here only
@@ -539,6 +544,10 @@ export class YHub {
    * `TIME` call (the one with id `${ms}-0`) would be treated as already persisted: the initial sync
    * and compaction skip it.
    *
+   * The row is stamped before it is committed: a poller of `GET /updated/v1/{org}` that reads in
+   * between can move its cursor past it, and then learns of the document only with its next change
+   * (the org is still listed by `GET /updated/v1`).
+   *
    * @param {t.DocRef} docRef
    * @param {Uint8Array<ArrayBuffer>} ydoc
    * @param {{ by?: string }} attributions
@@ -561,6 +570,8 @@ export class YHub {
     }
     const contentmap = Y.createContentMapFromContentIds(contentids, insertAttrs, deleteAttrs)
     await this.persistence.store(docRef, { lastClock, gcDoc: ydoc, nongcDoc: ydoc, contentids: Y.encodeContentIds(contentids), contentmap: Y.encodeContentMap(contentmap) })
+    // written right away: there is no stream message the worker's repair could pick up later
+    await strm.writeOrgsUpdated(this.stream, new Map([[docRef.org, ms]]))
   }
 
   /**

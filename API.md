@@ -125,7 +125,7 @@ Error responses carry a lib0-any encoded `{ error: string, ...extra }` body (see
 |---|---|---|
 | `400` `404` `409` `413` `422` | caller mistake — invalid body or query (`code: 'invalid-body'` / `'invalid-query'`), a rollback or prune without a filter (`code: 'missing-filter'`), missing resource, conflict, payload too large | no — fix the request |
 | `401` `403` | `401`: the auth plugin rejected a presented credential (a branded `apiError(401)`), or an anonymous caller tried to write the document or a named version (`code: 'unauthenticated'` — attributions carry the userid; see [Anonymous callers](#contracts)); `403`: no access | no — obtain fresh credentials, then send a new request |
-| `403` with `code: 'missing-permission'` | the caller is authenticated but its permissions don't contain what the request requires — the message reads `requires permission {...}` and the `required` field carries the request's whole requirement as a permission object of the route's scope, e.g. `{ type: 'permissions:document:v1', ydoc: '--u-' }` or `{ type: 'permissions:document:v1', delete: ['hard'] }`; changeset/activity name the clamped ray start, `history: { from }` — the query's `from` limited to the granted ray (see [Permissions](#permissions)) | no — the grant must change first |
+| `403` with `code: 'missing-permission'` | the caller is authenticated but its permissions don't contain what the request requires — the message reads `requires permission {...}` and the `required` field carries the request's whole requirement as a permission object of the route's scope, e.g. `{ type: 'permissions:document:v1', ydoc: '--u-' }` or `{ type: 'permissions:document:v1', delete: ['hard'] }`; changeset/activity name the clamped ray start, `history: { from }` — the query's `from` limited to the granted ray (see [Permissions](#permissions)). Only [updated orgs](#updated-orgs) omits `required` | no — the grant must change first |
 | `403` with `code: 'origin-not-allowed'` | the page's origin is not allowed by `server.cors` (see [CORS](#cors)) — always json | no — fix the server's cors config, not the credentials |
 | `429` | rate limited — yhub itself never sends this; reserved for proxies and custom endpoints | yes — back off first |
 | `500`–`599` | server-side failure — `500` internal error (`code: 'internal-error'`), `503` the auth plugin failed (`code: 'auth-unavailable'`) or exceeded `server.authTimeout` (`code: 'auth-timeout'`), or the compute queue is full (`code: 'compute-queue-full'`, see `computePool.maxQueue` in [`createYHub`](#createyhubconfig)) | yes |
@@ -404,7 +404,7 @@ listed document per page, so the auth plugin is expected to answer cheaply (see
 
 * `GET /api/updated/v1/{org}` parameters: `{ since?: number, limit?: number }`
   * `since=number`: unix ms, exclusive — documents whose last change is after it (default: `0`, everything)
-  * `limit=number`: page size, `1`–`1000` (default: `100`). Soft: a page never splits a millisecond, so it runs past `limit` when more documents changed in the millisecond at its end
+  * `limit=number`: page size, at least `1` (default: `10000`). Soft: a page never splits a millisecond, so it runs past `limit` when more documents changed in the millisecond at its end
   * Returns `{ docs: Array<{ docid: string, branch: string, t: number }>, next: number }`, oldest first. `t` is the document's **last-change clock** — the unix ms of the stream id of the last message that changed it: an update, a prune, or its deletion — the same number [changeset](#changeset) returns as `t`. `next` is the cursor for the following page (the last `t`, or `since` when nothing changed after it). Served as `application/x-lib0any` (json on `Accept: application/json`).
 
 **Paging and polling.** Request `since=next` until `next` comes back equal to the `since` you sent
@@ -443,6 +443,15 @@ can therefore carry a timestamp slightly below it — clock skew between servers
 between stamping and appending — and `from = t` would leave it out. Subtract an allowance from
 `from` (a second plus your servers' skew) when a missed change is worse than seeing one twice.
 
+The cursor is a change clock, so it assumes that the redis time does not step back (a failover to
+a replica whose clock is behind, an NTP step): a document first written after such a step can get
+a `t` behind a cursor that was already handed out, and is then listed only with its next change.
+[Updated orgs](#updated-orgs) pages a learn clock instead, which does not have this limit. For the
+same reason a document written by [`yhub.unsafePersistDoc`](#yhubunsafepersistdocdocref-update-attributions)
+can be missed: its row is stamped before it is committed, so a poller that reads in between can
+move its cursor past it — the org is still listed by `GET /updated/v1`, the document only with
+its next change.
+
 **Where the data comes from.** Changes still on a document's redis stream are indexed in
 `{prefix}:doc_updated:{<org>}` (the braces around the org are literal, a redis cluster hash tag), a
 zset the write script maintains whose members live exactly as long as the stream. Once compaction
@@ -450,6 +459,75 @@ has persisted and trimmed them, `yhub_ydoc_v1.created` — the clock of the last
 and `yhub_ydoc_tombstones_v1.deleted_at` answer instead. Both halves are read on every request and
 merged, which is why a document can appear twice. The updates of a quarantined stream are in
 neither until they are re-injected.
+
+### Updated orgs
+
+Which orgs changed, and when — one level above [updated documents](#updated-documents): poll this
+listing, and page `GET /updated/v1/{org}` with a per-org cursor for every org it lists.
+
+Access: the global `endpoint` facet (`endpoint.updated` `r` in the `permissions:global:v1`
+answer) gates the route, and the global [`orgs` facet](#permission-objects) of the same answer
+decides which orgs are listed: `orgs: '*'` lists every org, `orgs: ['acme', …]` only those. An
+answer without `orgs` (absent, `false` or `[]`) is refused with `403 { code: 'missing-permission' }`
+— without a `required` field, since any list satisfies the route. One `authorize('global', …)` call
+per request — there is no per-org check, so the facet alone decides what a caller learns about
+other orgs. A list reads only the listed orgs' entries, so its cost follows the list, not the
+number of orgs.
+
+* `GET /api/updated/v1` parameters: `{ since?: number, limit?: number }`
+  * `since=number`: a learn clock (below), exclusive — orgs the index learned a change of after it (default: `0`, every org the index knows)
+  * `limit=number`: page size, at least `1` (default: `10000`). Soft: a page never splits a millisecond. Keep it large, see **Keep up** below
+  * Returns `{ orgs: Array<{ org: string, t: number }>, next: number }`, in the order the index learned of them. `t` is the org's **last-change clock** — the largest `t` of its documents in [updated documents](#updated-documents). `next` is the cursor for the following page (the last org's learn clock — but never the millisecond the page was read in, see below — or `since` when nothing new was learned). Served as `application/x-lib0any` (json on `Accept: application/json`).
+
+**Two clocks.** `t` says when the org last changed; `since` and `next` say when this index
+*learned* of it — the redis time (unix ms) at which the org's `t` went up in the index, never
+earlier than `t`. Pass `next` back as `since`, never a `t`. Each process reports the orgs it
+changed in batches, so a change can reach the index after other, newer ones: a cursor over `t`
+would skip it, a cursor over the learn clock cannot — the late change is listed after every page
+that came before it, with its own `t`. The learn clock strictly increases, even when redis's
+clock steps back (a failover, an NTP step): a stamp that would not be later than the latest one is
+raised to the latest + 1 ms. And a stamp below the org's `t` is raised to `t`: after such a step a
+document's stream clock runs ahead of the redis time, and its change shows up in the org-level
+listing only once the clock passed it. So the learn clock can run a little ahead of the redis
+time — a ms in a burst of reports, or as far as a step went until the clock catches up.
+
+Paging works like the org-level listing: request `since=next` until `next` comes back equal to
+the `since` you sent, then poll again later with that cursor. A page lists every org learned so
+far, but `next` never names the millisecond the page was read in: the orgs learned in that
+millisecond (or, with a learn clock ahead, later) are listed again on the next page, so a change
+you look up in a listed org's documents before it is visible there (that listing ends before the
+current millisecond) is not missed. So a page that lists orgs can return `next` equal to `since`;
+its orgs are listed again when you poll later. An org is listed again whenever its `t`
+goes up — it may be listed more than once, and the cursor never moves past an org without listing
+it (but see **Keep up**). A process that crashes before reporting
+its batch delays it: the worker reports a document's last change before it trims the document's
+stream, so the org is listed once the document is compacted (about `redis.taskDebounce` later).
+The one exception is a document whose compaction is disabled (`yhub.stream.disableCompaction`), never
+compacted: if its batch was lost, the org is listed again with its next change.
+
+**Keep up.** An org has one entry in the index, and every change moves it to the end of the
+order. A consumer that reads a small page and then works on it for a while falls
+behind, and an org that changes more often than that lag stays ahead of its cursor: it is never
+listed, while quieter orgs are. Avoiding that is the caller's job: request as many orgs per page
+as you can — the default `limit` of `10000` is meant to be kept or raised — and
+page promptly. Alternatively, raise `redis.orgUpdatedFlushInterval` (default 1 s): each process
+moves an org at most once per interval, which gives a lagging cursor more time to reach it, at
+the cost of listing a change up to one interval later.
+
+**Where the data comes from.** Two keys, both keeping every org that changed a document,
+forever: `{prefix}:org_last_change:{orgs}`, a hash of each org's `t`, and `{prefix}:org_updated:{orgs}`, a zset
+with one member `{org}:{t}` per org, scored by its learn clock. One Lua script writes both: it
+raises an org's `t` and swaps the org's member for one with the new `t`, stamped with the current
+redis time — only when its `t` went up, so reporting a change the index already knows lists
+nothing again. Reads are plain redis commands: a page of `orgs: '*'` is one range read of the
+zset, a list reads its orgs' `t` from the hash, then their members. Each process collects the orgs of the content messages it appends
+(updates, prunes, deletions) in memory and reports them every `redis.orgUpdatedFlushInterval` in
+one call; a failed call is retried with the next one. The worker reports a document's last change
+before it trims the stream, and `yhub.unsafePersistDoc` right away. Nothing is backfilled from
+postgres: the index starts empty, and an org is listed from its first change after the upgrade
+that introduced this listing — or once the worker compacts one of its documents (any message
+schedules that, awareness included), with that document's last change, which can be older than
+the org's.
 
 ### Versions
 
@@ -797,7 +875,7 @@ never a silent denial.
 #### Permission objects
 
 A **document** permission object carries the full facet vocabulary; the coarser scopes
-(**branch**, **org**, **global**) are endpoint-only in v1. Facets are absent (grants nothing),
+(**branch**, **org**, **global**) are endpoint-only in v1, except for the global `orgs` facet. Facets are absent (grants nothing),
 `false` (explicit denial), or their value:
 
 ```js
@@ -810,8 +888,15 @@ A **document** permission object carries the full facet vocabulary; the coarser 
   endpoint: { '*': '-r--', comments: 'crud' } // rest endpoints + the websocket route ('ws'); '*' is the fallback entry
 }
 // endpoint-only scopes:
-{ type: 'permissions:org:v1', endpoint: { docs: '-r--' } }       // likewise :branch: / :global:
+{ type: 'permissions:org:v1', endpoint: { docs: '-r--' } }       // likewise :branch:
+// global: endpoints, plus the orgs the subject has access to
+{ type: 'permissions:global:v1', orgs: ['acme', 'globex'], endpoint: { updated: '-r--' } } // orgs: '*' for every org
 ```
+
+The global `orgs` facet is `'*'` (every org) or a list of orgs; absent, `false` and `[]` grant
+none. So far only [updated orgs](#updated-orgs) reads it — it implies nothing about org or
+document permissions, which their own `authorize` calls answer. As a requirement
+(`createGlobalPermissions({ orgs: ['acme'] })`) it is a subset check: `'*'` contains every list.
 
 Access values are **positional CRUD masks** — a 4-char string with a fixed position per verb
 (`create`/`read`/`update`/`delete`), `-` denying: `'crud'`, `'cru-'`, `'-r--'`, `'----'`. Checks
@@ -1166,6 +1251,7 @@ const yhub = await createYHub(config)
 | `redis.taskDebounce` | `number` | no | Milliseconds before a worker picks up a compaction task. Also the lease timeout after which a task held by a crashed worker is reclaimed — a worker renews the lease of the tasks it is running, so this does not have to exceed the compaction time. Default: 120 000 |
 | `redis.minMessageLifetime` | `number` | no | Minimum time in ms that update messages are kept in Redis streams before compaction. Default: 60 000 |
 | `redis.cacheTtl` | `number` | no | TTL in seconds for cached API responses. Default: 10 |
+| `redis.orgUpdatedFlushInterval` | `number` | no | Milliseconds between the writes of the orgs a process changed to the [updated orgs](#updated-orgs) index — each process collects them in memory and writes them in one request. A longer interval moves a busy org less often, so a lagging consumer reaches it sooner, but lists a change up to one interval later. Default: 1000 |
 | `redis.clientOptions` | `object` | no | Additional options passed to the node-redis client, e.g. `{ pingInterval: 10000 }`. YHub still controls `url`; `redis.socket` is merged into the final socket config; `clientOptions.scripts` are merged with YHub's Lua scripts. |
 | `redis.socket` | `object` | no | Custom socket options merged into the Redis client socket config. See [node-redis socket options](https://github.com/redis/node-redis/blob/master/docs/client-configuration.md#socket-options) for available options. |
 | `postgres` | `string` | yes | PostgreSQL connection string |
@@ -1383,7 +1469,9 @@ const ydoc = Y.createDocFromUpdate(gcDoc)
 
 Attribute and persist a Yjs update directly to the database, without distributing it via Redis or WebSocket. Multiple calls for the same document are merged on next retrieval.
 
-> **Warning:** connected clients will not see the changes until they reconnect.
+> **Warning:** connected clients will not see the changes until they reconnect. A poller of
+> [updated documents](#updated-documents) that reads while the call is running can miss the
+> document until its next change (see **Clocks** there).
 
 ```ts
 yhub.unsafePersistDoc(

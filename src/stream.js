@@ -9,6 +9,7 @@ import * as buffer from 'lib0/buffer'
 import * as array from 'lib0/array'
 import * as map from 'lib0/map'
 import * as math from 'lib0/math'
+import * as error from 'lib0/error'
 import * as time from 'lib0/time'
 import { logger } from './logger.js'
 
@@ -98,6 +99,100 @@ export const encodeDocUpdatedKey = (org, prefix) => `${prefix}:doc_updated:{${ur
 export const encodeDocUpdatedMember = docRef => `${uriEncode(docRef.docid)}:${uriEncode(docRef.branch)}`
 
 /**
+ * The zset of every org that ever changed a document, one member `{org}:{t}` per org
+ * (`encodeOrgUpdatedMember` - `t` being the org's last-change clock in `encodeOrgLastChangeKey`),
+ * scored by when this index *learned* of that change: the redis TIME (ms) of the `updateOrgsScript`
+ * call that raised `t` - raised past the latest stamp when the clock is behind it, so each call
+ * stamps strictly after every earlier one, even when redis's clock steps back (a failover to a
+ * replica whose clock is behind, an NTP step). And never below `t` itself: after such a step a
+ * stream keeps its ids ahead of the clock, and `GET /updated/v1/{org}` lists a change only once
+ * the clock passed it - a cursor that moved past the org before then would never list it again
+ * (its `t` stays put while the clock catches up). The learn clock can thus run a ms ahead in a
+ * burst of calls, or as far as a step went until the clock catches up. It is the cursor of the global
+ * updated listing (`GET /updated/v1`): each
+ * process writes its orgs in batches (`markOrgUpdated`), so a change can reach the index well
+ * after its own clock - a cursor over the change clocks would skip it, one over the learn clock
+ * cannot. One range read returns org, `t` and learn clock alike.
+ *
+ * `updateOrgsScript` swaps an org's member when its `t` goes up, finding the old one through the
+ * hash. Neither key may therefore be edited by hand: a member the hash no longer names would be
+ * listed forever. Neither carries a TTL, so `volatile-lru` (DEPLOYMENT.md) never evicts them.
+ *
+ * Written through `updateOrgsScript` only: by every process from its own `addMessage` calls, by the
+ * worker right before it trims a stream (which repairs a batch lost in a crash), and by
+ * `unsafePersistDoc`. It starts empty - an org enters with its first change after the deployment,
+ * or when the worker compacts one of its documents, with that document's last change (which can be
+ * older than the org's).
+ *
+ * The braces are a redis cluster hash tag shared with `encodeOrgLastChangeKey`: the script and the
+ * reads of `Stream.getUpdatedOrgs` touch both keys, which must therefore live in one slot.
+ *
+ * @param {string} prefix
+ */
+export const encodeOrgUpdatedKey = prefix => `${prefix}:org_updated:{orgs}`
+
+/**
+ * The hash of every org's last-change clock: org → the ms of the stream id of its last content
+ * message (the max over its documents' `doc_updated` scores). Only ever raised - see
+ * `updateOrgsScript`. It names each org's member in `encodeOrgUpdatedKey`, whose hash tag it shares.
+ *
+ * @param {string} prefix
+ */
+export const encodeOrgLastChangeKey = prefix => `${prefix}:org_last_change:{orgs}`
+
+/**
+ * `updateOrgsScript` builds the same string.
+ *
+ * @param {string} org
+ * @param {string|number} t
+ */
+export const encodeOrgUpdatedMember = (org, t) => `${org}:${t}`
+
+/**
+ * Splits at the last colon - `t` is digits, the org may contain colons.
+ *
+ * @param {string} member
+ * @return {{ org: string, t: number }}
+ */
+export const decodeOrgUpdatedMember = member => {
+  const i = member.lastIndexOf(':')
+  return { org: member.slice(0, i), t: number.parseInt(member.slice(i + 1)) }
+}
+
+/**
+ * @param {Array<string>} reply - of TIME: seconds, microseconds
+ */
+const timeReplyToMs = ([seconds, microseconds]) => number.parseInt(seconds) * 1000 + math.floor(number.parseInt(microseconds) / 1000)
+
+/**
+ * Raise orgs' last-change clocks, and stamp every org whose clock went up with the time the index
+ * learned of it - swapping its member for one with the new `t`. Both members are built from the
+ * string the hash holds, so the old one is always found. The stamp is TIME, or the latest stamp + 1
+ * if that is higher: stamps strictly increase - and at least the org's `t`, a stream clock that can
+ * run ahead of TIME (see `encodeOrgUpdatedKey`). An org whose clock did not go up keeps
+ * its stamp: whatever it reports was already learned - stamped after that change happened - so
+ * restamping would only list it again (the worker reports every compacted document's clock).
+ */
+const updateOrgsScript = `
+  -- KEYS[1]  the learned zset (encodeOrgUpdatedKey)
+  -- KEYS[2]  the last-change hash (encodeOrgLastChangeKey)
+  -- ARGV     org, t pairs - t: unix ms of the org's last change
+  local time = redis.call("TIME")
+  local now = time[1] * 1000 + math.floor(time[2] / 1000)
+  local latest = redis.call("ZRANGE", KEYS[1], -1, -1, "WITHSCORES")
+  if latest[2] then now = math.max(now, tonumber(latest[2]) + 1) end
+  for i = 1, #ARGV, 2 do
+    local org, t = ARGV[i], ARGV[i + 1]
+    local known = redis.call("HGET", KEYS[2], org)
+    if known == false or tonumber(t) > tonumber(known) then
+      if known then redis.call("ZREM", KEYS[1], org .. ":" .. known) end
+      redis.call("HSET", KEYS[2], org, t)
+      redis.call("ZADD", KEYS[1], math.max(now, tonumber(t)), org .. ":" .. t)
+    end
+  end
+`
+
+/**
  * @param {string} member
  * @return {{ docid: string, branch: string }}
  */
@@ -156,6 +251,59 @@ export const redisClockToMs = clock => number.parseInt(clock.split('-')[0])
  */
 export const minRedisClock = (a, b) => isSmallerRedisClock(a, b) ? a : b
 
+/**
+ * Raise the last-change clock of each org, stamping the orgs whose clock went up as learned now
+ * (see `updateOrgsScript`) - a lower clock than the stored one is ignored.
+ *
+ * @internal - not part of the public api, which only reads the index (`Stream.getUpdatedOrgs`)
+ * @param {Stream} stream
+ * @param {Map<string, number>} orgs org → unix ms of its last change
+ */
+export const writeOrgsUpdated = async (stream, orgs) => {
+  await stream.redis.updateOrgs(stream.orgUpdatedKey, stream.orgLastChangeKey, orgs)
+}
+
+/**
+ * Note that `org` changed at `ms`. Collected per process and written by the next
+ * `flushOrgUpdates`, at most `orgUpdatedFlushInterval` later. After `destroy` the mark is dropped
+ * - the change is on the stream, and the worker's write before trimming reports it.
+ *
+ * @internal - not part of the public api
+ * @param {Stream} stream
+ * @param {string} org
+ * @param {number} ms
+ */
+export const markOrgUpdated = (stream, org, ms) => {
+  if (stream._destroyed) return
+  if ((stream._orgUpdates.get(org) ?? -1) < ms) stream._orgUpdates.set(org, ms)
+  stream._orgUpdatesTimeout ??= setTimeout(() => {
+    stream._orgUpdatesTimeout = null
+    flushOrgUpdates(stream)
+  }, stream.orgUpdatedFlushInterval)
+}
+
+/**
+ * Write the orgs collected by `markOrgUpdated` in one request. A failed write is merged back and
+ * retried with the next flush (dropped after `destroy`, like any mark). While redis is unreachable
+ * the write is not sent at all and fails the same way: node-redis would queue it until redis is
+ * back, and hold `destroy` with it - its graceful close waits for every queued command.
+ *
+ * @internal - not part of the public api
+ * @param {Stream} stream
+ */
+export const flushOrgUpdates = async stream => {
+  const batch = stream._orgUpdates
+  if (batch.size === 0) return
+  stream._orgUpdates = new Map()
+  try {
+    if (!stream.redis.isReady) throw error.create('redis is not ready')
+    await writeOrgsUpdated(stream, batch)
+  } catch (err) {
+    log.error({ err, orgCount: batch.size }, 'error flushing updated orgs')
+    batch.forEach((ms, org) => markOrgUpdated(stream, org, ms))
+  }
+}
+
 export class Stream {
   /**
    * @param {import('./types.js').YHubConfig} config
@@ -177,6 +325,22 @@ export class Stream {
      * Results are cached for `cacheTtl + computeTime * 2`.
      */
     this.cacheTtl = config.redis.cacheTtl ?? 5
+    /**
+     * Ms between flushes of the orgs this process changed to `encodeOrgUpdatedKey`. (default: 1000)
+     */
+    this.orgUpdatedFlushInterval = config.redis.orgUpdatedFlushInterval ?? 1000
+    this.orgUpdatedKey = encodeOrgUpdatedKey(this.prefix)
+    this.orgLastChangeKey = encodeOrgLastChangeKey(this.prefix)
+    /**
+     * org → ms of its last change, not yet flushed to `orgUpdatedKey`
+     *
+     * @type {Map<string, number>}
+     */
+    this._orgUpdates = new Map()
+    /**
+     * @type {ReturnType<typeof setTimeout>|null}
+     */
+    this._orgUpdatesTimeout = null
     this.workerStreamName = this.prefix + ':worker'
     this.workerGroupName = this.prefix + ':worker'
     this.compactionDisabledSetName = this.prefix + ':compaction_disabled'
@@ -351,6 +515,22 @@ export class Stream {
             parser.pushKey(streamName)
           },
           transformReply (reply) { return reply }
+        }),
+        updateOrgs: redis.defineScript({
+          NUMBER_OF_KEYS: 2,
+          SCRIPT: updateOrgsScript,
+          /**
+           * @param {import('@redis/client').CommandParser} parser
+           * @param {string} learnedKey
+           * @param {string} lastChangeKey
+           * @param {Map<string, number>} orgs org → unix ms of its last change
+           */
+          parseCommand (parser, learnedKey, lastChangeKey, orgs) {
+            parser.pushKey(learnedKey)
+            parser.pushKey(lastChangeKey)
+            orgs.forEach((t, org) => parser.push(org, t.toString()))
+          },
+          transformReply (reply) { return reply }
         })
       }
     })
@@ -372,8 +552,7 @@ export class Stream {
    * @return {Promise<number>}
    */
   async getTime () {
-    const [seconds, microseconds] = await this.redis.time()
-    return number.parseInt(seconds) * 1000 + math.floor(number.parseInt(microseconds) / 1000)
+    return timeReplyToMs(await this.redis.time())
   }
 
   async getPendingTasksSize () {
@@ -385,19 +564,83 @@ export class Stream {
   }
 
   /**
-   * The documents of `org` with live stream content whose last change has a stream clock in
-   * `[from, to]` (unix ms, inclusive), oldest first - see `encodeDocUpdatedKey`.
+   * The documents of `org` with live stream content whose last change has a stream clock at or
+   * after `from` (unix ms), oldest first - see `encodeDocUpdatedKey` - and `now`, the redis time
+   * (ms) read in the same transaction right after the index: a change appended after the read is
+   * at `now` or later. `to` (inclusive) bounds the read when a single millisecond is read whole.
    *
    * @param {string} org
    * @param {object} range
    * @param {number} range.from
-   * @param {number} range.to
+   * @param {number} [range.to]
    * @param {number} [range.limit]
-   * @return {Promise<Array<{ docid: string, branch: string, t: number }>>}
+   * @return {Promise<{ docs: Array<{ docid: string, branch: string, t: number }>, now: number }>}
    */
   async getUpdatedDocs (org, { from, to, limit }) {
-    const members = await this.redis.zRangeWithScores(encodeDocUpdatedKey(org, this.prefix), from, to, { BY: 'SCORE', ...(limit == null ? {} : { LIMIT: { offset: 0, count: limit } }) })
-    return members.map(({ value, score }) => ({ ...decodeDocUpdatedMember(value), t: score }))
+    const [members, time] = /** @type {[Array<{ value: string, score: number }>, Array<string>]} */ (/** @type {unknown} */ (await this.redis.multi().zRangeWithScores(encodeDocUpdatedKey(org, this.prefix), from, to ?? '+inf', { BY: 'SCORE', ...(limit == null ? {} : { LIMIT: { offset: 0, count: limit } }) }).time().exec()))
+    return { docs: members.map(({ value, score }) => ({ ...decodeDocUpdatedMember(value), t: score })), now: timeReplyToMs(time) }
+  }
+
+  /**
+   * One page of the orgs the index learned a change of after `since` (a learn clock - see
+   * `encodeOrgUpdatedKey` - exclusive), oldest first, each with its last-change clock `t`, and the
+   * cursor `next` of the following page. The page never splits a learned millisecond, so `limit` is
+   * soft. Without `limit` the page holds every org learned after `since`.
+   *
+   * Stamps strictly increase (`updateOrgsScript`), so whatever is stamped after a read is past its
+   * `next`. And `next` never names the millisecond the page was read in (redis TIME, read in the
+   * same transaction right after the index): the orgs learned in it are listed again on the next
+   * page, so the change of a listed org that a consumer looks up within that millisecond is not
+   * missed (`GET /updated/v1/{org}` ends before the current millisecond). A page that lists orgs
+   * can therefore return `next === since`.
+   *
+   * `orgs` restricts the page to the listed orgs - only their entries are read, so the cost follows
+   * the list, not the number of orgs in the index. An empty list lists no org. `'*'` reads the index
+   * by score. The list must hold unique entries, in any order - the caller filters duplicates (the
+   * normalized global `orgs` facet already has): an org named twice would be listed twice.
+   *
+   * @param {object} page
+   * @param {number} page.since
+   * @param {number} [page.limit]
+   * @param {'*' | Array<string>} page.orgs
+   * @return {Promise<{ orgs: Array<{ org: string, t: number }>, next: number }>}
+   */
+  async getUpdatedOrgs ({ since, limit, orgs }) {
+    /**
+     * @type {Array<{ org: string, t: number, learned: number }>}
+     */
+    let page
+    let now
+    if (orgs === '*') {
+      const reply = /** @type {[Array<{ value: string, score: number }>, Array<string>]} */ (/** @type {unknown} */ (await this.redis.multi().zRangeWithScores(this.orgUpdatedKey, `(${since}`, '+inf', { BY: 'SCORE', ...(limit == null ? {} : { LIMIT: { offset: 0, count: limit } }) }).time().exec()))
+      now = timeReplyToMs(reply[1])
+      let members = reply[0]
+      if (limit != null && members.length >= limit) {
+        // the millisecond at the end of a full page is read whole - an org restamped in between is above it
+        const cut = array.last(members).score
+        members = members.filter(m => m.score < cut).concat(await this.redis.zRangeWithScores(this.orgUpdatedKey, cut, cut, { BY: 'SCORE' }))
+      }
+      page = members.map(({ value, score }) => ({ ...decodeOrgUpdatedMember(value), learned: score }))
+    } else {
+      if (orgs.length === 0) return { orgs: [], next: since }
+      const reply = /** @type {[Array<string|null>, Array<string>]} */ (/** @type {unknown} */ (await this.redis.multi().hmGet(this.orgLastChangeKey, orgs).time().exec()))
+      now = timeReplyToMs(reply[1])
+      const members = orgs.flatMap((org, i) => {
+        const t = reply[0][i]
+        return t == null ? [] : [encodeOrgUpdatedMember(org, t)]
+      })
+      // a member gone since the first read was restamped after it, above every stamp listed here - past `next`, so it is listed with its new stamp
+      const learned = members.length === 0 ? [] : await this.redis.zmScore(this.orgUpdatedKey, members)
+      page = members.flatMap((member, i) => {
+        const l = learned[i]
+        return l == null || l <= since ? [] : [{ ...decodeOrgUpdatedMember(member), learned: l }]
+      }).sort((a, b) => a.learned - b.learned)
+      if (limit != null && page.length > limit) {
+        const cut = page[limit - 1].learned
+        page = page.filter(e => e.learned <= cut)
+      }
+    }
+    return { orgs: page.map(({ org, t }) => ({ org, t })), next: page.length > 0 ? math.max(since, math.min(array.last(page).learned, now - 1)) : since }
   }
 
   /**
@@ -517,8 +760,11 @@ export class Stream {
    * @param {t.DocRef} docRef
    * @param {t.Message} m
    */
-  addMessage (docRef, m) {
-    return this.redis.addMessage(encodeRoomName(docRef, this.prefix), encodeDocUpdatedKey(docRef.org, this.prefix), encodeDocUpdatedMember(docRef), t.isContentMessage(m.type), Buffer.from(buffer.encodeAny(m)))
+  async addMessage (docRef, m) {
+    const isContent = t.isContentMessage(m.type)
+    const id = await this.redis.addMessage(encodeRoomName(docRef, this.prefix), encodeDocUpdatedKey(docRef.org, this.prefix), encodeDocUpdatedMember(docRef), isContent, Buffer.from(buffer.encodeAny(m)))
+    isContent && markOrgUpdated(this, docRef.org, redisClockToMs(id))
+    return id
   }
 
   /**
@@ -626,6 +872,9 @@ export class Stream {
       [redis.RESP_TYPES.BLOB_STRING]: Buffer
     }).xRange(quar, '-', '+')
     const multi = this.redis.multi()
+    // the reply index of the last re-injected content message - its id is the org's last change
+    let lastContent = -1
+    let queued = 0
     for (const entry of entries) {
       const m = entry.message.m
       if (m == null) continue
@@ -633,10 +882,15 @@ export class Stream {
       // auth:check directives are transient (their intent was fulfilled while they were live) and
       // not replay-idempotent - re-injected with a fresh clock they would kick matching
       // connections again, so they are dropped instead
-      if (type !== 'auth:check:v1') multi.addMessage(live, encodeDocUpdatedKey(docRef.org, this.prefix), encodeDocUpdatedMember(docRef), t.isContentMessage(type), /** @type {Buffer} */ (m))
+      if (type !== 'auth:check:v1') {
+        if (t.isContentMessage(type)) lastContent = queued
+        multi.addMessage(live, encodeDocUpdatedKey(docRef.org, this.prefix), encodeDocUpdatedMember(docRef), t.isContentMessage(type), /** @type {Buffer} */ (m))
+        queued++
+      }
     }
     multi.del(quar)
-    await multi.exec()
+    const replies = await multi.exec()
+    if (lastContent >= 0) markOrgUpdated(this, docRef.org, redisClockToMs(/** @type {any} */ (replies[lastContent])))
     log.info({ docRef, qid, count: entries.length }, 'unquarantined stream')
     return entries.length
   }
@@ -714,7 +968,24 @@ export class Stream {
    * connections just added still reach redis. The subscription loop exits after its current read.
    */
   async destroy () {
+    // best effort: replies arrive in order, so once the ping's has, every write sent before it has
+    // answered - and a timer later their org marks (a few promise hops behind each reply) have run,
+    // in time for the flush below. A failed ping, a write that had to retry (NOSCRIPT) or one sent
+    // after this leaves its mark to the worker's repair. Not sent while redis is not ready:
+    // node-redis would queue it and hold `destroy` until redis is back. The ping is given at most
+    // 10s, so an unresponsive redis cannot hold `destroy` either
+    if (this.redis.isReady) {
+      /** @type {any} */
+      let timeout
+      await Promise.race([this.redis.ping().catch(() => {}), new Promise(resolve => { timeout = setTimeout(resolve, 10000) })])
+      clearTimeout(timeout)
+      await promise.wait(0)
+    }
     this._destroyed = true
+    // the orgs changed since the last flush
+    if (this._orgUpdatesTimeout != null) clearTimeout(this._orgUpdatesTimeout)
+    this._orgUpdatesTimeout = null
+    await flushOrgUpdates(this)
     await promise.all([this.redis.close(), this.redisSubscriptions?.close()])
   }
 

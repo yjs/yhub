@@ -602,6 +602,12 @@ export const $config = s.$object({
      */
     cacheTtl: s.$number.optional,
     /**
+     * Ms between flushes of the orgs this process changed to the global `{prefix}:org_updated:{orgs}`
+     * index (`GET /api/updated/v1`). An org moves at most once per interval and process, so a
+     * longer one gives a lagging consumer more time to reach it. (default: 1000)
+     */
+    orgUpdatedFlushInterval: s.$number.optional,
+    /**
      * Additional options passed to the Redis client.
      * Merged before YHub's required url and socket defaults. Custom scripts are merged with YHub scripts.
      * @type {s.$Optional<s.Schema<Omit<import('@redis/client').RedisClientOptions, 'url'>>>}

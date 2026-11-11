@@ -201,9 +201,14 @@ adding a floor key (e.g. `branch.docs`) later is purely additive and changes no 
 { type: 'permissions:branch:v1', endpoint: { [name]: CRUD | false } | false }
 // $orgPermissionsV1
 { type: 'permissions:org:v1', endpoint: { [name]: CRUD | false } | false }
-// $globalPermissionsV1
-{ type: 'permissions:global:v1', endpoint: { [name]: CRUD | false } | false }
+// $globalPermissionsV1 - `orgs`: the orgs the subject has access to
+{ type: 'permissions:global:v1', orgs: '*' | string[] | false, endpoint: { [name]: CRUD | false } | false }
 ```
+
+`global.orgs` is the first floor key (§10) to ship: `'*'` or a list, normalized to `'*'`, a sorted
+deduplicated list, or `false`; intersection keeps the common orgs (`'*'` is the identity). So far
+it only restricts the global updated-orgs listing (`GET /updated/v1`) - it grants nothing at org
+or document scope yet.
 
 ## 5. Merge algebra
 

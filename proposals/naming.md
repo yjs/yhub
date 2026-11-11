@@ -142,5 +142,5 @@ The full rename set (breaking, one release):
 | `ResourcePermissions`, middle-tier `DocumentPermissions` (drafts) | `BranchPermissions` (`'permissions:branch:v1'`, `{org, branch}`, endpoint-only in v1) |
 | endpoint `scope: 'doc'` | `scope: 'document'` — the one spelling of the tier across `createApiEndpoint({ scope })`, `authorize(scope, ..)`, and `createAuthorize({ document })` (the type literal stays `'permissions:document:v1'`; `docid`/`docRef` stay); a docless `scope: 'branch'` is deferred (its route shape is undecided: branch is a query parameter) |
 | `accessPurpose` | the `endpoint` facet (checked for every rest endpoint) + in-handler facet checks |
-| `readAuthInfo` / `getAccessType`, `getOrgAccessType`, `getGlobalAccessType` | `authenticate` / `authorize` — the auth plugin is `{ authenticate, authorize }` |
+| `readAuthInfo` / `getAccessType`, `getOrgAccessType`, `getGlobalAccessType` | `authenticate` / `authorize` — the auth plugin is `{ authenticate, authorize, filterAuthorized }` (the batch check, added later) |
 | `rest` / `restCustom` (draft) | `endpoint` facet (the draft's `context` attribute was dropped — permissions.md §8) |

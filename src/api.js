@@ -144,7 +144,7 @@ export const encodedAny = bytes => new EncodedAny(bytes)
  *
  * @template T
  * @param {import('./index.js').YHub} yhub
- * @param {'authenticate'|'authorize'} hook
+ * @param {'authenticate'|'authorize'|'filterAuthorized'} hook
  * @param {Promise<T>} p
  * @return {Promise<T>}
  */
@@ -164,14 +164,14 @@ export const withAuthTimeout = (yhub, hook, p) => {
 
 /**
  * Run one auth hook, bounded by `server.authTimeout`. A branded apiError is the plugin's own
- * answer - a 401 from `authenticate` rejecting a credential, a 503 outage from either hook - and
+ * answer - a 401 from `authenticate` rejecting a credential, a 503 outage from any hook - and
  * passes through, as does the timeout's 503; any other throw is an infrastructure failure: 503,
  * transient like the ws recheck's 1013. Deny is a value on both hooks (`authenticate` → null: an
  * anonymous caller; `authorize` → null: no permissions).
  *
  * @template T
  * @param {import('./index.js').YHub} yhub
- * @param {'authenticate'|'authorize'} hook
+ * @param {'authenticate'|'authorize'|'filterAuthorized'} hook
  * @param {() => Promise<T>} run
  */
 export const runAuthHook = async (yhub, hook, run) => {
@@ -227,6 +227,28 @@ export const resolvePermissions = async (yhub, req, scope, resourceId) => {
   if (authInfo != null) s.$string.expect(authInfo.userid)
   const answer = await runAuthHook(yhub, 'authorize', () => auth.authorize(scope, resourceId, authInfo))
   return { authInfo, permissions: normalizeAuthorizeAnswer(scope, answer) }
+}
+
+/**
+ * The batch check: the resources of `resourceIds` that `user` holds `required` on - the plugin's
+ * answer as is, from one `filterAuthorized` call for the whole list. Its entries equal given ones
+ * by value, not identity, in any order - match them by value. An empty list and a scope without a
+ * handler hold nothing, without a call. Errors: see `runAuthHook`.
+ *
+ * @template {perm.PermissionScope} S
+ * @param {import('./index.js').YHub} yhub
+ * @param {S} scope
+ * @param {Array<perm.PermissionResourceId<S>>} resourceIds
+ * @param {perm.ToPermissionType<S>} required - an input-form permission object of the scope
+ * @param {t.UserAuthInfo|null} user
+ * @return {Promise<Array<perm.PermissionResourceId<S>>>}
+ */
+export const filterAuthorized = async (yhub, scope, resourceIds, required, user) => {
+  const handlers = /** @type {t.AuthPlugin<any>} */ (yhub.conf.server?.auth).filterAuthorized
+  const handler = handlers[scope]
+  if (handler == null || resourceIds.length === 0) return []
+  // called as a method of `handlers`, as `createAuthorize` does: a class-based plugin keeps `this`
+  return runAuthHook(yhub, 'filterAuthorized', () => handler.call(handlers, resourceIds, required, user))
 }
 
 const apiMethods = /** @type {{ get: 'get', post: 'post', put: 'put', patch: 'patch', delete: 'del' }} */ ({ get: 'get', post: 'post', put: 'put', patch: 'patch', delete: 'del' })

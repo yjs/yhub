@@ -7,12 +7,13 @@ import * as delta from 'lib0/delta'
 import * as awarenessProtocol from '@y/protocols/awareness'
 import * as types from '../src/types.js'
 import * as stream from '../src/stream.js'
+import { createDocumentPermissions, hasPermissions, normalizeDocumentPermissions } from '../src/permissions.js'
 import { createContentMap } from '../src/y-utils.js'
 import * as utils from './utils.js'
 
 /**
  * The updated-documents listing (`GET /updated`): the redis index that shares its lifetime with a
- * document's stream, the persisted half, the cursor protocol, per-document authorization, and the
+ * document's stream, the persisted half, the cursor protocol, the batch permission check, and the
  * changeset's `t` and `diff` that a poller consumes.
  */
 
@@ -33,8 +34,35 @@ const learnedOf = async o => {
 }
 
 /**
- * A hub whose auth plugin answers per document: docids ending in `-secret` are unreadable, `nobody`
- * holds no org grant and no orgs, `noglobal` no global grant, and `broken`'s document checks fail.
+ * The calls of the auth hub's batch check, in order.
+ *
+ * @type {Array<{ docRefs: Array<import('../src/types.js').DocRef>, required: import('../src/permissions.js').DocumentPermissionsV1, userid: string|null }>}
+ */
+const filterCalls = []
+
+/**
+ * The auth hub's grant on every document it lets a user read.
+ */
+const readGrant = createDocumentPermissions({ ydoc: '-r--' })
+const normalizedReadGrant = normalizeDocumentPermissions(readGrant)
+
+/**
+ * Whether the auth hub lets `user` read `docRef` - its `authorize` and `filterAuthorized` both
+ * answer from this, so they agree: docids ending in `-secret` are unreadable, and `broken`'s
+ * document checks fail.
+ *
+ * @param {import('../src/types.js').DocRef} docRef
+ * @param {{ userid: string } | null} user
+ */
+const mayRead = (docRef, user) => {
+  if (user?.userid === 'broken') throw new Error('permission backend down')
+  return !docRef.docid.endsWith('-secret')
+}
+
+/**
+ * A hub whose auth plugin answers per document (`mayRead`), `nobody` holds no org grant and no
+ * orgs, `noglobal` no global grant, and the batch check of `copies` answers each unreadable
+ * document under another org, then equal copies of the readable ones instead of the given objects.
  * Globally, `reader` has every org (`orgs: '*'`) and `orgs=a,b` the listed ones. Same redis and
  * postgres as the shared hub, so what is written there is listed here.
  */
@@ -59,11 +87,17 @@ await utils.createTestHub({
           return { type: 'permissions:global:v1', endpoint: { updated: '-r--' }, ...(orgs === undefined ? {} : { orgs }) }
         },
         org: async (_org, user) => user?.userid === 'nobody' ? null : { type: 'permissions:org:v1', endpoint: { updated: '-r--' } },
-        document: async (docRef, user) => {
-          if (user?.userid === 'broken') throw new Error('permission backend down')
-          return docRef.docid.endsWith('-secret') ? null : { type: 'permissions:document:v1', ydoc: '-r--' }
+        document: async (docRef, user) => mayRead(docRef, user) ? readGrant : null
+      }),
+      filterAuthorized: {
+        document: async (docRefs, required, user) => {
+          filterCalls.push({ docRefs, required, userid: user?.userid ?? null })
+          const readable = hasPermissions(normalizedReadGrant, required) ? docRefs.filter(docRef => mayRead(docRef, user)) : []
+          return user?.userid !== 'copies'
+            ? readable
+            : docRefs.filter(docRef => !mayRead(docRef, user)).map(docRef => ({ ...docRef, org: `${docRef.org}-other` })).concat(readable.map(docRef => ({ ...docRef })))
         }
-      })
+      }
     })
   }
 })
@@ -348,13 +382,15 @@ export const testPageEndsBeforeTheOpenMillisecond = async tc => {
 }
 
 /**
- * One `authorize('document', …)` per listed document: unreadable documents are filtered out but
- * still move the cursor, a missing org grant is 403, and a failing plugin fails the request rather
- * than silently dropping documents.
+ * One `filterAuthorized` call per page, with every listed document and the ydoc `r` requirement:
+ * unreadable documents are filtered out but still move the cursor, a missing org grant is 403, a
+ * failing plugin fails the request rather than silently dropping documents, the answer is matched
+ * by value (equal copies in any order; an entry of another org lists nothing), and an empty page
+ * asks nothing.
  *
  * @param {t.TestCase} tc
  */
-export const testPerDocumentAuthorization = async tc => {
+export const testFilterAuthorized = async tc => {
   await utils.createTestCase(tc)
   const since = (await yhub.stream.getTime()) - 1
   const publicRef = { org, docid: `${tc.testName}-public`, branch: 'main' }
@@ -366,14 +402,21 @@ export const testPerDocumentAuthorization = async tc => {
   const tSecret = await appendEdit(secretRef, sec, () => sec.get().insert(0, 'secret'))
   await promise.wait(5)
   const host = `localhost:${authPort}`
+  filterCalls.length = 0
   const page = await get(`/updated/v1/${org}?since=${since}`, { host, user: 'reader' })
   t.assert(page.status === 200)
   const listing = /** @type {Listing} */ (page.body)
   t.compare(listing.docs.map(d => d.docid), [publicRef.docid], 'unreadable documents are filtered out')
   t.assert(listing.next === tSecret, 'but still advance the cursor')
+  t.compare(filterCalls, [{ docRefs: [publicRef, secretRef], required: createDocumentPermissions({ ydoc: '-r--' }), userid: 'reader' }], 'one batch check with every listed document')
   t.assert((await get(`/updated/v1/${org}?since=${since}`, { host, user: 'nobody' })).status === 403, 'no org grant')
   const broken = await get(`/updated/v1/${org}?since=${since}`, { host, user: 'broken' })
   t.assert(broken.status === 503 && broken.body.code === 'auth-unavailable', 'a failing plugin fails the request')
+  t.compare((await get(`/updated/v1/${org}?since=${since}`, { host, user: 'copies' })).body, listing, 'the answer is matched by value - not by identity, position, or docid alone')
+  filterCalls.length = 0
+  const empty = await get(`/updated/v1/${org}?since=${tSecret}`, { host, user: 'reader' })
+  t.compare(empty.body, { docs: [], next: tSecret }, 'caught up')
+  t.assert(filterCalls.length === 0, 'an empty page asks nothing')
 }
 
 /**

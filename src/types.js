@@ -337,7 +337,13 @@ export const $persistencePlugin = s.$object({
 
 export const $authPlugin = /** @type {s.Schema<AuthPlugin<any>>} */ (s.$object({
   authenticate: /** @type {any} */ (s.$function),
-  authorize: /** @type {any} */ (s.$function)
+  authorize: /** @type {any} */ (s.$function),
+  filterAuthorized: s.$object({
+    global: s.$function.optional,
+    org: s.$function.optional,
+    branch: s.$function.optional,
+    document: s.$function.optional
+  })
 }))
 
 /**
@@ -345,14 +351,27 @@ export const $authPlugin = /** @type {s.Schema<AuthPlugin<any>>} */ (s.$object({
  */
 
 /**
+ * The batch check of the auth plugin, one handler per scope: which of the given resources `user`
+ * (null: anonymous) holds `required` on. Each handler receives the scope's resourceIds and the
+ * input-form requirement (`{ type: 'permissions:document:v1', ydoc: '-r--' }`) and returns the
+ * resources that hold it, in any order - compared by value, so they may be fresh objects (built
+ * from database rows, say). Scopes without a handler hold nothing.
+ *
+ * @template {UserAuthInfo} AuthInfo
+ * @typedef {{ [Scope in import('./permissions.js').PermissionScope]?: (resourceIds: Array<import('./permissions.js').PermissionResourceId<Scope>>, required: import('./permissions.js').ToPermissionType<Scope>, user: AuthInfo|null) => Promise<Array<import('./permissions.js').PermissionResourceId<Scope>>> }} FilterAuthorizedHandlers
+ */
+
+/**
  * The auth plugin (`server.auth`): `authenticate` establishes who is asking, `authorize` answers
  * what they may do with one resource - a typed permission object per scope (see
- * `@y/hub/permissions` and proposals/permissions.md).
+ * `@y/hub/permissions` and proposals/permissions.md) - and `filterAuthorized` which of many
+ * resources hold one requirement.
  *
  * @template {UserAuthInfo} AuthInfo
  * @typedef {object} AuthPlugin
  * @property {(req: import('uws').HttpRequest) => Promise<AuthInfo|null>} AuthPlugin.authenticate - establish who is asking: return the caller's identity (`{ userid, ... }`) or null for an anonymous caller - `authorize` is then asked with `user: null` and may still grant (public documents). Throw a branded `apiError(401, ...)` (from `@y/hub`) to reject a presented credential, `apiError(503, ...)` to signal a temporary auth-backend outage - rest requests and the websocket upgrade respond with that status. Any other throw is an infrastructure failure and answers 503.
  * @property {<Scope extends import('./permissions.js').PermissionScope>(scope: Scope, resourceId: import('./permissions.js').PermissionResourceId<Scope>, user: AuthInfo|null) => Promise<import('./permissions.js').ToPermissionType<Scope> | null>} AuthPlugin.authorize - answer the input-form permissions of `user` (null: anonymous) on the addressed resource. `scope` names the tier ('document' → resourceId {org, docid, branch}, 'branch' → {org, branch}, 'org' → {org}, 'global' → {}) and the return type is forced to match it (`ToPermissionType<Scope>` from `@y/hub/permissions`) - implement via `createAuthorize` for full checking; a hand-rolled function body cannot correlate a runtime check of `scope` with its return type and needs a cast. Every answer is additionally validated against the scope's permission schema at runtime. Denial is a value: return null (or an object granting nothing) - never throw to deny. A throw is an infrastructure failure: rest requests and the websocket upgrade answer 503 (a branded apiError passes its status through), a websocket recheck disconnects 1013 (transient), never 4401. Must be deterministic per (scope, resourceId, user) between upgrade and recheck - wall-clock-relative grants (`from: now - 30d`) flap connections; compute such bounds when the grant is stored, not when it is read.
+ * @property {FilterAuthorizedHandlers<AuthInfo>} AuthPlugin.filterAuthorized - the batch check: one handler per scope answering which of the given resources `user` holds `required` on, in any order and compared by value (an entry yhub did not ask about is ignored). It must agree with `authorize`: a resource is listed iff `hasPermissions` of its normalized `authorize` answer and `required` holds - that is also the naive implementation (one `authorize` per resource), correct but slow for many resources; answer from one backend query instead. Scopes without a handler hold nothing. Denial is leaving a resource out - a throw is an infrastructure failure (503, a branded apiError passes its status through), as for `authorize`. yhub asks it for `'document'` from `GET /updated/v1/{org}`, once per page.
  */
 
 /**
@@ -717,7 +736,8 @@ export const $config = s.$object({
      */
     maxVersionSize: s.$number.optional,
     /**
-     * Milliseconds the auth plugin's `authenticate` and `authorize` may take. A hook that doesn't
+     * Milliseconds each call of the auth plugin's `authenticate`, `authorize` and `filterAuthorized`
+     * may take - a `filterAuthorized` call covers its whole batch. A hook that doesn't
      * settle in time is abandoned: rest requests and the websocket upgrade answer 503
      * `auth timeout`, a websocket recheck closes the connection with 1013. Must be finite - node
      * runs a delay above 2^31-1 ms after 1 ms, so `Infinity` would time out every call.

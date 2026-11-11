@@ -13,6 +13,7 @@ import postgres from 'postgres'
 import * as object from 'lib0/object'
 import * as types from '../src/types.js'
 import { encodeRoomName } from '../src/stream.js'
+import { hasPermissions, normalizeDocumentPermissions } from '../src/permissions.js'
 import * as protocol from '../src/protocol.js'
 
 // Clean up test data. Nothing here creates the schema - the databases are expected to be
@@ -149,6 +150,21 @@ const testApiSpecs = [
   }
 ]
 
+/**
+ * The shared hub's grant on every document.
+ *
+ * @type {import('../src/permissions.js').DocumentPermissionsV1}
+ */
+const documentGrant = {
+  type: 'permissions:document:v1',
+  ydoc: 'crud',
+  awareness: 'crud',
+  history: { from: 0, rollback: true, prune: true, version: 'crud', publish: true },
+  delete: ['soft', 'hard'],
+  endpoint: { '*': 'crud' }
+}
+const normalizedDocumentGrant = normalizeDocumentPermissions(documentGrant)
+
 export const yhub = await createYHub({
   redis: {
     url: env.ensureConf('redis'),
@@ -181,18 +197,15 @@ export const yhub = await createYHub({
       // the suite's shared hub grants everything at every scope - restrictive behavior is
       // exercised on dedicated hubs (auth.tests.js, permissionsEnforcement.tests.js)
       authorize: types.createAuthorize({
-        document: async () => ({
-          type: 'permissions:document:v1',
-          ydoc: 'crud',
-          awareness: 'crud',
-          history: { from: 0, rollback: true, prune: true, version: 'crud', publish: true },
-          delete: ['soft', 'hard'],
-          endpoint: { '*': 'crud' }
-        }),
+        document: async () => documentGrant,
         branch: async () => ({ type: 'permissions:branch:v1', endpoint: { '*': 'crud' } }),
         org: async () => ({ type: 'permissions:org:v1', endpoint: { '*': 'crud' } }),
         global: async () => ({ type: 'permissions:global:v1', endpoint: { '*': 'crud' } })
-      })
+      }),
+      // agrees with `authorize`: every document has the same grant
+      filterAuthorized: {
+        document: async (docRefs, required) => hasPermissions(normalizedDocumentGrant, required) ? docRefs : []
+      }
     }),
     api: testApiSpecs
   },

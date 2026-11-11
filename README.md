@@ -80,11 +80,12 @@ components coordinate which document needs to be persisted using a separate
 worker-queue (see `y:worker` stream in redis).
 
 Authorization runs in-process: you pass an auth plugin (an object with
-`authenticate` and `authorize` callbacks, built with `createAuthPlugin`) to the
-server configuration. `authenticate` establishes who is asking — e.g. by
-verifying a JWT your app issued — and `authorize` answers what that user may do
-with a specific document. See [GETTING-STARTED.md](./GETTING-STARTED.md) for
-examples.
+`authenticate`, `authorize` and `filterAuthorized`, built with
+`createAuthPlugin`) to the server configuration. `authenticate` establishes who
+is asking — e.g. by verifying a JWT your app issued — `authorize` answers what
+that user may do with a specific document, and `filterAuthorized` which of many
+documents hold one requirement, in one call. See
+[GETTING-STARTED.md](./GETTING-STARTED.md) for examples.
 
 ## How Documents Are Stored
 
@@ -255,10 +256,15 @@ caller (throw a branded `apiError(401, ...)` to reject a credential).
 scope: return a permission object, or `null` to deny. Denial is a value, never a
 throw — a throw signals an infrastructure failure. Writing a document needs an
 identity (attributions carry the userid); everything else works anonymously
-when granted.
+when granted. `filterAuthorized` is the batch form for requests about many
+documents (`GET /updated` lists only the documents the caller may read): given
+the documents and one requirement, return the ones that hold it — the same
+decision `authorize` makes, answered from one query (see
+[Batch checks](./API.md#batch-checks-filterauthorized)).
 
 ```javascript
 import { createAuthPlugin, createAuthorize } from '@y/hub'
+import { hasPermissions, normalizeDocumentPermissions } from '@y/hub/permissions'
 import * as jwt from 'lib0/crypto/jwt'
 import * as ecdsa from 'lib0/crypto/ecdsa'
 
@@ -297,7 +303,14 @@ const auth = createAuthPlugin({
       const access = await checkUserAccess(user.userid, docRef) // 'rw' | 'r' | null
       return access === null ? null : docPermissions[access]
     }
-  })
+  }),
+  // The batch check: which of docRefs hold `required`, in any order (compared by value).
+  filterAuthorized: {
+    document: async (docRefs, required, user) => {
+      const access = await checkUserAccessMany(user.userid, docRefs) // one query: 'rw' | 'r' | null per docRef, positionally aligned
+      return docRefs.filter((_docRef, i) => access[i] !== null && hasPermissions(normalizeDocumentPermissions(docPermissions[access[i]]), required))
+    }
+  }
 })
 ```
 

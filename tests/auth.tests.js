@@ -55,7 +55,8 @@ await utils.createTestHub({
          * @param {{ userid: string, docRefs: Array<{ docRef: types.DocRef, permissions: import('../src/permissions.js').DocumentPermissionsV1 }> } | null} user
          */
         document: async (docRef, user) => user?.docRefs.find(r => f.equalityDeep(docRef, r.docRef))?.permissions ?? null
-      })
+      }),
+      filterAuthorized: {}
     })
   }
 })
@@ -109,7 +110,8 @@ await utils.createTestHub({
           if (entry === 'throw503') throw apiError(503, 'auth backend unavailable')
           return entry === undefined ? docPermissionsPreset('rw') : entry
         }
-      })
+      }),
+      filterAuthorized: {}
     })
   }
 })
@@ -137,7 +139,8 @@ await utils.createTestHub({
           if (hangHook === 'authorize') await promise.create(() => {})
           return docPermissionsPreset('rw')
         }
-      })
+      }),
+      filterAuthorized: {}
     })
   }
 })

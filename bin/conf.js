@@ -10,6 +10,7 @@ import * as number from 'lib0/number'
 import * as random from 'lib0/random'
 import { S3PersistenceV1 } from '@y/hub/plugins/s3'
 import * as types from '../src/types.js'
+import { hasPermissions, normalizeDocumentPermissions } from '../src/permissions.js'
 
 const userIdChoices = [
   'Calvin Hobbes',
@@ -24,6 +25,19 @@ const userIdChoices = [
  * deletes fits kubernetes' default grace period of 30s.
  */
 export const shutdownDrainMs = number.parseInt(env.getConf('shutdown-drain-ms') || '15000')
+
+/**
+ * @type {import('../src/permissions.js').DocumentPermissionsV1}
+ */
+const documentGrant = {
+  type: 'permissions:document:v1',
+  ydoc: 'cru-',
+  awareness: '-ru-',
+  history: { from: 0, rollback: true, prune: true, version: 'crud', publish: true },
+  delete: ['soft'],
+  endpoint: { '*': 'crud' }
+}
+const normalizedDocumentGrant = normalizeDocumentPermissions(documentGrant)
 
 const bucket = env.getConf('s3-yhub-bucket')
 const corsOrigin = env.getConf('cors-origin') || null
@@ -68,16 +82,12 @@ export const conf = {
       // this demo configuration grants everyone full document access - including the
       // destructive permissions the old blanket 'rw' implied. No org/branch/global grants:
       // scopes without a handler deny, and this demo serves no endpoints at those scopes.
-      authorize: types.createAuthorize({
-        document: async () => ({
-          type: 'permissions:document:v1',
-          ydoc: 'cru-',
-          awareness: '-ru-',
-          history: { from: 0, rollback: true, prune: true, version: 'crud', publish: true },
-          delete: ['soft'],
-          endpoint: { '*': 'crud' }
-        })
-      })
+      authorize: types.createAuthorize({ document: async () => documentGrant }),
+      // the batch check agrees with `authorize`: every document has the same grant, so either all
+      // of them hold the requirement or none does
+      filterAuthorized: {
+        document: async (docRefs, required) => hasPermissions(normalizedDocumentGrant, required) ? docRefs : []
+      }
     })
   },
   worker: {

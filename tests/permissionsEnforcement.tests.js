@@ -44,7 +44,8 @@ await utils.createTestHub({
         const entry = permTable[user?.userid ?? 'anonymous']?.[scope]
         if (entry === 'throw') throw new Error('permission backend down')
         return entry === undefined ? null : entry
-      }
+      },
+      filterAuthorized: {}
     }),
     api: [
       { name: 'gated', get: { handler: async () => ({ ok: 1 }) }, post: { handler: async () => ({ ok: 1 }) } },

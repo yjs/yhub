@@ -116,6 +116,21 @@ Build the plugin with `createAuthPlugin` from `@y/hub` and pass it as
 
 ```javascript
 import { createAuthPlugin, createAuthorize } from '@y/hub'
+import { hasPermissions, normalizeDocumentPermissions } from '@y/hub/permissions'
+
+/**
+ * The permission object of one access row - null denies.
+ */
+const documentPermissions = access => access == null
+  ? null
+  : {
+      type: 'permissions:document:v1',
+      ydoc: access.write ? 'cru-' : '-r--', // positional crud mask: create/read/update/delete
+      awareness: '-ru-',                    // r = receive presence, u = broadcast own
+      history: { from: 0 },                 // from-ray, unix ms; 0 = full history
+      delete: [],                           // deletion kinds granted by name, e.g. ['soft']
+      endpoint: { '*': access.write ? 'crud' : '-r--' }  // rest endpoints + the websocket route ('ws'), '*' = fallback
+    }
 
 const auth = createAuthPlugin({
   async authenticate (req) {
@@ -130,25 +145,27 @@ const auth = createAuthPlugin({
   // One handler per scope - scopes without a handler deny, and each handler's return type is
   // forced to match its scope. Return the permission object, or null to deny - denial is a
   // value, never a throw; a throw means infrastructure failure.
+  // No public documents here: an anonymous caller (user = null) is denied.
   authorize: createAuthorize({
-    document: async (docRef, user) => {
-      const access = await checkUserAccess(user.userid, docRef)
-      if (access == null) return null // deny
-      return {
-        type: 'permissions:document:v1',
-        ydoc: access.write ? 'cru-' : '-r--', // positional crud mask: create/read/update/delete
-        awareness: '-ru-',                    // r = receive presence, u = broadcast own
-        history: { from: 0 },                 // from-ray, unix ms; 0 = full history
-        delete: [],                           // deletion kinds granted by name, e.g. ['soft']
-        endpoint: { '*': access.write ? 'crud' : '-r--' }  // rest endpoints + the websocket route ('ws'), '*' = fallback
-      }
+    document: async (docRef, user) => user === null ? null : documentPermissions(await checkUserAccess(user.userid, docRef))
+  }),
+  // The batch check (e.g. `GET /updated` lists only the documents the caller may read): which of
+  // docRefs hold `required` - the same decision as `authorize`, from one query. Return them in
+  // any order (compared by value); scopes without a handler hold nothing.
+  filterAuthorized: {
+    document: async (docRefs, required, user) => {
+      if (user === null) return [] // as authorize: anonymous callers hold nothing
+      const rows = await checkUserAccessMany(user.userid, docRefs) // positionally aligned
+      return docRefs.filter((_docRef, i) => rows[i] != null && hasPermissions(normalizeDocumentPermissions(documentPermissions(rows[i])), required))
     }
-  })
+  }
 })
 ```
 
 Schemas, sanitizers, and permission combinators are exported from
-`@y/hub/permissions`.
+`@y/hub/permissions`. Implementing `filterAuthorized` with one `authorize` call
+per document is correct but slow for many documents — see
+[Batch checks](./API.md#batch-checks-filterauthorized).
 
 ### Issue tokens from your application
 

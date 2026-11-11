@@ -3,7 +3,8 @@
 Status: accepted; schemas and merges are implemented (`src/permissions.js`, importable as
 `@y/hub/permissions`), enforcement is wired through the server. Replaces `AccessType`
 (`'r'|'rw'|null`), `readAuthInfo` / `getAccessType` / `getOrgAccessType` / `getGlobalAccessType`
-(the plugin is now `{ authenticate, authorize }`), and the advisory `accessPurpose` mechanism.
+(the plugin is now `{ authenticate, authorize, filterAuthorized }`), and the advisory
+`accessPurpose` mechanism.
 Breaking; no compatibility layer — the migration mapping is documented in §12.
 
 Companions: [permissions-prior-art.md](./permissions-prior-art.md) — the research this proposal
@@ -21,13 +22,14 @@ V1 implements a sound, self-contained framework for **what a subject can do on a
 extensible without breaking changes. In: the four typed permission objects (doc permissions
 with the full facet vocabulary; branch/org/global as *endpoint-only* objects), positional CRUD
 masks, the normalized view + implication normalization, the merge algebra (union + intersect),
-the single `authorize` plugin hook, and the enforcement invariants (§9).
+the `authorize` plugin hook with its batch form `filterAuthorized` (§7), and the enforcement
+invariants (§9).
 
 Deliberately **deferred** (each reserved as a purely additive extension): scope floors and any
 permission inheritance between scopes — an org- or branch-level answer never implies anything
 about a document (relations come later); creation gating (`createMain`/`createBranch` — v1 keeps
 today's semantics: a write with `ydoc: 'rw'` to a nonexistent document creates it); cross-branch
-delete; bulk checking, enumeration, and the v2 multi-doc sync (§10); the tag store (§11);
+delete; floors, enumeration, and the v2 multi-doc sync (§10); the tag store (§11);
 subdocuments (naming.md §5); `explainPermissions`; reading a named version's content without
 ydoc `r` or a history ray (a separate grant, never a widened `history.version` `r`).
 
@@ -280,9 +282,26 @@ answering `null` denies the subject outright.
  *   and the ws upgrade answer 503 (a branded apiError passes its status through), a ws recheck
  *   disconnects 1013 (transient), never 4401. A plugin composed of layers (inferred baseline +
  *   refinement queries) MUST throw when any layer fails - never return a partial composition.
+ * @property {{ [S in PermissionScope]?: (resourceIds: Array<PermissionResourceId<S>>, required: ToPermissionType<S>, user: AuthInfo|null) => Promise<Array<PermissionResourceId<S>>> }} filterAuthorized
+ *   The batch check, one handler per scope: the resources of `resourceIds` that hold
+ *   `required`, compared by value, in any order. Must agree with `authorize` - a resource is listed iff
+ *   hasPermissions(normalize(authorize(scope, resource, user)), required). Scopes without a
+ *   handler hold nothing. Required: there is no framework fallback.
  */
-// deferred (§10): optional bulk + enumeration hooks `getDocumentPermissions` / `listDocuments`
+// deferred (§10): the enumeration hook `listDocuments`
 ```
+
+**Batch checks.** `filterAuthorized` answers a question about many resources at once — "which of
+these documents may the caller read?" — with the subset that holds one requirement, never the
+per-resource permission objects (the bulk refinement of §10, narrowed to one requirement: a
+backend can then answer it with one query, translating the requirement into it). The answer is
+compared by value, so a plugin may build it from its query's rows; an entry yhub did not ask
+about is ignored. The definition doubles as the naive
+implementation — one `authorize` per resource plus `hasPermissions` — correct, but one lookup
+per resource. It is a required member with no framework fallback, so yhub carries no
+per-resource loop; a scope without a handler holds nothing, as in `createAuthorize`. The
+consumer so far is `GET /updated/v1/{org}`, which asks once per page for ydoc `r` of every
+candidate.
 
 The return type is *forced* per scope (`ToPermissionType<S>`). TypeScript cannot correlate a
 runtime check of `type` with the return type inside a single function body, so the blessed
@@ -487,10 +506,12 @@ branch*, which is exactly a branch-floor question):
    doc facets`). A v2 connection (`/ws/v2/{org}?branch=`) fetches it once at upgrade; documents
    whose required facets the floor grants attach with zero further calls. (Floors are the
    additive extension deliberately absent from v1, §4.)
-2. **Bulk refinement.** Documents not covered by the floor go through one
-   `getDocumentPermissions(authInfo, org, docs)` call for the whole subscribe list (positionally
-   aligned; backed by one SQL query in the tag store, or one `CheckBulkPermissions` in a
-   SpiceDB-backed plugin).
+2. **Bulk refinement** — shipped as `filterAuthorized` (§7). Documents not covered by the floor
+   go through one `filterAuthorized.document(docRefs, required, user)` call for the whole
+   subscribe list, `required` being the facets a synced document needs (backed by one SQL query
+   in the tag store, or one `CheckBulkPermissions` in a SpiceDB-backed plugin). It answers the
+   subset, not per-document permissions: should the attach need the documents' views (the
+   recheck compares them), that is one more hook.
 3. **Enumeration.** `listDocuments(authInfo, org, cursor)` answers "which documents at all" —
    paginated, because 100k-doc orgs are real. The tag store implements it with a single indexed
    query (§11); a future `OrgPermissions.enumerate` facet gates whether a subject may use this
@@ -596,7 +617,7 @@ plugin interface is the same.
 - Deleted: `$accessType`, `hasReadAccess`/`hasWriteAccess`, `getAccessType`,
   `getOrgAccessType`, `getGlobalAccessType`, `accessPurpose`, `req.accessType`. Renamed:
   `readAuthInfo` → `authenticate` (unchanged semantics) — the plugin reads
-  `{ authenticate, authorize }`.
+  `{ authenticate, authorize, filterAuthorized }` (the batch check was added later, §7).
 - Renamed throughout code and docs per naming.md: the `Room` triple → `DocRef` addressing
   (`docid` and `branch` stay), `reqToRoom` → `reqToDocRef`, `req.room` → `req.docRef`, log
   fields. **Deferred**: the stream-key spelling `{prefix}:room:` → `{prefix}:doc:` (and with it
@@ -617,7 +638,7 @@ on `doc` objects (`ydoc_read`, `ydoc_write`, `awareness_read`, `awareness_write`
 land, creation/branch-wide permissions on `branch` objects with `doc#branch@branch` /
 `branch#org@org` parent relations carrying the floors; it assembles the permission object and
 keeps ZedToken/`at_least_as_fresh` handling internal; `Watch`/`ReadChanges` drives `recheckAuth`.
-`getDocumentPermissions` is the same bulk RPC over docs × facets; `listDocuments` is
+`filterAuthorized` is the same bulk RPC over the docs for the facets `required` names; `listDocuments` is
 `LookupResources`/`Streamed ListObjects` per facet — with the documented caveat that reverse
 lookup is the expensive direction there, which is exactly why the tag store exists for deployments
 without a Zanzibar.

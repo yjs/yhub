@@ -43,7 +43,8 @@ await utils.createTestHub({
             endpoint: { '*': '-r--', comments: 'crud', appendonly: 'c---', blocked: false }
           }
         }
-      })
+      }),
+      filterAuthorized: {}
     }),
     api: [
       { name: 'comments', get: { handler: async () => ({ ok: true }) }, post: { handler: async () => ({ ok: true }) } },
@@ -73,7 +74,8 @@ await utils.createTestHub({
       async authenticate () { return { userid: 'prefixUser' } },
       authorize: types.createAuthorize({
         document: async () => ({ type: 'permissions:document:v1', ydoc: 'cru-', endpoint: { '*': 'crud' } })
-      })
+      }),
+      filterAuthorized: {}
     }),
     api: [
       { name: 'echo', get: { handler: async req => ({ docid: req.docid }) } }

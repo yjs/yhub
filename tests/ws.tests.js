@@ -26,7 +26,8 @@ await utils.createTestHub({
       },
       authorize: types.createAuthorize({
         document: async () => ({ type: 'permissions:document:v1', ydoc: '-r--', awareness: '--u-', endpoint: { ws: '-r--' } })
-      })
+      }),
+      filterAuthorized: {}
     })
   }
 })

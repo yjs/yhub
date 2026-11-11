@@ -6,6 +6,26 @@
 
 - **The websocket initial sync starts with the client's sync step 1.** The server used to push its sync step 1 and the whole document on connect; it now waits for the client's state vector, which `@y/websocket` (and every y-protocols client) sends on connect. Every message before it is ignored. Until its initial sync a connection misses permission re-checks, which the initial sync replays from the stream; the stream keeps them only for `redis.minMessageLifetime`. So an initial sync that reads the stream later than a third of it after connecting (a late sync step 1, or a slow document load) asks `authorize` again unconditionally. A client's updates are accepted only from its answer to the server's sync step 1 on, which the server sends once the initial sync checked the document's deletion and the permissions; an update sent before it is dropped, and arrives with the answer. A sync step 1 whose state vector takes 10% of `server.maxDocSize` or more is closed with 1009. Later sync step 1 messages (`@y/websocket`'s `resyncInterval`) are still ignored. ([API docs](API.md#websocket), [`src/server.js`](src/server.js))
 - **`GET /api/updated/v1/{org}` no longer caps `limit` at 1000, defaults it to 10000, and reads the redis time with the index.** `limit` is at least `1`, defaults to `10000` (was `100`) and stays soft: a page never splits a millisecond, so a full page re-reads the millisecond at its end whole — the same rule as the new org listing below. Internally, the first read is bounded by `since` and `limit` only, and the redis time is read in the same transaction as the redis index, right after it, instead of in a separate call before. The page still ends before that millisecond. Two limits of the change-clock cursor are now documented: it assumes the redis time does not step back, and a document written by `yhub.unsafePersistDoc` can be missed by a poller that reads while the call is running (its org is still listed by `GET /api/updated/v1`). ([API docs](API.md#updated-documents), [`src/builtin-api.js`](src/builtin-api.js))
+- **The auth plugin has a third, required member: `filterAuthorized`, the batch permission check.** Given many resources and one requirement, it answers which of the resources hold it — the subset, never their permission objects — so a plugin can answer from one backend query instead of one `authorize` call per resource. It is a map with one handler per scope, like the one `createAuthorize` takes: `filterAuthorized: { document: async (docRefs, required, user) => docRefs.filter(...) }`, where `required` is an input-form permission object of the scope (`{ type: 'permissions:document:v1', ydoc: '-r--' }`). It must agree with `authorize`: a resource is listed iff `hasPermissions` of its normalized `authorize` answer and `required` holds. The answer is compared by value, in any order, so it may be fresh objects built from database rows; an entry yhub did not ask about is ignored. Scopes without a handler hold nothing, a throw is an infrastructure failure (`503`) as for `authorize`, and one call is bounded by one `server.authTimeout`. `GET /api/updated/v1/{org}` now asks `filterAuthorized.document` once per page, with every candidate document and ydoc `r`, instead of `authorize('document', …)` once per document — a page holds 10000 documents by default. A plugin without the member fails config validation at startup. **Migration**: add `filterAuthorized`. The direct translation calls `authorize` for every resource — correct, but one lookup per resource; answer from one query for production (see [Batch checks](API.md#batch-checks-filterauthorized)):
+
+  ```js
+  import { hasPermissions, normalizeDocumentPermissions } from '@y/hub/permissions'
+
+  const authorize = createAuthorize({ document: async (docRef, user) => await lookupDocPermissions(user, docRef) })
+
+  createAuthPlugin({
+    authenticate,
+    authorize,
+    filterAuthorized: {
+      document: async (docRefs, required, user) => {
+        const answers = await Promise.all(docRefs.map(docRef => authorize('document', docRef, user)))
+        return docRefs.filter((_docRef, i) => answers[i] != null && hasPermissions(normalizeDocumentPermissions(answers[i]), required))
+      }
+    }
+  })
+  ```
+
+  A plugin whose deployment never serves `GET /updated/v1/{org}` may pass `filterAuthorized: {}`. ([API docs](API.md#batch-checks-filterauthorized), [`src/api.js`](src/api.js), [`src/types.js`](src/types.js), [`src/builtin-api.js`](src/builtin-api.js))
 
 ### New Features
 

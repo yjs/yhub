@@ -397,10 +397,9 @@ moment it is appended, on every write path (websocket, `PATCH /ydoc`, agents), o
 fleet, and for documents nobody has open.
 
 Access: the org `endpoint` facet (`endpoint.updated` `r` in the `permissions:org:v1` answer),
-**plus** ydoc `r` per listed document — the endpoint asks `authorize('document', …)` for every
-candidate and lists only the documents the caller may read. That is one `authorize` call per
-listed document per page, so the auth plugin is expected to answer cheaply (see
-[Contracts](#contracts)). A failing plugin fails the request with `503` rather than dropping documents.
+**plus** ydoc `r` per listed document — the endpoint hands every candidate of the page to the
+plugin's [`filterAuthorized.document`](#batch-checks-filterauthorized) in one call and lists only
+the documents it answers. A failing plugin fails the request with `503` rather than dropping documents.
 
 * `GET /api/updated/v1/{org}` parameters: `{ since?: number, limit?: number }`
   * `since=number`: unix ms, exclusive — documents whose last change is after it (default: `0`, everything)
@@ -835,14 +834,16 @@ export const comments = createApiEndpoint('comments', {
 
 ### Permissions
 
-The auth plugin (`server.auth`) has two callbacks: `authenticate` establishes *who* is asking,
-`authorize` answers *what they may do* with one resource — a typed permission object per scope.
-Every gate — REST and websocket alike — consumes that object; there is no separate access
-vocabulary. The full design rationale lives in
+The auth plugin (`server.auth`) has three members: `authenticate` establishes *who* is asking,
+`authorize` answers *what they may do* with one resource — a typed permission object per scope —
+and `filterAuthorized` answers *which* of many resources hold one requirement (see
+[Batch checks](#batch-checks-filterauthorized)). Every gate — REST and websocket alike — consumes
+the permission object; there is no separate access vocabulary. The full design rationale lives in
 [proposals/permissions.md](proposals/permissions.md).
 
 ```js
 import { createAuthPlugin, createAuthorize } from '@y/hub'
+import { hasPermissions, normalizeDocumentPermissions } from '@y/hub/permissions'
 
 createAuthPlugin({
   // identity: return { userid, ...anything }, or null for an anonymous caller. Throw a branded
@@ -859,7 +860,15 @@ createAuthPlugin({
   // re-check 1013).
   authorize: createAuthorize({
     document: async (docRef, user) => user === null ? await publicDocPermissions(docRef) : await lookupDocPermissions(user, docRef)
-  })
+  }),
+  // the batch check: which of `docRefs` hold `required` - the same decision `authorize` makes,
+  // from one backend query instead of one per document. Scopes without a handler hold nothing.
+  filterAuthorized: {
+    document: async (docRefs, required, user) => {
+      const grants = await lookupManyDocPermissions(user, docRefs) // positionally aligned, null = no grant
+      return docRefs.filter((_docRef, i) => grants[i] != null && hasPermissions(normalizeDocumentPermissions(grants[i]), required))
+    }
+  }
 })
 ```
 
@@ -962,6 +971,63 @@ grants *inside* your plugin), the containment check `hasPermissions(permissions,
 normalizers (`normalizeDocumentPermissions`, ...), and `endpointPermission(normalized, name)` — the
 one lookup that isn't a single char compare.
 
+#### Batch checks: `filterAuthorized`
+
+Some requests need a permission decision for many resources at once: [`GET /updated`](#updated-documents)
+lists only the documents the caller may read, and a page holds 10000 of them by default. `authorize`
+answers one resource per call; `filterAuthorized` takes the whole list and **one requirement** and
+answers which of the resources hold it — the subset, never their permission objects.
+
+It is a map with one handler per scope, like the one `createAuthorize` takes. A handler receives
+the scope's resourceIds (`'document'` → `Array<{ org, docid, branch }>`, …), the requirement as an
+input-form permission object of that scope (`{ type: 'permissions:document:v1', ydoc: '-r--' }`),
+and the caller (`null` when anonymous), and returns the resources that hold the requirement.
+Scopes without a handler hold nothing — `filterAuthorized: {}` is valid for a plugin whose
+deployment never asks a batch question, but `GET /updated` then lists no documents.
+
+* **Agreement with `authorize`**: a resource must be listed exactly when its own `authorize`
+  answer, normalized, contains the requirement — `hasPermissions(normalizeDocumentPermissions(answer), required)`.
+  The two hooks answer the same question at different granularity, and the determinism contract
+  below applies to both.
+* **The answer is compared by value**, in any order: `resourceIds.filter(...)` and fresh
+  `{ org, docid, branch }` objects built from database rows are the same answer. An entry yhub
+  did not ask about is ignored.
+* **Denial is leaving a resource out.** A throw is an infrastructure failure, as for `authorize`:
+  the request answers `503` (a branded `apiError` passes its status through) instead of dropping
+  resources. The whole batch is one call, bounded by one `server.authTimeout`. yhub never calls a
+  handler with an empty list.
+* **Where yhub asks it**: `GET /updated/v1/{org}` — `'document'`, requiring ydoc `r`, once per
+  page with every candidate document of the page. If your backend caps the size of a request,
+  chunk inside the handler.
+
+The definition above is also an implementation: ask `authorize` for every resource and keep the
+ones whose answer contains the requirement. It is correct, but it costs one `authorize` — one
+backend lookup — per resource, which is slow for thousands of them:
+
+```js
+const authorize = createAuthorize({
+  document: async (docRef, user) => await lookupDocPermissions(user, docRef)
+})
+
+createAuthPlugin({
+  authenticate,
+  authorize,
+  filterAuthorized: {
+    // correct, but N lookups for N documents
+    document: async (docRefs, required, user) => {
+      const answers = await Promise.all(docRefs.map(docRef => authorize('document', docRef, user)))
+      return docRefs.filter((_docRef, i) => answers[i] != null && hasPermissions(normalizeDocumentPermissions(answers[i]), required))
+    }
+  }
+})
+```
+
+Implement it as one query instead: fetch the grants of every resource at once (`WHERE (org, docid,
+branch) IN (...)`) and run `hasPermissions` locally, as in the example at the top of this
+section, or translate the requirement into the query itself — a SpiceDB/OpenFGA-backed plugin
+issues one `CheckBulkPermissions`/`BatchCheck` over the documents for the facets `required`
+names (ydoc `r` → `ydoc_read`).
+
 #### Contracts
 
 * **Determinism**: `authorize` must answer deterministically per `(type, resourceId, user)`
@@ -974,15 +1040,16 @@ one lookup that isn't a single char compare.
   list inside `authorize`.
 * **Failure**: every answer is checked against its scope's permission schema — an invalid or
   wrong-scope object is a loud error (rest `500`, logged), an unknown future `type` version is
-  denied with a warning, and an unbranded throw from either hook is an infrastructure failure —
+  denied with a warning, and an unbranded throw from any hook is an infrastructure failure —
   `503` on rest requests and the websocket upgrade, `1013` on a websocket re-check — never
   throw to deny. A branded `apiError` passes its status through: `apiError(401, ...)` from
-  `authenticate` rejects a credential, `apiError(503, ...)` from either hook signals an outage.
+  `authenticate` rejects a credential, `apiError(503, ...)` from any hook signals an outage.
 * **Cost**: yhub treats `authorize` as cheap and calls it liberally — once per rest request and
-  websocket upgrade, on every re-check, and once *per listed document* on
-  [`GET /updated`](#updated-documents). Answer from memory where you can: a server token with
+  websocket upgrade, and on every re-check. Answer from memory where you can: a server token with
   root access should resolve to a constant, and a plugin that consults a remote authority should
-  cache per `(scope, resourceId, user)` for the lifetime of its grants.
+  cache per `(scope, resourceId, user)` for the lifetime of its grants. Questions about many
+  resources go to `filterAuthorized` instead, once per request (see
+  [Batch checks](#batch-checks-filterauthorized)).
 * **Anonymous callers**: `authenticate` answering `null` is not a rejection — it is an anonymous
   caller, and `authorize` is asked with `user: null` like for anyone else (public documents are a
   `document` handler that grants on `null`). yhub itself never answers `401` for missing
@@ -1264,12 +1331,12 @@ const yhub = await createYHub(config)
 | `computePool.resourceLimits` | `object` | no | Node's [`resourceLimits`](https://nodejs.org/api/worker_threads.html#new-workerfilename-options) of each thread: `maxOldGenerationSizeMb`, `maxYoungGenerationSizeMb`, `codeRangeSizeMb`, `stackSizeMb`. A thread that exceeds them dies, which rejects its task, and the pool replaces it. Without them, each thread may grow to the main thread's heap limit, so a few large merges at once can push the process past the memory of its container, and the OOM killer ends the whole process. `maxOldGenerationSizeMb` has no effect when the process runs with `--max-old-space-size` or `--max-heap-size`, including through `NODE_OPTIONS`: V8 applies these flags to every thread, the compute threads included, and yhub logs a warning at startup. Default: none (Node's defaults) |
 | `server` | `object \| null` | no | HTTP/WebSocket server config. Set to `null` to run without a server (worker/script mode). |
 | `server.port` | `number` | yes* | Port to listen on |
-| `server.auth` | `AuthPlugin` | yes* | Auth plugin created with `createAuthPlugin`: `authenticate(req)` establishes identity, `authorize(scope, resourceId, user)` answers a typed permission object per scope — see [Permissions](#permissions). |
+| `server.auth` | `AuthPlugin` | yes* | Auth plugin created with `createAuthPlugin`: `authenticate(req)` establishes identity, `authorize(scope, resourceId, user)` answers a typed permission object per scope, and `filterAuthorized` (one handler per scope) answers which of many resources hold one requirement — see [Permissions](#permissions). |
 | `server.api` | `ApiSpec[]` | no | Custom rest endpoints served under `/{apiPrefix}/{name}/{version}/...`, next to the built-in ones. See [Custom API endpoints](#custom-api-endpoints). |
 | `server.apiPrefix` | `string` | no | First path segment under which all endpoints are served — built-in and custom rest endpoints plus the websocket route `/{apiPrefix}/ws/v1/...` — e.g. `'collaboration'` → `/collaboration/{name}/{version}/...`. A single path segment. Default: `'api'` |
 | `server.maxDocSize` | `number` | no | Maximum Ydoc size in bytes, used for WebSocket payload limits (`maxPayloadLength`, and `maxBackpressure` at 1.2x). Updates are never split across frames, so this must exceed the largest document — a client that sends a bigger frame is disconnected without a close frame (the client reports `1006`). One whose sync step 1 carries a state vector of 10% of it or more is closed with the permanent `1009`. Default: 500 MB |
 | `server.wsKeepAliveInterval` | `number \| null` | no | Milliseconds without a message to a client after which the server sends it an empty awareness message (zero entries — it carries no presence, so every connection gets it regardless of the awareness facet). Clients reconnect when they receive nothing for a while (`@y/websocket`: `socketTimeout`, 45 s), and websocket pings don't reach client code, so an idle document would reconnect-loop without it. `null` disables. Default: `20000` |
-| `server.authTimeout` | `number` | no | Milliseconds the auth plugin's `authenticate` and `authorize` may take. A hook that doesn't settle in time is abandoned: rest requests answer `503 { error: 'auth timeout', code: 'auth-timeout' }`, the websocket upgrade `503`, and a [re-check](#yhubrecheckauthdocref-opts) closes the live socket with `1013`. All three are transient, so clients retry. The timeout applies per call — a request that issues several ([`GET /updated`](#updated-documents) asks `authorize` once per listed document) can take several. Must be finite: Node runs a delay above 2³¹−1 ms (about 24.8 days) after 1 ms, so `Infinity` would time out every call. Default: `10000` |
+| `server.authTimeout` | `number` | no | Milliseconds the auth plugin's `authenticate`, `authorize` and `filterAuthorized` may take. A hook that doesn't settle in time is abandoned: rest requests answer `503 { error: 'auth timeout', code: 'auth-timeout' }`, the websocket upgrade `503`, and a [re-check](#yhubrecheckauthdocref-opts) closes the live socket with `1013`. All three are transient, so clients retry. The timeout applies per call — a request that issues several can take several ([`GET /updated`](#updated-documents) calls `authenticate`, `authorize` and `filterAuthorized` once each), and a `filterAuthorized` call covers its whole batch. Must be finite: Node runs a delay above 2³¹−1 ms (about 24.8 days) after 1 ms, so `Infinity` would time out every call. Default: `10000` |
 | `server.maxVersionSize` | `number` | no | Maximum size of the client's part of a [named version](#versions) — the characters of its `name` plus the bytes of its lib0-any encoded `custom` data; larger writes answer `413`. Versions ride along in activity responses. Default: 64 KB |
 | `server.cors` | `object \| null` | no | Cross-origin resource sharing — see [CORS](#cors). **While this is unset, cross-origin browser access is closed**: no `Access-Control-*` header is sent, and cross-origin WebSocket upgrades and api requests are denied. Same-origin pages and non-browser clients are unaffected. |
 | `server.cors.origin` | `string \| string[]` | yes* | `'*'` for every origin, one origin, or an allowlist. An allowlist echoes back the request's `Origin` when it matches and sends `Vary: Origin`; a request from a non-matching origin is denied. An entry may start its host with `*.` — `https://*.example.com` matches every host under `example.com` but never the apex, and ports must be spelled out. Only wildcard a domain you own outright: `https://*.co.uk`-style public-suffix wildcards are accepted but allowlist every site under the suffix. |
@@ -1288,8 +1355,11 @@ const yhub = await createYHub(config)
 **Example: full server setup**
 
 ```js
-import { createYHub, createAuthPlugin, createAuthorize } from '@y/hub'
+import { createYHub, createAuthPlugin, createAuthorize, createDocumentPermissions } from '@y/hub'
+import { hasPermissions, normalizeDocumentPermissions } from '@y/hub/permissions'
 import { S3PersistenceV1 } from '@y/hub/plugins/s3'
+
+const grant = createDocumentPermissions({ ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } })
 
 const yhub = await createYHub({
   redis: {
@@ -1310,9 +1380,11 @@ const yhub = await createYHub({
     port: 8080,
     auth: createAuthPlugin({
       async authenticate (req) { return { userid: req.getHeader('x-user-id') } },
-      authorize: createAuthorize({
-        document: async () => ({ type: 'permissions:document:v1', ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } })
-      })
+      authorize: createAuthorize({ document: async () => grant }),
+      // every document has the same grant: either all of them hold the requirement or none does
+      filterAuthorized: {
+        document: async (docRefs, required) => hasPermissions(normalizeDocumentPermissions(grant), required) ? docRefs : []
+      }
     })
   },
   worker: { taskConcurrency: 10 }

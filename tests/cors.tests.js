@@ -13,7 +13,8 @@ const auth = types.createAuthPlugin({
   async authenticate () { return { userid: 'corsUser' } },
   authorize: types.createAuthorize({
     document: async () => ({ type: 'permissions:document:v1', ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } })
-  })
+  }),
+  filterAuthorized: {}
 })
 
 /**

@@ -12,7 +12,7 @@ import { createDocumentPermissions, hasPermissions } from './permissions.js'
 import { redisClockToMs, encodeDocUpdatedMember } from './stream.js'
 // benign import cycle with api.js - its exports are only referenced at request time, never during
 // module evaluation
-import { apiError, checkPermissions, encodedAny, runAuthHook, normalizeAuthorizeAnswer } from './api.js'
+import { apiError, checkPermissions, encodedAny, filterAuthorized } from './api.js'
 import { createContentMap } from './y-utils.js'
 import { isComputeQueueFull } from './compute.js'
 import { logger } from './logger.js'
@@ -290,7 +290,8 @@ const activityEndpoint = createApiEndpoint('activity', {
  * documented in API.md ("Updated documents"): `since` is exclusive, a page never splits a
  * millisecond (so `limit` is soft, as in the global listing below), `next === since` means caught
  * up (a page can be empty while `next` advanced: every document on it was filtered out), a
- * document may be listed twice across pages but is never missed.
+ * document may be listed twice across pages but is never missed. The filter is one
+ * `filterAuthorized` call per page, requiring ydoc `r` of every listed document.
  *
  * Two sources - the redis index of live streams and the persisted rows - are read concurrently
  * with the page's `limit` each and merged. A source that returned fewer rows than `limit` is
@@ -337,21 +338,14 @@ const updatedEndpoint = createApiEndpoint('updated', {
        */
       const page = new Map()
       docs.forEach(d => page.set(encodeDocUpdatedMember({ org, docid: d.docid, branch: d.branch }), d))
-      const auth = /** @type {import('./types.js').AuthPlugin<any>} */ (yhub.conf.server?.auth)
-      const readable = createDocumentPermissions({ ydoc: '-r--' })
-      /**
-       * @type {Array<{ docid: string, branch: string, t: number }>}
-       */
-      const visible = []
-      // one authorize call per listed document, 16 in flight. A failing plugin fails the request
-      // (503 - see runAuthHook) rather than dropping the document: `next` would move past it.
-      const candidates = array.from(page.values()).sort((a, b) => a.t - b.t)
-      for (let i = 0; i < candidates.length && !req.aborted; i += 16) {
-        const chunk = candidates.slice(i, i + 16)
-        const answers = await promise.all(chunk.map(d => runAuthHook(yhub, 'authorize', () => auth.authorize('document', { org, docid: d.docid, branch: d.branch }, authInfo))))
-        answers.forEach((answer, j) => { hasPermissions(normalizeAuthorizeAnswer('document', answer), readable) && visible.push(chunk[j]) })
-      }
-      return { docs: visible, next }
+      // [member, doc], oldest first
+      const candidates = array.from(page).sort(([, a], [, b]) => a.t - b.t)
+      // one batch check for the whole page. A failing plugin fails the request (503 - see
+      // runAuthHook) rather than dropping the documents: `next` would move past them. The answer
+      // is matched by value - an entry that is not on the page lists nothing.
+      const answer = await filterAuthorized(yhub, 'document', candidates.map(([, d]) => ({ org, docid: d.docid, branch: d.branch })), createDocumentPermissions({ ydoc: '-r--' }), authInfo)
+      const readable = new Set(answer.filter(docRef => docRef.org === org).map(encodeDocUpdatedMember))
+      return { docs: candidates.filter(([member]) => readable.has(member)).map(([, d]) => d), next }
     }
   }
 })

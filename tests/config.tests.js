@@ -1,5 +1,8 @@
 import * as t from 'lib0/testing'
 import * as types from '../src/types.js'
+import { AuthPlugin, createAuthPlugin } from '../src/auth.js'
+import { createYHub } from '../src/index.js'
+import { createDocumentPermissions, normalizeDocumentPermissions } from '../src/permissions.js'
 
 /**
  * Nothing here is ever connected to - `$config` only validates the shape.
@@ -40,15 +43,99 @@ export const testPersistencePluginDelete = _tc => {
 
 /**
  * The timeout options: `postgresOptions` is handed to the postgres client as is,
- * `server.authTimeout` bounds the auth plugin.
+ * `createAuthPlugin`'s `timeout` bounds the auth plugin - a non-negative integer of milliseconds.
  *
  * @param {t.TestCase} _tc
  */
 export const testTimeoutOptions = _tc => {
   types.$config.expect({ ...baseConf, persistence: [], postgresOptions: { max: 5, idle_timeout: 30, connection: { statement_timeout: 30000 } } })
-  const auth = types.createAuthPlugin({ authenticate: async () => null, authorize: async () => null, filterAuthorized: {} })
-  types.$config.expect({ ...baseConf, persistence: [], server: { port: 4400, auth, authTimeout: 5000 } })
-  t.fails(() => types.$config.expect(/** @type {any} */ ({ ...baseConf, persistence: [], server: { port: 4400, auth, authTimeout: '5s' } })))
-  // the batch check is a required member of the plugin
-  t.fails(() => types.$config.expect(/** @type {any} */ ({ ...baseConf, persistence: [], server: { port: 4400, auth: { authenticate: auth.authenticate, authorize: auth.authorize } } })))
+  createAuthPlugin({}, { timeout: 5000 })
+  t.fails(() => createAuthPlugin({}, /** @type {any} */ ({ timeout: '5s' })))
+  t.fails(() => createAuthPlugin({}, { timeout: Infinity }))
+  t.fails(() => createAuthPlugin({}, { timeout: -1 }))
+}
+
+const docRef = { org: 'o', docid: 'd', branch: 'main' }
+
+/**
+ * The message `p` rejects with, or null when it resolves.
+ *
+ * @param {Promise<any>} p
+ */
+const rejection = p => p.then(() => null, err => err.message)
+
+/**
+ * `createAuthPlugin` builds a subclass of `AuthPlugin`, passed as `conf.auth`. Every member of the
+ * definition is optional - a missing one falls through to the `AuthPlugin` default - while a
+ * member yhub doesn't know (a typo) or one that isn't a function throws.
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testAuthPluginDefinition = async _tc => {
+  types.$config.expect({ ...baseConf, persistence: [], auth: createAuthPlugin({}, { timeout: 5000 }) })
+  const auth = new (createAuthPlugin({}))(/** @type {any} */ (null))
+  t.assert(auth instanceof AuthPlugin)
+  t.assert(await auth.authenticate(/** @type {any} */ ({})) === null, 'an anonymous caller')
+  t.assert(await rejection(auth.getGlobalPermissions(null)) === 'Method unimplemented', 'a getter must be implemented')
+  t.assert(await rejection(auth.getDocumentPermissions([docRef], null)) === 'Method unimplemented', 'a getter must be implemented')
+  t.assert(await rejection(auth.filterAuthorizedDocuments([docRef], createDocumentPermissions({ ydoc: '-r--' }), null)) === 'Method unimplemented', 'the default filter asks the getter')
+  t.fails(() => createAuthPlugin(/** @type {any} */ ({ getDocumentPermission: async () => null })))
+  t.fails(() => createAuthPlugin(/** @type {any} */ ({ getDocumentPermissions: 'nope' })))
+  // a server requires an auth plugin - checked before createYHub connects to anything
+  const err = await createYHub({ ...baseConf, persistence: [], server: { port: 1 } }).then(() => null, err => err)
+  t.assert(err?.message === 'conf.server requires conf.auth - build it with createAuthPlugin', 'a server without auth throws')
+}
+
+/**
+ * The documented alternative to `createAuthPlugin` (our own code only uses `createAuthPlugin`): a
+ * plugin written by extending `AuthPlugin` overrides only what it answers - the default filter
+ * asks its getter. `createAuthPlugin` builds the same kind of subclass: a member it isn't given
+ * falls through to the default, which then asks the checked and normalized getter.
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testAuthPluginSubclass = async _tc => {
+  const readGrant = normalizeDocumentPermissions(createDocumentPermissions({ ydoc: '-r--' }))
+  const secret = { ...docRef, docid: 'secret' }
+  class Auth extends AuthPlugin {
+    /**
+     * @param {Array<import('../src/types.js').DocRef>} docRefs
+     */
+    async getDocumentPermissions (docRefs) {
+      return docRefs.map(resource => ({ resource, permissions: resource.docid === 'secret' ? null : readGrant }))
+    }
+  }
+  const yhub = /** @type {any} */ ({})
+  const auth = new Auth(yhub)
+  t.assert(auth.yhub === yhub, 'this.yhub is the constructor argument')
+  t.assert(await auth.authenticate(/** @type {any} */ ({})) === null, 'an anonymous caller')
+  t.compare(await auth.filterAuthorizedDocuments([docRef, secret], createDocumentPermissions({ ydoc: '-r--' }), null), [docRef], 'the default filter asks the getter')
+  t.compare(await auth.filterAuthorizedDocuments([docRef], createDocumentPermissions({ ydoc: '-ru-' }), null), [], 'a stricter requirement holds on none')
+  const Built = createAuthPlugin({
+    getDocumentPermissions: async (_yhub, docRefs) => docRefs.map(resource => ({ resource, permissions: resource.docid === 'secret' ? null : createDocumentPermissions({ ydoc: '-r--' }) }))
+  })
+  t.assert(!Object.hasOwn(Built.prototype, 'filterAuthorizedDocuments'), 'only the given members are defined')
+  t.compare(await new Built(yhub).filterAuthorizedDocuments([docRef, secret], createDocumentPermissions({ ydoc: '-r--' }), null), [docRef], 'the default filter asks the normalized getter')
+}
+
+/**
+ * A permissions getter answers `{ resource, permissions }` for every resource, in order: yhub
+ * checks the length and every resource, and normalizes the permissions.
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testAuthPluginPermissionsAnswer = async _tc => {
+  const docRefs = [docRef, { ...docRef, docid: 'e' }]
+  /**
+   * @type {any}
+   */
+  let answer = docRefs.map(resource => ({ resource, permissions: createDocumentPermissions({ ydoc: '-r--' }) }))
+  const auth = new (createAuthPlugin({ getDocumentPermissions: async () => answer }))(/** @type {any} */ (null))
+  const permissions = await auth.getDocumentPermissions(docRefs, null)
+  t.compare(permissions.map(p => p.resource), docRefs)
+  t.compare(permissions[0].permissions, normalizeDocumentPermissions(createDocumentPermissions({ ydoc: '-r--' })), 'normalized')
+  answer = answer.slice(1)
+  await t.failsAsync(() => auth.getDocumentPermissions(docRefs, null))
+  answer = docRefs.slice().reverse().map(resource => ({ resource, permissions: null }))
+  await t.failsAsync(() => auth.getDocumentPermissions(docRefs, null))
 }

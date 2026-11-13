@@ -12,7 +12,7 @@ import { createDocumentPermissions, hasPermissions } from './permissions.js'
 import { redisClockToMs, encodeDocUpdatedMember } from './stream.js'
 // benign import cycle with api.js - its exports are only referenced at request time, never during
 // module evaluation
-import { apiError, checkPermissions, encodedAny, filterAuthorized } from './api.js'
+import { apiError, checkPermissions, encodedAny } from './api.js'
 import { createContentMap } from './y-utils.js'
 import { isComputeQueueFull } from './compute.js'
 import { logger } from './logger.js'
@@ -291,7 +291,7 @@ const activityEndpoint = createApiEndpoint('activity', {
  * millisecond (so `limit` is soft, as in the global listing below), `next === since` means caught
  * up (a page can be empty while `next` advanced: every document on it was filtered out), a
  * document may be listed twice across pages but is never missed. The filter is one
- * `filterAuthorized` call per page, requiring ydoc `r` of every listed document.
+ * `yhub.auth.filterAuthorizedDocuments` call per page, requiring ydoc `r` of every listed document.
  *
  * Two sources - the redis index of live streams and the persisted rows - are read concurrently
  * with the page's `limit` each and merged. A source that returned fewer rows than `limit` is
@@ -341,9 +341,10 @@ const updatedEndpoint = createApiEndpoint('updated', {
       // [member, doc], oldest first
       const candidates = array.from(page).sort(([, a], [, b]) => a.t - b.t)
       // one batch check for the whole page. A failing plugin fails the request (503 - see
-      // runAuthHook) rather than dropping the documents: `next` would move past them. The answer
-      // is matched by value - an entry that is not on the page lists nothing.
-      const answer = await filterAuthorized(yhub, 'document', candidates.map(([, d]) => ({ org, docid: d.docid, branch: d.branch })), createDocumentPermissions({ ydoc: '-r--' }), authInfo)
+      // createAuthPlugin) rather than dropping the documents: `next` would move past them. The
+      // answer is matched by value - an entry that is not on the page lists nothing. An empty page
+      // asks nothing: a plugin is never asked about an empty list.
+      const answer = candidates.length === 0 ? [] : await yhub.auth.filterAuthorizedDocuments(candidates.map(([, d]) => ({ org, docid: d.docid, branch: d.branch })), createDocumentPermissions({ ydoc: '-r--' }), authInfo)
       const readable = new Set(answer.filter(docRef => docRef.org === org).map(encodeDocUpdatedMember))
       return { docs: candidates.filter(([member]) => readable.has(member)).map(([, d]) => d), next }
     }
@@ -366,7 +367,7 @@ const updatedEndpoint = createApiEndpoint('updated', {
  * The global `endpoint.updated` grant gates the route, and the listing covers only the orgs of the
  * caller's global `orgs` facet - every org for `'*'`. Without `orgs` the request is refused with the
  * missing-permission 403 - without `required`, since any list satisfies the route. One
- * permission answer for the whole page, no per-org `authorize` call.
+ * permission answer for the whole page, no per-org permissions call.
  */
 const updatedOrgsEndpoint = createApiEndpoint('updated', {
   scope: 'global',

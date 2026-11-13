@@ -1,20 +1,16 @@
 import * as t from 'lib0/testing'
 import * as promise from 'lib0/promise'
 import WebSocket from 'ws'
-import * as types from '../src/types.js'
 import * as utils from './utils.js'
-import { apiError, createYHub } from '@y/hub'
+import { apiError, createAuthPlugin, createYHub } from '@y/hub'
 
 const allowedOrigin = 'https://app.example.com'
 const otherOrigin = 'https://admin.example.com'
 const evilOrigin = 'https://evil.example'
 
-const auth = types.createAuthPlugin({
-  async authenticate () { return { userid: 'corsUser' } },
-  authorize: types.createAuthorize({
-    document: async () => ({ type: 'permissions:document:v1', ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } })
-  }),
-  filterAuthorized: {}
+const auth = createAuthPlugin({
+  authenticate: async () => ({ userid: 'corsUser' }),
+  getDocumentPermissions: async (_yhub, docRefs) => docRefs.map(resource => ({ resource, permissions: { type: 'permissions:document:v1', ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } } }))
 })
 
 /**
@@ -73,9 +69,9 @@ const corsPort = utils.testHubPort(5)
 const corsHost = `localhost:${corsPort}`
 await utils.createTestHub({
   worker: null,
+  auth,
   server: {
     port: corsPort,
-    auth,
     cors: {
       origin: [allowedOrigin, otherOrigin, 'https://*.preview.example.com'],
       credentials: true,
@@ -92,7 +88,8 @@ const barePort = utils.testHubPort(6)
 const bareHost = `localhost:${barePort}`
 await utils.createTestHub({
   worker: null,
-  server: { port: barePort, auth, api: corsApi }
+  auth,
+  server: { port: barePort, api: corsApi }
 })
 
 // a hub that enforces its allowlist even for same-origin requests
@@ -100,7 +97,8 @@ const strictPort = utils.testHubPort(7)
 const strictHost = `localhost:${strictPort}`
 await utils.createTestHub({
   worker: null,
-  server: { port: strictPort, auth, cors: { origin: [allowedOrigin], trustSameOrigin: false }, api: corsApi }
+  auth,
+  server: { port: strictPort, cors: { origin: [allowedOrigin], trustSameOrigin: false }, api: corsApi }
 })
 
 /**
@@ -405,7 +403,7 @@ export const testInvalidConfig = async () => {
   const expectThrow = async (server, label) => {
     t.info(label)
     await t.failsAsync(async () => {
-      await createYHub({ ...utils.yhub.conf, worker: null, server: { port: utils.testHubPort(8), auth, ...server } })
+      await createYHub({ ...utils.yhub.conf, auth, worker: null, server: { port: utils.testHubPort(8), ...server } })
     })
   }
   await expectThrow({ cors: { origin: '*', credentials: true } }, 'browsers reject "*" with credentials')

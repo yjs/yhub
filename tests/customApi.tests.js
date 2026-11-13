@@ -4,9 +4,9 @@ import * as promise from 'lib0/promise'
 import * as buffer from 'lib0/buffer'
 import * as delta from 'lib0/delta'
 import * as s from 'lib0/schema'
-import * as types from '../src/types.js'
 import * as utils from './utils.js'
 import { apiError, registerApi } from '../src/api.js'
+import { createAuthPlugin } from '../src/auth.js'
 
 /**
  * @param {Response} response
@@ -17,40 +17,42 @@ const endpointHubPort = utils.testHubPort(3)
 const endpointHost = `localhost:${endpointHubPort}`
 
 /**
- * The (type, resourceId) selectors the auth plugin below received, in call order.
+ * The (type, resourceIds) selectors the auth plugin below received, in call order.
  *
- * @type {Array<{ type: string, resourceId: object }>}
+ * @type {Array<{ type: string, resourceIds: Array<object> }>}
  */
 const permissionCalls = []
 
 await utils.createTestHub({
   worker: null,
+  auth: createAuthPlugin({
+    authenticate: async (_yhub, req) => {
+      // a branded 401 is the plugin rejecting a credential; null is an anonymous caller
+      if (req.getHeader('x-no-auth') === '1') throw apiError(401, 'unauthenticated')
+      if (req.getHeader('x-anon') === '1') return null
+      return { userid: 'endpointUser' }
+    },
+    // no org/global getters: the routes of those scopes answer 500 (the getter is unimplemented)
+    getDocumentPermissions: async (_yhub, resourceIds) => {
+      permissionCalls.push({ type: 'document', resourceIds })
+      return resourceIds.map(resource => ({
+        resource,
+        permissions: {
+          type: 'permissions:document:v1',
+          endpoint: { '*': '-r--', comments: 'crud', appendonly: 'c---', blocked: false }
+        }
+      }))
+    }
+  }),
   server: {
     port: endpointHubPort,
-    auth: types.createAuthPlugin({
-      async authenticate (req) {
-        // a branded 401 is the plugin rejecting a credential; null is an anonymous caller
-        if (req.getHeader('x-no-auth') === '1') throw apiError(401, 'unauthenticated')
-        if (req.getHeader('x-anon') === '1') return null
-        return { userid: 'endpointUser' }
-      },
-      // org/global endpoints fail closed: scopes without a handler deny
-      authorize: types.createAuthorize({
-        document: async (resourceId) => {
-          permissionCalls.push({ type: 'document', resourceId })
-          return {
-            type: 'permissions:document:v1',
-            endpoint: { '*': '-r--', comments: 'crud', appendonly: 'c---', blocked: false }
-          }
-        }
-      }),
-      filterAuthorized: {}
-    }),
     api: [
       { name: 'comments', get: { handler: async () => ({ ok: true }) }, post: { handler: async () => ({ ok: true }) } },
       { name: 'appendonly', get: { handler: async () => ({ ok: true }) }, post: { handler: async () => ({ ok: true }) } },
       { name: 'fallback', get: { handler: async () => ({ ok: true }) }, post: { handler: async () => ({ ok: true }) } },
       { name: 'whoami', get: { handler: async req => ({ authInfo: req.authInfo }) } },
+      // a handler asking the auth plugin directly
+      { name: 'peek', get: { handler: async req => (await req.yhub.auth.getDocumentPermissions([req.docRef], req.authInfo))[0] } },
       { name: 'blocked', get: { $query: s.$partial({ n: s.$number }), handler: async () => ({ ok: true }) } },
       { name: 'orgless', scope: 'org', get: { handler: async () => ({ ok: true }) } },
       { name: 'globalless', scope: 'global', get: { handler: async () => ({ ok: true }) } },
@@ -67,16 +69,13 @@ const prefixHost = `localhost:${prefixHubPort}`
 
 await utils.createTestHub({
   worker: null,
+  auth: createAuthPlugin({
+    authenticate: async () => ({ userid: 'prefixUser' }),
+    getDocumentPermissions: async (_yhub, docRefs) => docRefs.map(resource => ({ resource, permissions: { type: 'permissions:document:v1', ydoc: 'cru-', endpoint: { '*': 'crud' } } }))
+  }),
   server: {
     port: prefixHubPort,
     apiPrefix: 'collaboration',
-    auth: types.createAuthPlugin({
-      async authenticate () { return { userid: 'prefixUser' } },
-      authorize: types.createAuthorize({
-        document: async () => ({ type: 'permissions:document:v1', ydoc: 'cru-', endpoint: { '*': 'crud' } })
-      }),
-      filterAuthorized: {}
-    }),
     api: [
       { name: 'echo', get: { handler: async req => ({ docid: req.docid }) } }
     ]
@@ -479,9 +478,17 @@ export const testEndpointFacetAndAuth = async _tc => {
     permissionCalls.length = 0
     const res = await fetch(`http://${endpointHost}/api/comments/v1/o/d`)
     t.assert(res.status === 200)
-    t.compare(permissionCalls[permissionCalls.length - 1], { type: 'document', resourceId: { org: 'o', docid: 'd', branch: 'main' } })
+    t.compare(permissionCalls[permissionCalls.length - 1], { type: 'document', resourceIds: [{ org: 'o', docid: 'd', branch: 'main' }] })
     const postRes = await fetch(`http://${endpointHost}/api/comments/v1/o/d`, { method: 'POST' })
     t.assert(postRes.status === 200)
+  })
+  await t.groupAsync('a handler asks the auth plugin directly and gets normalized permissions', async () => {
+    const res = await fetch(`http://${endpointHost}/api/peek/v1/o/d`)
+    t.assert(res.status === 200)
+    const { resource, permissions } = await decodeResponse(res)
+    t.compare(resource, { org: 'o', docid: 'd', branch: 'main' })
+    // the absent ydoc facet is filled in by normalization
+    t.assert(permissions.ydoc === '----' && permissions.endpoint.comments === 'crud')
   })
   await t.groupAsync("the '*' fallback applies to unnamed endpoints - read-only here", async () => {
     const res = await fetch(`http://${endpointHost}/api/fallback/v1/o/d`)
@@ -507,11 +514,11 @@ export const testEndpointFacetAndAuth = async _tc => {
     const res = await fetch(`http://${endpointHost}/api/blocked/v1/o/d?n=abc`)
     t.assert(res.status === 403, 'a denied caller must not learn about query validity')
   })
-  await t.groupAsync('org/global scope fails closed on a null answer', async () => {
+  await t.groupAsync('a route of a scope the plugin does not answer is a 500', async () => {
     const orgRes = await fetch(`http://${endpointHost}/api/orgless/v1/o`)
-    t.assert(orgRes.status === 403)
+    t.assert(orgRes.status === 500, 'getOrgPermissions is unimplemented')
     const globalRes = await fetch(`http://${endpointHost}/api/globalless/v1`)
-    t.assert(globalRes.status === 403)
+    t.assert(globalRes.status === 500, 'getGlobalPermissions is unimplemented')
   })
   await t.groupAsync('a branded 401 from authenticate passes through; an anonymous caller reaches the handler', async () => {
     const res = await fetch(`http://${endpointHost}/api/fallback/v1/o/d`, { headers: { 'x-no-auth': '1' } })
@@ -565,7 +572,7 @@ export const testSpecValidation = _tc => {
    * @param {string} [apiPrefix]
    * @return {any}
    */
-  const fakeYhub = (api, apiPrefix) => ({ conf: { server: { auth: null, api, apiPrefix } } })
+  const fakeYhub = (api, apiPrefix) => ({ conf: { server: { api, apiPrefix } } })
   const handler = async () => ({})
   // valid baseline - membership, not position: the built-in endpoints register first
   registerApi(fakeYhub([{ name: 'a', get: { handler } }]), stubApp)
@@ -574,11 +581,11 @@ export const testSpecValidation = _tc => {
   // without cors there is nothing to preflight - no OPTIONS route is registered
   t.assert(optionsPatterns.length === 0)
   // with cors, every endpoint gets its own preflight route, so Allow-Methods can be exact
-  registerApi(/** @type {any} */ ({ conf: { server: { auth: null, api: [{ name: 'a', get: { handler } }], cors: { origin: '*' } } } }), stubApp)
+  registerApi(/** @type {any} */ ({ conf: { server: { api: [{ name: 'a', get: { handler } }], cors: { origin: '*' } } } }), stubApp)
   t.assert(optionsPatterns.includes('/api/a/v1/:org/:docid'))
   t.assert(optionsPatterns.includes('/api/ydoc/v1/:org/:docid'))
   // ... except for an endpoint that opts out via cors: null
-  registerApi(/** @type {any} */ ({ conf: { server: { auth: null, api: [{ name: 'b', cors: null, get: { handler } }], cors: { origin: '*' } } } }), stubApp)
+  registerApi(/** @type {any} */ ({ conf: { server: { api: [{ name: 'b', cors: null, get: { handler } }], cors: { origin: '*' } } } }), stubApp)
   t.assert(!optionsPatterns.includes('/api/b/v1/:org/:docid'))
   // same name under a different version is fine
   registerApi(fakeYhub([{ name: 'a', get: { handler } }, { name: 'a', version: 'v2', get: { handler } }]), stubApp)

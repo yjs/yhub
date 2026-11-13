@@ -5,30 +5,28 @@ import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 import WebSocket from 'ws'
 import * as utils from './utils.js'
-import * as types from '../src/types.js'
 import * as protocol from '../src/protocol.js'
 import { WSUser, wsCloseDocDeleted } from '../src/server.js'
 import { mergeUpdates, createContentMap } from '../src/y-utils.js'
 import { normalizeDocumentPermissions } from '../src/permissions.js'
+import { createAuthPlugin } from '@y/hub'
 
 const keepAlivePort = utils.testHubPort(10)
 
-// grants awareness `u` alone: the socket is never relayed presence, so every awareness message it
-// receives is a keep-alive
 await utils.createTestHub({
   worker: null,
+  auth: createAuthPlugin({
+    authenticate: async () => ({ userid: 'user1' }),
+    // grants awareness `u` alone: the socket is never relayed presence, so every awareness
+    // message it receives is a keep-alive
+    getDocumentPermissions: async (_yhub, docRefs) => docRefs.map(resource => ({
+      resource,
+      permissions: { type: 'permissions:document:v1', ydoc: '-r--', awareness: '--u-', endpoint: { ws: '-r--' } }
+    }))
+  }),
   server: {
     port: keepAlivePort,
-    wsKeepAliveInterval: 200,
-    auth: types.createAuthPlugin({
-      async authenticate () {
-        return { userid: 'user1' }
-      },
-      authorize: types.createAuthorize({
-        document: async () => ({ type: 'permissions:document:v1', ydoc: '-r--', awareness: '--u-', endpoint: { ws: '-r--' } })
-      }),
-      filterAuthorized: {}
-    })
+    wsKeepAliveInterval: 200
   }
 })
 
@@ -363,7 +361,7 @@ const equalContentIds = (a, b) => [Y.excludeContentIds(a, b), Y.excludeContentId
  * nothing is trimmed meanwhile.
  *
  * @param {import('../src/index.js').YHub} yhub
- * @param {types.DocRef} docRef
+ * @param {import('../src/types.js').DocRef} docRef
  * @param {Array<Uint8Array<ArrayBuffer>>} edits
  */
 const expectStreamedEdits = async (yhub, docRef, edits) => {
@@ -577,7 +575,7 @@ export const testHugeStateVectorRefused = async tc => {
   const { yhub, defaultDocRef } = await utils.createTestCase(tc)
   const ws = new WebSocket(`${utils.wsUrl}/${defaultDocRef.docid}`)
   const closed = promise.create(resolve => ws.once('close', resolve))
-  ws.on('open', () => ws.send(protocol.encodeSyncStep1(new Uint8Array(/** @type {number} */ (/** @type {types.YHubConfig} */ (yhub.conf).server?.maxDocSize) / 10))))
+  ws.on('open', () => ws.send(protocol.encodeSyncStep1(new Uint8Array(/** @type {number} */ (/** @type {import('../src/types.js').YHubConfig} */ (yhub.conf).server?.maxDocSize) / 10))))
   t.assert(await closed === 1009, 'closed with 1009')
 }
 

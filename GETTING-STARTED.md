@@ -9,8 +9,7 @@ npm install @y/hub
 ## Basic Setup
 
 ```javascript
-import { createYHub, createAuthPlugin, createAuthorize, createDocumentPermissions } from '@y/hub'
-import { hasPermissions, normalizeDocumentPermissions } from '@y/hub/permissions'
+import { createYHub, createAuthPlugin, createDocumentPermissions } from '@y/hub'
 import * as env from 'lib0/environment'
 
 // what every user may do with every document
@@ -29,27 +28,23 @@ const yhub = await createYHub({
   },
   postgres: env.getConf('POSTGRES'),      // e.g. 'postgres://user:pass@localhost:5432/db'
   persistence: [],
+  // The auth plugin. Every function is optional and receives the yhub instance first - one you
+  // leave out keeps the AuthPlugin default: an anonymous caller, a permissions getter that throws
+  // (the routes of its scope answer 500), a batch check that asks its getter.
+  auth: createAuthPlugin({
+    // Return anything identifying the user, or null for an anonymous caller (the permissions are
+    // then asked with authInfo = null). Throw apiError(401, ...) to reject a credential.
+    authenticate: async (yhub, req) => ({ userid: 'anonymous' }),
+    // One function per scope (getGlobalPermissions, getOrgPermissions, getBranchPermissions,
+    // getDocumentPermissions). The list-taking ones answer { resource, permissions } for every
+    // resource they are given, in order - the permission object, or null to deny; the permission
+    // type is forced to match the scope. docRefs are { org, docid, branch } triples.
+    // The batch check (filterAuthorizedDocuments: which of many documents hold one requirement,
+    // e.g. `GET /updated` lists only the documents the caller may read) defaults to asking it.
+    getDocumentPermissions: async (yhub, docRefs, authInfo) => docRefs.map(docRef => ({ resource: docRef, permissions: grant }))
+  }),
   server: {
-    port: 4400,
-    auth: createAuthPlugin({
-      async authenticate (req) {
-        // Return anything identifying the user, or null for an anonymous caller (authorize is
-        // then asked with user = null). Throw apiError(401, ...) to reject a credential.
-        return { userid: 'anonymous' }
-      },
-      // One handler per permission scope ('document' | 'branch' | 'org' | 'global') - scopes
-      // without a handler deny, and each handler's return type is forced to match its scope.
-      authorize: createAuthorize({
-        // docRef is the { org, docid, branch } triple. Return the permission object, or null to deny.
-        document: async (docRef, user) => grant
-      }),
-      // The batch check: which of many documents hold one requirement (e.g. `GET /updated` lists
-      // only the documents the caller may read) - the same decision as `authorize`, in one call.
-      // Every document has the same grant here, so either all of them hold it or none does.
-      filterAuthorized: {
-        document: async (docRefs, required, user) => hasPermissions(normalizeDocumentPermissions(grant), required) ? docRefs : []
-      }
-    })
+    port: 4400
   },
   worker: {
     taskConcurrency: 5
@@ -69,8 +64,8 @@ import * as env from 'lib0/environment'
 const publicKey = await ecdsa.importKeyJwk(JSON.parse(env.getConf('AUTH_PUBLIC_KEY')))
 
 // Map the token's claims to a permission object - the same for every document.
-const documentPermissions = user => {
-  const write = !user.readonly // e.g. a `readonly` claim issued at sign-in
+const documentPermissions = authInfo => {
+  const write = !authInfo.readonly // e.g. a `readonly` claim issued at sign-in
   return {
     type: 'permissions:document:v1',
     ydoc: write ? 'cru-' : '-r--',
@@ -82,24 +77,16 @@ const documentPermissions = user => {
 
 const yhub = await createYHub({
   // ... redis, postgres, persistence config
-  server: {
-    port: 4400,
-    auth: createAuthPlugin({
-      async authenticate (req) {
-        const token = req.getQuery('yauth')
-        // Verify the token and return its payload — authorize receives it as `user`
-        const { payload } = await jwt.verifyJwt(publicKey, token)
-        return payload
-      },
-      authorize: createAuthorize({
-        document: async (docRef, user) => documentPermissions(user)
-      }),
-      // The permissions don't depend on the document: all of them hold the requirement or none does.
-      filterAuthorized: {
-        document: async (docRefs, required, user) => hasPermissions(normalizeDocumentPermissions(documentPermissions(user)), required) ? docRefs : []
-      }
-    })
-  },
+  auth: createAuthPlugin({
+    authenticate: async (yhub, req) => {
+      const token = req.getQuery('yauth') // read the request before the first await
+      // Verify the token and return its payload — the permissions receive it as `authInfo`
+      const { payload } = await jwt.verifyJwt(publicKey, token)
+      return payload
+    },
+    getDocumentPermissions: async (yhub, docRefs, authInfo) => docRefs.map(docRef => ({ resource: docRef, permissions: documentPermissions(authInfo) }))
+  }),
+  server: { port: 4400 },
   worker: { taskConcurrency: 5 }
 })
 ```
@@ -118,11 +105,15 @@ const publicJwk = JSON.stringify(await ecdsa.exportKeyJwk(keypair.publicKey))
 ### Cookie Authentication
 
 ```javascript
-const authorize = createAuthorize({
-  document: async (docRef, user) => {
-    const hasAccess = await checkUserPermission(user.userid, docRef.org, docRef.docid)
-    if (!hasAccess) return null // denial is a value — throwing means infrastructure failure
-    return {
+// One lookup per document. yhub asks for one document at a time today, so this is what each
+// websocket upgrade and rest request costs.
+const documentPermissions = (docRefs, authInfo) => Promise.all(docRefs.map(async docRef => {
+  const hasAccess = await checkUserPermission(authInfo.userid, docRef.org, docRef.docid)
+  // denial is a value — throwing means infrastructure failure
+  if (!hasAccess) return { resource: docRef, permissions: null }
+  return {
+    resource: docRef,
+    permissions: {
       type: 'permissions:document:v1',
       ydoc: 'cru-',
       awareness: '-ru-',
@@ -130,26 +121,24 @@ const authorize = createAuthorize({
       endpoint: { '*': 'crud' }
     }
   }
-})
+}))
 
 createAuthPlugin({
-  async authenticate (req) {
-    const cookies = parseCookies(req.getHeader('cookie'))
+  authenticate: async (yhub, req) => {
+    const cookies = parseCookies(req.getHeader('cookie')) // read the request before the first await
     const session = await validateSession(cookies.sessionId)
     return { userid: session.userId }
   },
-  authorize,
-  // The batch check, implemented naively: one `authorize` per document. Correct, but one
-  // permission lookup per document - answer from one query for many documents
-  // (API.md, "Batch checks").
-  filterAuthorized: {
-    document: async (docRefs, required, user) => {
-      const answers = await Promise.all(docRefs.map(docRef => authorize('document', docRef, user)))
-      return docRefs.filter((_docRef, i) => answers[i] != null && hasPermissions(normalizeDocumentPermissions(answers[i]), required))
-    }
-  }
+  // The batch check defaults to this getter: correct, but one permission lookup per document -
+  // answer many documents from one query instead (API.md, "Batch checks").
+  getDocumentPermissions: async (yhub, docRefs, authInfo) => await documentPermissions(docRefs, authInfo)
 })
 ```
+
+`createAuthPlugin` builds a subclass of `AuthPlugin` whose methods bound every call by the
+timeout, check every answer and normalize the permissions - safety guards you usually want. You
+can also extend `AuthPlugin` by hand, but such a class is called as written, without them (see
+[Extending AuthPlugin](./API.md#extending-authplugin)).
 
 ## Separate Workers and Servers (Recommended)
 
@@ -165,7 +154,8 @@ await createYHub({
   redis: { url: env.getConf('REDIS'), prefix: 'yhub' },
   postgres: env.getConf('POSTGRES'),
   persistence: [],
-  server: { port: 4400, auth: createAuthPlugin({ /* ... */ }) },
+  auth: createAuthPlugin({ /* ... */ }),
+  server: { port: 4400 },
   worker: null  // No worker in this process
 })
 ```
@@ -212,9 +202,9 @@ const yhub = await createYHub({
       secretKey: env.getConf('S3_SECRET_KEY')
     })
   ],
+  auth: createAuthPlugin({ /* ... */ }),
   server: {
-    port: 4400,
-    auth: createAuthPlugin({ /* ... */ })
+    port: 4400
   },
   worker: {
     taskConcurrency: 5

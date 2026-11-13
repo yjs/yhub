@@ -138,83 +138,11 @@ export class EncodedAny {
 export const encodedAny = bytes => new EncodedAny(bytes)
 
 /**
- * Settle with `p`, or reject with a branded 503 `auth timeout` once `server.authTimeout` ms have
- * passed - a hung auth plugin must not hold a rest request, a ws upgrade or a recheck forever.
- * The plugin call can't be cancelled; it is abandoned.
+ * The auth funnel every rest request and ws upgrade passes: `yhub.auth.authenticate` the caller
+ * (null = anonymous), then ask its permissions on the resource the route addresses (null = no
+ * permissions - the gates answer 403 naming what is missing). Errors: see `createAuthPlugin`.
  *
- * @template T
- * @param {import('./index.js').YHub} yhub
- * @param {'authenticate'|'authorize'|'filterAuthorized'} hook
- * @param {Promise<T>} p
- * @return {Promise<T>}
- */
-export const withAuthTimeout = (yhub, hook, p) => {
-  const timeout = /** @type {number} */ (yhub.conf.server?.authTimeout)
-  /**
-   * @type {ReturnType<typeof setTimeout>|undefined}
-   */
-  let timer
-  return Promise.race([p, promise.create((_resolve, reject) => {
-    timer = setTimeout(() => {
-      log.warn({ hook, timeout }, 'auth plugin timed out')
-      reject(apiError(503, 'auth timeout', { code: 'auth-timeout' }))
-    }, timeout)
-  })]).finally(() => clearTimeout(timer))
-}
-
-/**
- * Run one auth hook, bounded by `server.authTimeout`. A branded apiError is the plugin's own
- * answer - a 401 from `authenticate` rejecting a credential, a 503 outage from any hook - and
- * passes through, as does the timeout's 503; any other throw is an infrastructure failure: 503,
- * transient like the ws recheck's 1013. Deny is a value on both hooks (`authenticate` → null: an
- * anonymous caller; `authorize` → null: no permissions).
- *
- * @template T
- * @param {import('./index.js').YHub} yhub
- * @param {'authenticate'|'authorize'|'filterAuthorized'} hook
- * @param {() => Promise<T>} run
- */
-export const runAuthHook = async (yhub, hook, run) => {
-  try {
-    return await withAuthTimeout(yhub, hook, run())
-  } catch (err) {
-    if (isApiError(err)) throw err
-    log.warn({ err, hook }, 'auth plugin failed')
-    throw apiError(503, `${hook} unavailable`, { code: 'auth-unavailable' })
-  }
-}
-
-/**
- * Normalize an `authorize` answer for `scope` - the one place every answer passes (rest, ws
- * upgrade, ws recheck). `null` stays null (no permissions), a well-formed answer of an unknown
- * future type version is denied whole (null) with a warning, a known-but-wrong-scope type or an
- * invalid object throws - a plugin bug, never a silent denial.
- *
- * @template {perm.PermissionScope} S
- * @param {S} scope
- * @param {any} answer
- * @return {perm.ToNormalizedPermissionType<S> | null}
- */
-export const normalizeAuthorizeAnswer = (scope, answer) => {
-  if (answer == null) return null
-  const type = `permissions:${scope}:v1`
-  if (answer.type !== type) {
-    if (typeof answer.type === 'string' && !perm.isKnownPermissionsType(answer.type)) {
-      log.warn({ type: answer.type, scope }, 'unknown permissions type, denying')
-      return null
-    }
-    throw error.create(`auth plugin: authorize answered ${JSON.stringify(answer.type)} to a '${scope}' question`)
-  }
-  return /** @type {any} */ (perm.normalizePermissions(answer))
-}
-
-/**
- * The auth funnel every rest request and ws upgrade passes: `authenticate` the caller (null =
- * anonymous), then `authorize` against the route's scope and normalize the answer (null = no
- * permissions - the gates answer 403 naming what is missing). Errors: see `runAuthHook`; a
- * malformed answer or authInfo escapes unbranded - a logged 500, never a silent denial.
- *
- * @template {perm.PermissionScope} S
+ * @template {'global'|'org'|'document'} S
  * @param {import('./index.js').YHub} yhub
  * @param {import('uws').HttpRequest} req - the live uws request; must be entered synchronously
  * @param {S} scope
@@ -222,33 +150,12 @@ export const normalizeAuthorizeAnswer = (scope, answer) => {
  * @returns {Promise<{ authInfo: t.UserAuthInfo | null, permissions: perm.ToNormalizedPermissionType<S> | null }>}
  */
 export const resolvePermissions = async (yhub, req, scope, resourceId) => {
-  const auth = /** @type {t.AuthPlugin<any>} */ (yhub.conf.server?.auth)
-  const authInfo = await runAuthHook(yhub, 'authenticate', () => auth.authenticate(req))
-  if (authInfo != null) s.$string.expect(authInfo.userid)
-  const answer = await runAuthHook(yhub, 'authorize', () => auth.authorize(scope, resourceId, authInfo))
-  return { authInfo, permissions: normalizeAuthorizeAnswer(scope, answer) }
-}
-
-/**
- * The batch check: the resources of `resourceIds` that `user` holds `required` on - the plugin's
- * answer as is, from one `filterAuthorized` call for the whole list. Its entries equal given ones
- * by value, not identity, in any order - match them by value. An empty list and a scope without a
- * handler hold nothing, without a call. Errors: see `runAuthHook`.
- *
- * @template {perm.PermissionScope} S
- * @param {import('./index.js').YHub} yhub
- * @param {S} scope
- * @param {Array<perm.PermissionResourceId<S>>} resourceIds
- * @param {perm.ToPermissionType<S>} required - an input-form permission object of the scope
- * @param {t.UserAuthInfo|null} user
- * @return {Promise<Array<perm.PermissionResourceId<S>>>}
- */
-export const filterAuthorized = async (yhub, scope, resourceIds, required, user) => {
-  const handlers = /** @type {t.AuthPlugin<any>} */ (yhub.conf.server?.auth).filterAuthorized
-  const handler = handlers[scope]
-  if (handler == null || resourceIds.length === 0) return []
-  // called as a method of `handlers`, as `createAuthorize` does: a class-based plugin keeps `this`
-  return runAuthHook(yhub, 'filterAuthorized', () => handler.call(handlers, resourceIds, required, user))
+  const authInfo = await yhub.auth.authenticate(req)
+  const id = /** @type {any} */ (resourceId)
+  const permissions = /** @type {any} */ (scope === 'global'
+    ? await yhub.auth.getGlobalPermissions(authInfo)
+    : (await (scope === 'org' ? yhub.auth.getOrgPermissions([id], authInfo) : yhub.auth.getDocumentPermissions([id], authInfo)))[0].permissions)
+  return { authInfo, permissions }
 }
 
 const apiMethods = /** @type {{ get: 'get', post: 'post', put: 'put', patch: 'patch', delete: 'del' }} */ ({ get: 'get', post: 'post', put: 'put', patch: 'patch', delete: 'del' })
@@ -519,7 +426,7 @@ const createApiHandler = (yhub, { method, handler, scope, requiredEndpoint, path
       return
     }
     const docRef = scope === 'document' ? /** @type {t.DocRef} */ ({ org, docid, branch }) : null
-    // the resource the route addresses, in the shape `authorize` expects for its scope
+    // the resource the route addresses, in the shape the scope's permissions getter expects
     const resourceId = docRef ?? (scope === 'org' ? /** @type {{ org: string }} */ ({ org }) : {})
     log.debug({ endpoint: `${method.toUpperCase()} ${path}` }, 'api request')
     // auth starts synchronously - `authenticate` reads the live uws request

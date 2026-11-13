@@ -34,14 +34,14 @@ import * as s from 'lib0/schema'
  */
 
 /**
- * The scope of an `authorize` question - the first argument of the plugin hook. The ladder orders
- * global → org → branch → document (see naming.md): a branch spans many documents, and the leaf a
- * permission check cares about is a document on a branch.
+ * The scope of a permission question - the `[Scope]` of the auth plugin's `get[Scope]Permissions`.
+ * The ladder orders global → org → branch → document (see naming.md): a branch spans many
+ * documents, and the leaf a permission check cares about is a document on a branch.
  *
  * @typedef {'global'|'org'|'branch'|'document'} PermissionScope
  */
 /**
- * The resource an `authorize` call addresses - the shape follows the scope.
+ * A resource a permissions getter is asked about - the shape follows the scope.
  *
  * @template {PermissionScope} [S=PermissionScope]
  * @typedef {S extends 'document' ? import('./types.js').DocRef
@@ -50,7 +50,7 @@ import * as s from 'lib0/schema'
  *   : {}} PermissionResourceId
  */
 /**
- * The input-form permission type answering an `authorize` question of scope `S`. The returned
+ * The input-form permission type answering a permission question of scope `S`. The returned
  * object's `type` literal must match the scope (`'document'` → `'permissions:document:v1'`, ..) -
  * a mismatch throws at the normalize boundary, a loud validation error rather than a silent
  * denial.
@@ -515,7 +515,7 @@ const $permissionsSchemaFor = type =>
  * @typedef {DocumentPermissionsV1Normalized | BranchPermissionsV1Normalized | OrgPermissionsV1Normalized | GlobalPermissionsV1Normalized} NormalizedPermissions
  */
 /**
- * The normalized view answering an `authorize` question of scope `S` - the counterpart of
+ * The normalized view answering a permission question of scope `S` - the counterpart of
  * `ToPermissionType`.
  *
  * @template {PermissionScope} [S=PermissionScope]

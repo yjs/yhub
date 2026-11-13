@@ -5,11 +5,11 @@ import * as array from 'lib0/array'
 import * as buffer from 'lib0/buffer'
 import * as delta from 'lib0/delta'
 import * as awarenessProtocol from '@y/protocols/awareness'
-import * as types from '../src/types.js'
 import * as stream from '../src/stream.js'
 import { createDocumentPermissions, hasPermissions, normalizeDocumentPermissions } from '../src/permissions.js'
 import { createContentMap } from '../src/y-utils.js'
 import * as utils from './utils.js'
+import { createAuthPlugin } from '@y/hub'
 
 /**
  * The updated-documents listing (`GET /updated`): the redis index that shares its lifetime with a
@@ -47,15 +47,15 @@ const readGrant = createDocumentPermissions({ ydoc: '-r--' })
 const normalizedReadGrant = normalizeDocumentPermissions(readGrant)
 
 /**
- * Whether the auth hub lets `user` read `docRef` - its `authorize` and `filterAuthorized` both
- * answer from this, so they agree: docids ending in `-secret` are unreadable, and `broken`'s
- * document checks fail.
+ * Whether the auth hub lets `authInfo` read `docRef` - its `getDocumentPermissions` and
+ * `filterAuthorizedDocuments` both answer from this, so they agree: docids ending in `-secret` are
+ * unreadable, and `broken`'s document checks fail.
  *
  * @param {import('../src/types.js').DocRef} docRef
- * @param {{ userid: string } | null} user
+ * @param {{ userid: string } | null} authInfo
  */
-const mayRead = (docRef, user) => {
-  if (user?.userid === 'broken') throw new Error('permission backend down')
+const mayRead = (docRef, authInfo) => {
+  if (authInfo?.userid === 'broken') throw new Error('permission backend down')
   return !docRef.docid.endsWith('-secret')
 }
 
@@ -69,36 +69,32 @@ const mayRead = (docRef, user) => {
 const authPort = utils.testHubPort(12)
 await utils.createTestHub({
   worker: null,
+  auth: createAuthPlugin({
+    authenticate: async (_yhub, req) => {
+      const userid = req.getHeader('x-user') || null
+      return userid === null ? null : { userid }
+    },
+    getGlobalPermissions: async (_yhub, authInfo) => {
+      const userid = authInfo?.userid ?? ''
+      if (userid === 'noglobal') return null
+      /**
+       * @type {'*' | Array<string> | undefined}
+       */
+      const orgs = userid.startsWith('orgs=') ? userid.slice(5).split(',') : (userid === 'reader' ? '*' : undefined)
+      return { type: 'permissions:global:v1', endpoint: { updated: '-r--' }, ...(orgs === undefined ? {} : { orgs }) }
+    },
+    getOrgPermissions: async (_yhub, orgs, authInfo) => authInfo?.userid === 'nobody' ? null : orgs.map(resource => ({ resource, permissions: { type: 'permissions:org:v1', endpoint: { updated: '-r--' } } })),
+    getDocumentPermissions: async (_yhub, docRefs, authInfo) => docRefs.map(docRef => ({ resource: docRef, permissions: mayRead(docRef, authInfo) ? readGrant : null })),
+    filterAuthorizedDocuments: async (_yhub, docRefs, required, authInfo) => {
+      filterCalls.push({ docRefs, required, userid: authInfo?.userid ?? null })
+      const readable = hasPermissions(normalizedReadGrant, required) ? docRefs.filter(docRef => mayRead(docRef, authInfo)) : []
+      return authInfo?.userid !== 'copies'
+        ? readable
+        : docRefs.filter(docRef => !mayRead(docRef, authInfo)).map(docRef => ({ ...docRef, org: `${docRef.org}-other` })).concat(readable.map(docRef => ({ ...docRef })))
+    }
+  }),
   server: {
-    port: authPort,
-    auth: types.createAuthPlugin({
-      async authenticate (req) {
-        const userid = req.getHeader('x-user') || null
-        return userid === null ? null : { userid }
-      },
-      authorize: types.createAuthorize({
-        global: async (_resource, user) => {
-          const userid = user?.userid ?? ''
-          if (userid === 'noglobal') return null
-          /**
-           * @type {'*' | Array<string> | undefined}
-           */
-          const orgs = userid.startsWith('orgs=') ? userid.slice(5).split(',') : (userid === 'reader' ? '*' : undefined)
-          return { type: 'permissions:global:v1', endpoint: { updated: '-r--' }, ...(orgs === undefined ? {} : { orgs }) }
-        },
-        org: async (_org, user) => user?.userid === 'nobody' ? null : { type: 'permissions:org:v1', endpoint: { updated: '-r--' } },
-        document: async (docRef, user) => mayRead(docRef, user) ? readGrant : null
-      }),
-      filterAuthorized: {
-        document: async (docRefs, required, user) => {
-          filterCalls.push({ docRefs, required, userid: user?.userid ?? null })
-          const readable = hasPermissions(normalizedReadGrant, required) ? docRefs.filter(docRef => mayRead(docRef, user)) : []
-          return user?.userid !== 'copies'
-            ? readable
-            : docRefs.filter(docRef => !mayRead(docRef, user)).map(docRef => ({ ...docRef, org: `${docRef.org}-other` })).concat(readable.map(docRef => ({ ...docRef })))
-        }
-      }
-    })
+    port: authPort
   }
 })
 
@@ -382,11 +378,11 @@ export const testPageEndsBeforeTheOpenMillisecond = async tc => {
 }
 
 /**
- * One `filterAuthorized` call per page, with every listed document and the ydoc `r` requirement:
- * unreadable documents are filtered out but still move the cursor, a missing org grant is 403, a
- * failing plugin fails the request rather than silently dropping documents, the answer is matched
- * by value (equal copies in any order; an entry of another org lists nothing), and an empty page
- * asks nothing.
+ * One `filterAuthorizedDocuments` call per page, with every listed document and the ydoc `r`
+ * requirement: unreadable documents are filtered out but still move the cursor, a missing org
+ * grant is 403, a failing plugin fails the request rather than silently dropping documents, the
+ * answer is matched by value (equal copies in any order; an entry of another org lists nothing),
+ * and an empty page asks nothing.
  *
  * @param {t.TestCase} tc
  */

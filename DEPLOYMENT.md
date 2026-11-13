@@ -104,19 +104,18 @@ plugin you pass to y/hub verifies it and answers permission questions per
 document:
 
 1. The client fetches a token from your application and connects to y/hub with it.
-2. `authenticate(req)` verifies the token and returns the user object.
+2. `authenticate(yhub, req)` verifies the token and returns the user's `authInfo`.
 3. For each document the client opens, y/hub calls
-   `authorize('document', docRef, user)` — return that user's permission object,
-   or `null` to deny.
+   `getDocumentPermissions(yhub, [docRef], authInfo)` — return `{ resource, permissions }`
+   for each docRef, in order: that user's permission object, or `null` to deny.
 
 ### Implement the auth plugin
 
-Build the plugin with `createAuthPlugin` from `@y/hub` and pass it as
-`conf.server.auth`:
+Build the plugin with `createAuthPlugin` from `@y/hub` and pass it as `auth`
+to `createYHub()`:
 
 ```javascript
-import { createAuthPlugin, createAuthorize } from '@y/hub'
-import { hasPermissions, normalizeDocumentPermissions } from '@y/hub/permissions'
+import { createAuthPlugin } from '@y/hub'
 
 /**
  * The permission object of one access row - null denies.
@@ -132,40 +131,41 @@ const documentPermissions = access => access == null
       endpoint: { '*': access.write ? 'crud' : '-r--' }  // rest endpoints + the websocket route ('ws'), '*' = fallback
     }
 
-const auth = createAuthPlugin({
-  async authenticate (req) {
-    // Verify the JWT (or session cookie) the client sent. Return an object
-    // with at least { userid } — it is handed to authorize() as `user`.
-    // Return null for an anonymous caller (authorize() then gets user = null);
-    // throw apiError(401, ...) to reject a bad credential, apiError(503, ...)
-    // for a temporary auth-backend outage. Any other throw answers 503.
-    const { payload } = await jwt.verifyJwt(authPublicKey, readToken(req))
+const Auth = createAuthPlugin({
+  authenticate: async (yhub, req) => {
+    // Verify the JWT (or session cookie) the client sent - read the request before the first
+    // await. Return an object with at least { userid } - the permissions receive it as
+    // `authInfo`. Return null for an anonymous caller (the permissions then get authInfo = null);
+    // throw apiError(401, ...) to reject a bad credential, apiError(503, ...) for a temporary
+    // auth-backend outage. Any other throw answers 503.
+    const token = readToken(req)
+    const { payload } = await jwt.verifyJwt(authPublicKey, token)
     return { userid: payload.yuserid }
   },
-  // One handler per scope - scopes without a handler deny, and each handler's return type is
-  // forced to match its scope. Return the permission object, or null to deny - denial is a
+  // One function per scope, each optional - one you leave out keeps the AuthPlugin default: it
+  // throws, so the routes of its scope answer 500. A getter receives a list of resources and
+  // answers { resource, permissions } for each - the permission object, or null to deny - in the
+  // same order, none skipped; the permission type is forced to match its scope. Denial is a
   // value, never a throw; a throw means infrastructure failure.
-  // No public documents here: an anonymous caller (user = null) is denied.
-  authorize: createAuthorize({
-    document: async (docRef, user) => user === null ? null : documentPermissions(await checkUserAccess(user.userid, docRef))
-  }),
-  // The batch check (e.g. `GET /updated` lists only the documents the caller may read): which of
-  // docRefs hold `required` - the same decision as `authorize`, from one query. Return them in
-  // any order (compared by value); scopes without a handler hold nothing.
-  filterAuthorized: {
-    document: async (docRefs, required, user) => {
-      if (user === null) return [] // as authorize: anonymous callers hold nothing
-      const rows = await checkUserAccessMany(user.userid, docRefs) // positionally aligned
-      return docRefs.filter((_docRef, i) => rows[i] != null && hasPermissions(normalizeDocumentPermissions(documentPermissions(rows[i])), required))
-    }
+  // No public documents here: an anonymous caller (authInfo = null) is denied.
+  getDocumentPermissions: async (yhub, docRefs, authInfo) => {
+    if (authInfo === null) return null // null for the whole list: none of them
+    const rows = await checkUserAccessMany(authInfo.userid, docRefs) // one query, positionally aligned
+    return docRefs.map((docRef, i) => ({ resource: docRef, permissions: documentPermissions(rows[i]) }))
   }
-})
+  // The batch check (filterAuthorizedDocuments - e.g. `GET /updated` lists only the documents the
+  // caller may read) defaults to asking getDocumentPermissions about the whole page: one query.
+}, { timeout: 10000 }) // every call is abandoned after this many ms (503 / websocket 1013)
 ```
 
 Schemas, sanitizers, and permission combinators are exported from
-`@y/hub/permissions`. Implementing `filterAuthorized` with one `authorize` call
-per document is correct but slow for many documents — see
-[Batch checks](./API.md#batch-checks-filterauthorized).
+`@y/hub/permissions`. The batch check costs what `getDocumentPermissions` costs:
+one permission lookup per document is correct but slow for many documents — see
+[Batch checks](./API.md#batch-checks-filterauthorizeddocuments). Prefer
+`createAuthPlugin` over extending `AuthPlugin` by hand: its methods bound every
+call by the timeout, check every answer and normalize the permissions — safety
+guards a hand-written class skips (see
+[Extending AuthPlugin](./API.md#extending-authplugin)).
 
 ### Issue tokens from your application
 

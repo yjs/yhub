@@ -6,9 +6,9 @@ Y/hub is a collaborative document backend built on Yjs. It implements the standa
 
 ## REST API
 
-Every request is authenticated by the auth plugin's `authenticate` callback and authorized
-against the permission object its `authorize` callback answers for the route's scope — see
-[Permissions](#permissions).
+Every request is authenticated by the auth plugin's `authenticate` function and authorized
+against the permission object its `get[Scope]Permissions` function answers for the route's scope
+— see [Permissions](#permissions).
 
 It is assumed that all documents can be identified by a unique `{org}/{docid}`
 combination. Furthermore, all "body" content is encoded via lib0/encoding's
@@ -38,7 +38,7 @@ every message a client sends before it is ignored. Until its initial sync a conn
 [permission re-checks](#yhubrecheckauthdocref-opts); the initial sync replays them from the
 stream, which keeps them only for `redis.minMessageLifetime`. So an initial sync that reads the
 stream later than a third of it after connecting (a late sync step 1, or a slow document load)
-asks `authorize` again unconditionally. The server answers with its own sync step 1
+asks `getDocumentPermissions` again unconditionally. The server answers with its own sync step 1
 (only on connections that may write), then with the part of the document the client lacks as
 sync step 2, so a reconnecting client doesn't download the document again. Because the server's
 step 1 comes first, a client without state answers it with an empty update. Updates are accepted
@@ -80,7 +80,7 @@ when codes are added:
 | `4500`–`4599` | transient yhub errors — `4503` server shutting down (see [`yhub.destroy`](#yhubdestroyopts); exported as `wsCloseDraining`) | yes — another instance behind the load balancer takes the connection |
 | `1009` | permanent error — message too big: the client's sync step 1 carries a state vector of 10% of `server.maxDocSize` or more (see [`createYHub`](#createyhubconfig)) | no — a new connection sends the same state vector; raise `server.maxDocSize` |
 | `1011` | internal error — initial sync, message handling, or stream relay failed | yes |
-| `1013` | try again later — backpressure limit exceeded, `authorize` threw or exceeded `server.authTimeout` during a re-check (the permission backend is down, not the grant revoked), or the initial sync found the compute queue full (see `computePool.maxQueue` in [`createYHub`](#createyhubconfig)) | yes |
+| `1013` | try again later — backpressure limit exceeded, `getDocumentPermissions` threw or exceeded the auth plugin's timeout during a re-check (the permission backend is down, not the grant revoked), or the initial sync found the compute queue full (see `computePool.maxQueue` in [`createYHub`](#createyhubconfig)) | yes |
 | `1002` `1003` `1008` | other standard permanent codes — yhub never sends them | no |
 | *(none)* | closed without a close frame — the client reports `1006` (`@y/websocket` reports `event = null` to `connection-close` when its own socket timeout closed a dead link) | yes |
 
@@ -92,7 +92,7 @@ proxy failures. Always transient.
 A denied upgrade is HTTP, never a close code: `401` a credential the auth plugin rejected, or an
 anonymous caller granted ydoc `u` (writing needs an identity), `403` insufficient access
 or an origin the CORS config does not allow (see [CORS](#cors)),
-`503` the auth plugin failed or exceeded `server.authTimeout` (`auth timeout`) — or the status of a
+`503` the auth plugin failed or exceeded its timeout (`auth timeout`) — or the status of a
 branded `apiError` it threw, e.g. `503` while its backend is down. Browsers can't observe upgrade
 statuses — the client only sees a failed connection attempt. `4401` is the explicit stop signal; a client that ignores it reconnects into a `403`
 loop against your auth backend.
@@ -128,7 +128,7 @@ Error responses carry a lib0-any encoded `{ error: string, ...extra }` body (see
 | `403` with `code: 'missing-permission'` | the caller is authenticated but its permissions don't contain what the request requires — the message reads `requires permission {...}` and the `required` field carries the request's whole requirement as a permission object of the route's scope, e.g. `{ type: 'permissions:document:v1', ydoc: '--u-' }` or `{ type: 'permissions:document:v1', delete: ['hard'] }`; changeset/activity name the clamped ray start, `history: { from }` — the query's `from` limited to the granted ray (see [Permissions](#permissions)). Only [updated orgs](#updated-orgs) omits `required` | no — the grant must change first |
 | `403` with `code: 'origin-not-allowed'` | the page's origin is not allowed by `server.cors` (see [CORS](#cors)) — always json | no — fix the server's cors config, not the credentials |
 | `429` | rate limited — yhub itself never sends this; reserved for proxies and custom endpoints | yes — back off first |
-| `500`–`599` | server-side failure — `500` internal error (`code: 'internal-error'`), `503` the auth plugin failed (`code: 'auth-unavailable'`) or exceeded `server.authTimeout` (`code: 'auth-timeout'`), or the compute queue is full (`code: 'compute-queue-full'`, see `computePool.maxQueue` in [`createYHub`](#createyhubconfig)) | yes |
+| `500`–`599` | server-side failure — `500` internal error (`code: 'internal-error'`), `503` the auth plugin failed (`code: 'auth-unavailable'`) or exceeded its timeout (`code: 'auth-timeout'`), or the compute queue is full (`code: 'compute-queue-full'`, see `computePool.maxQueue` in [`createYHub`](#createyhubconfig)) | yes |
 
 ### JSON encoding
 
@@ -398,8 +398,9 @@ fleet, and for documents nobody has open.
 
 Access: the org `endpoint` facet (`endpoint.updated` `r` in the `permissions:org:v1` answer),
 **plus** ydoc `r` per listed document — the endpoint hands every candidate of the page to the
-plugin's [`filterAuthorized.document`](#batch-checks-filterauthorized) in one call and lists only
-the documents it answers. A failing plugin fails the request with `503` rather than dropping documents.
+plugin's [`filterAuthorizedDocuments`](#batch-checks-filterauthorizeddocuments) in one call (by
+default answered from `getDocumentPermissions`) and lists only the documents it answers. A failing
+plugin fails the request with `503` rather than dropping documents.
 
 * `GET /api/updated/v1/{org}` parameters: `{ since?: number, limit?: number }`
   * `since=number`: unix ms, exclusive — documents whose last change is after it (default: `0`, everything)
@@ -468,7 +469,7 @@ Access: the global `endpoint` facet (`endpoint.updated` `r` in the `permissions:
 answer) gates the route, and the global [`orgs` facet](#permission-objects) of the same answer
 decides which orgs are listed: `orgs: '*'` lists every org, `orgs: ['acme', …]` only those. An
 answer without `orgs` (absent, `false` or `[]`) is refused with `403 { code: 'missing-permission' }`
-— without a `required` field, since any list satisfies the route. One `authorize('global', …)` call
+— without a `required` field, since any list satisfies the route. One `getGlobalPermissions` call
 per request — there is no per-org check, so the facet alone decides what a caller learns about
 other orgs. A list reads only the listed orgs' entries, so its cost follows the list, not the
 number of orgs.
@@ -699,9 +700,9 @@ import { createYHub, createAuthPlugin, apiError } from '@y/hub'
 
 const yhub = await createYHub({
   // ...
+  auth: createAuthPlugin({ /* see Permissions below */ }),
   server: {
     port: 8080,
-    auth: createAuthPlugin({ /* see below */ }),
     api: [
       // doc scope (default) → GET/POST /api/comments/v1/{org}/{docid}
       {
@@ -834,52 +835,132 @@ export const comments = createApiEndpoint('comments', {
 
 ### Permissions
 
-The auth plugin (`server.auth`) has three members: `authenticate` establishes *who* is asking,
-`authorize` answers *what they may do* with one resource — a typed permission object per scope —
-and `filterAuthorized` answers *which* of many resources hold one requirement (see
-[Batch checks](#batch-checks-filterauthorized)). Every gate — REST and websocket alike — consumes
-the permission object; there is no separate access vocabulary. The full design rationale lives in
-[proposals/permissions.md](proposals/permissions.md).
+The auth plugin answers *who* is asking and *what they may do*: a typed permission object per
+scope. Every gate — REST and websocket alike — consumes the permission object; there is no
+separate access vocabulary. The plugin is a subclass of **`AuthPlugin`** (exported from
+`@y/hub`), passed as `auth` to [`createYHub`](#createyhubconfig). yhub instantiates it with itself
+at startup as **`yhub.auth`**: what yhub asks at every gate, and what your endpoints and plugins
+call too. Build it with **`createAuthPlugin`**: its methods bound every call by the timeout,
+check every answer and normalize the permissions — safety guards you usually want.
+[Extending `AuthPlugin`](#extending-authplugin) by hand is possible, but skips them. The full
+design rationale lives in [proposals/permissions.md](proposals/permissions.md).
 
 ```js
-import { createAuthPlugin, createAuthorize } from '@y/hub'
-import { hasPermissions, normalizeDocumentPermissions } from '@y/hub/permissions'
+import { createAuthPlugin } from '@y/hub'
 
-createAuthPlugin({
+const Auth = createAuthPlugin({
   // identity: return { userid, ...anything }, or null for an anonymous caller. Throw a branded
   // apiError(401, ...) to reject a presented credential, apiError(503, ...) to signal a
   // temporary auth-backend outage; any other throw answers 503.
-  async authenticate (req) {
-    return await verifySession(req.getHeader('authorization'))
-  },
-  // permissions of `user` (null when anonymous) on one resource - one handler per scope, scopes
-  // without a handler deny. Each handler receives its scope's resourceId shape ('document' →
-  // { org, docid, branch }, 'branch' → { org, branch }, 'org' → { org }, 'global' → {}) and
-  // returns that scope's permission object, or null to deny. Denial is a value, never a throw -
-  // a throw is an infrastructure failure (rest and upgrade 503 / branded status, websocket
-  // re-check 1013).
-  authorize: createAuthorize({
-    document: async (docRef, user) => user === null ? await publicDocPermissions(docRef) : await lookupDocPermissions(user, docRef)
-  }),
-  // the batch check: which of `docRefs` hold `required` - the same decision `authorize` makes,
-  // from one backend query instead of one per document. Scopes without a handler hold nothing.
-  filterAuthorized: {
-    document: async (docRefs, required, user) => {
-      const grants = await lookupManyDocPermissions(user, docRefs) // positionally aligned, null = no grant
-      return docRefs.filter((_docRef, i) => grants[i] != null && hasPermissions(normalizeDocumentPermissions(grants[i]), required))
-    }
+  authenticate: async (yhub, req) => await verifySession(req.getHeader('authorization')),
+  // permissions on resources of one scope: { resource, permissions } for each resource it is
+  // given, in order - that scope's permission object, or null - or null to deny them all.
+  // Denial is a value, never a throw - a throw is an infrastructure failure (rest and upgrade
+  // 503 / branded status, websocket re-check 1013).
+  getDocumentPermissions: async (yhub, docRefs, authInfo) => {
+    // one backend query for the whole list, positionally aligned
+    const grants = authInfo === null ? await publicDocPermissions(docRefs) : await lookupDocPermissions(authInfo, docRefs)
+    return docRefs.map((docRef, i) => ({ resource: docRef, permissions: grants[i] }))
   }
-})
+}, { timeout: 10000 })
+
+const yhub = await createYHub({ auth: Auth, /* ... */ })
 ```
 
-`authorize` is typed so the returned object is forced to match the scope
-(`ToPermissionType<Scope>` from `@y/hub/permissions`). `createAuthorize` is the shape TypeScript
-can verify completely: per-scope `resourceId` parameters, per-scope return types, deny-by-default
-for unlisted scopes. A hand-rolled `authorize (type, resourceId, user)` function stays possible —
-but a single function body cannot correlate a runtime check of `type` with its return type, so
-it needs one cast at the return. Independent of typing, every answer is validated against its
-scope's permission schema at runtime: an invalid or wrong-scope object is a loud `500` (logged),
-never a silent denial.
+The definition has one function per question — all optional, all async, each receiving the yhub
+instance first:
+
+| Function | Answers |
+|---|---|
+| `authenticate(yhub, req)` | the caller: `{ userid, ... }`, or `null` for an anonymous caller. Called synchronously with the live uws request: read it before the first `await` |
+| `getGlobalPermissions(yhub, authInfo)` | the global permission object (there is one global resource, so no list) |
+| `getOrgPermissions(yhub, orgs, authInfo)` | `{ resource, permissions }` per `{ org }` |
+| `getBranchPermissions(yhub, branches, authInfo)` | `{ resource, permissions }` per `{ org, branch }` |
+| `getDocumentPermissions(yhub, docRefs, authInfo)` | `{ resource, permissions }` per `{ org, docid, branch }` |
+| `filterAuthorizedOrgs` / `filterAuthorizedBranches` / `filterAuthorizedDocuments` `(yhub, resources, required, authInfo)` | the resources that hold `required` — see [Batch checks](#batch-checks-filterauthorizeddocuments) |
+
+A function you don't define falls through to the `AuthPlugin` default:
+
+| Function | Default |
+|---|---|
+| `authenticate` | `null`: every caller is anonymous |
+| `get[Scope]Permissions` | throws `Method unimplemented`: a route of that scope answers a logged `500` |
+| `filterAuthorized[Scope]` | asks `get[Scope]Permissions` about the whole list at once and keeps the resources whose permissions hold the requirement |
+
+So a deployment defines the getter of every scope it serves — the built-in
+[`GET /updated`](#updated-documents) listings ask `getOrgPermissions` and `getGlobalPermissions`.
+A server requires `auth` (`createYHub` throws without it); a hub without a server may omit it and
+then gets the bare `AuthPlugin`. We believe a concrete function per scope avoids mistakes: each is
+typed for exactly one scope — its resource shape and its permission type
+(`ToPermissionType<Scope>` from `@y/hub/permissions`) — so a document grant can't answer an org
+question, and a scope is answered only where it is defined. A name yhub doesn't know (a typo such
+as `getDocumentPermission`) throws in `createAuthPlugin`.
+
+**Lists.** The org, branch and document getters take a list of resources and answer `{ resource,
+permissions }` for every one of them, in the order given — entry `i` names `resourceIds[i]` (pass
+the given object back) — or `null` to deny them all. `createAuthPlugin` checks the length and the
+resource of every entry, and validates every permission object against its scope's schema: an
+answer that skips, reorders or names another resource, or an invalid or wrong-scope object, is a
+loud `500` (logged), never a silent denial. yhub asks about one resource per rest request,
+websocket upgrade and re-check today, and never asks about an empty list; the list lets a plugin
+answer batched questions from one backend query.
+
+**Calling the plugin.** `yhub.auth` has the definition's functions as methods, without the `yhub`
+argument. Built by `createAuthPlugin`, each call is bounded by the timeout and resolves to
+**normalized** permissions — what `req.permissions` holds, ready for `hasPermissions`:
+
+```js
+// inside a handler: may the caller also read the template the document was created from?
+const [{ permissions }] = await req.yhub.auth.getDocumentPermissions([templateRef], req.authInfo)
+checkPermissions(permissions, createDocumentPermissions({ ydoc: '-r--' }))
+```
+
+**Timeout.** `createAuthPlugin(def, { timeout })` bounds every call of the plugin, in
+milliseconds (default `10000`). A call that doesn't settle in time is abandoned: rest requests
+answer `503 { error: 'auth timeout', code: 'auth-timeout' }`, the websocket upgrade `503`, and a
+[re-check](#yhubrecheckauthdocref-opts) closes the live socket with `1013`. All three are
+transient, so clients retry. The timeout applies per call — a request that makes several can take
+several ([`GET /updated`](#updated-documents) calls `authenticate`, `getOrgPermissions` and
+`filterAuthorizedDocuments` once each), and a filter call covers its whole list. It is a
+non-negative integer (`createAuthPlugin` throws otherwise) and must stay below 2³¹ ms (about 24.8
+days): Node runs a longer delay after 1 ms, so every call would time out.
+
+#### Extending `AuthPlugin`
+
+Prefer `createAuthPlugin`. Its methods add safety guards you usually want: every call bounded by
+the timeout, every answer checked (its length and resources, the permission objects, the
+`userid`) and its permissions normalized. Instead of a definition, you can write the class
+yourself — extend `AuthPlugin`, override the methods your deployment answers (the others keep
+[their defaults](#permissions)), and pass the class as `auth` — but then none of those guards
+apply:
+
+```js
+import { AuthPlugin, createYHub } from '@y/hub'
+import { createDocumentPermissions, normalizeDocumentPermissions } from '@y/hub/permissions'
+
+const readOnly = normalizeDocumentPermissions(createDocumentPermissions({ ydoc: '-r--', endpoint: { '*': '-r--' } }))
+
+class Auth extends AuthPlugin {
+  async getDocumentPermissions (docRefs, authInfo) {
+    return docRefs.map(resource => ({ resource, permissions: readOnly }))
+  }
+}
+
+const yhub = await createYHub({ auth: Auth, /* ... */ })
+```
+
+The methods are the definition's functions without the `yhub` argument; `this.yhub` is the yhub
+instance. yhub calls a method you override as you wrote it, so an override:
+
+* is async, and has no timeout unless it brings its own;
+* answers `{ resource, permissions }` for every resource it is given, in order — no `null` for
+  the whole list — with **normalized** permissions (`normalizeDocumentPermissions(...)` and
+  friends from `@y/hub/permissions`) or `null`;
+* answers `{ userid, ... }` or `null` from `authenticate`, reading the live uws request before its
+  first `await`;
+* denies with a value, and throws a branded `apiError(status, ...)` to answer with that status
+  (`401` for a rejected credential, `503` for an outage). Any other throw is a `500`, and any
+  throw during a [re-check](#yhubrecheckauthdocref-opts) closes the socket with `1013`.
 
 #### Permission objects
 
@@ -904,7 +985,7 @@ A **document** permission object carries the full facet vocabulary; the coarser 
 
 The global `orgs` facet is `'*'` (every org) or a list of orgs; absent, `false` and `[]` grant
 none. So far only [updated orgs](#updated-orgs) reads it — it implies nothing about org or
-document permissions, which their own `authorize` calls answer. As a requirement
+document permissions, which their own getters answer. As a requirement
 (`createGlobalPermissions({ orgs: ['acme'] })`) it is a subset check: `'*'` contains every list.
 
 Access values are **positional CRUD masks** — a 4-char string with a fixed position per verb
@@ -971,91 +1052,76 @@ grants *inside* your plugin), the containment check `hasPermissions(permissions,
 normalizers (`normalizeDocumentPermissions`, ...), and `endpointPermission(normalized, name)` — the
 one lookup that isn't a single char compare.
 
-#### Batch checks: `filterAuthorized`
+#### Batch checks: `filterAuthorizedDocuments`
 
 Some requests need a permission decision for many resources at once: [`GET /updated`](#updated-documents)
-lists only the documents the caller may read, and a page holds 10000 of them by default. `authorize`
-answers one resource per call; `filterAuthorized` takes the whole list and **one requirement** and
-answers which of the resources hold it — the subset, never their permission objects.
+lists only the documents the caller may read, and a page holds 10000 of them by default. The
+permissions getters answer the permission object of every resource; the filters —
+`filterAuthorizedOrgs`, `filterAuthorizedBranches`, `filterAuthorizedDocuments` — take the list
+and **one requirement** and answer which of the resources hold it: the subset, never their
+permission objects. A backend that can decide a requirement without materializing permission
+objects (a relation check, a SQL predicate) answers it directly.
 
-It is a map with one handler per scope, like the one `createAuthorize` takes. A handler receives
-the scope's resourceIds (`'document'` → `Array<{ org, docid, branch }>`, …), the requirement as an
-input-form permission object of that scope (`{ type: 'permissions:document:v1', ydoc: '-r--' }`),
-and the caller (`null` when anonymous), and returns the resources that hold the requirement.
-Scopes without a handler hold nothing — `filterAuthorized: {}` is valid for a plugin whose
-deployment never asks a batch question, but `GET /updated` then lists no documents.
+A filter receives the yhub instance, the resources (`filterAuthorizedDocuments` →
+`Array<{ org, docid, branch }>`, …), the requirement as an input-form permission object of that
+scope (`{ type: 'permissions:document:v1', ydoc: '-r--' }`), and the caller (`null` when
+anonymous), and returns the resources that hold the requirement — or `null` for none. A filter
+you don't define defaults to its getter: `AuthPlugin` asks `getDocumentPermissions` about the
+whole list at once and keeps the resources whose permissions contain the requirement.
 
-* **Agreement with `authorize`**: a resource must be listed exactly when its own `authorize`
-  answer, normalized, contains the requirement — `hasPermissions(normalizeDocumentPermissions(answer), required)`.
-  The two hooks answer the same question at different granularity, and the determinism contract
-  below applies to both.
-* **The answer is compared by value**, in any order: `resourceIds.filter(...)` and fresh
+* **Agreement with the getter**: a document must be listed exactly when its permissions from
+  `getDocumentPermissions`, normalized, contain the requirement —
+  `hasPermissions(normalizeDocumentPermissions(permissions), required)`. The two functions answer
+  the same question at different granularity, and the determinism contract below applies to both.
+* **The answer is compared by value**, in any order: `docRefs.filter(...)` and fresh
   `{ org, docid, branch }` objects built from database rows are the same answer. An entry yhub
   did not ask about is ignored.
-* **Denial is leaving a resource out.** A throw is an infrastructure failure, as for `authorize`:
+* **Denial is leaving a resource out.** A throw is an infrastructure failure, as for the getters:
   the request answers `503` (a branded `apiError` passes its status through) instead of dropping
-  resources. The whole batch is one call, bounded by one `server.authTimeout`. yhub never calls a
-  handler with an empty list.
-* **Where yhub asks it**: `GET /updated/v1/{org}` — `'document'`, requiring ydoc `r`, once per
-  page with every candidate document of the page. If your backend caps the size of a request,
-  chunk inside the handler.
+  resources. The whole list is one call, bounded by one timeout. yhub never asks about an empty
+  list.
+* **Where yhub asks it**: `GET /updated/v1/{org}` — `filterAuthorizedDocuments`, requiring ydoc
+  `r`, once per page with every candidate document of the page. If your backend caps the size of
+  a request, chunk inside the function.
 
-The definition above is also an implementation: ask `authorize` for every resource and keep the
-ones whose answer contains the requirement. It is correct, but it costs one `authorize` — one
-backend lookup — per resource, which is slow for thousands of them:
-
-```js
-const authorize = createAuthorize({
-  document: async (docRef, user) => await lookupDocPermissions(user, docRef)
-})
-
-createAuthPlugin({
-  authenticate,
-  authorize,
-  filterAuthorized: {
-    // correct, but N lookups for N documents
-    document: async (docRefs, required, user) => {
-      const answers = await Promise.all(docRefs.map(docRef => authorize('document', docRef, user)))
-      return docRefs.filter((_docRef, i) => answers[i] != null && hasPermissions(normalizeDocumentPermissions(answers[i]), required))
-    }
-  }
-})
-```
-
-Implement it as one query instead: fetch the grants of every resource at once (`WHERE (org, docid,
-branch) IN (...)`) and run `hasPermissions` locally, as in the example at the top of this
-section, or translate the requirement into the query itself — a SpiceDB/OpenFGA-backed plugin
-issues one `CheckBulkPermissions`/`BatchCheck` over the documents for the facets `required`
-names (ydoc `r` → `ydoc_read`).
+The default costs what the getter costs: one call with the whole list. A getter that answers
+the list from one query (`WHERE (org, docid, branch) IN (...)`), as in the example at the top of
+this section, makes it fast; one that looks up each resource on its own
+(`Promise.all(docRefs.map(lookup))`) is correct, but slow for thousands of documents. Define a
+filter only for a cheaper check: a backend that decides the requirement without materializing
+permission objects — a SpiceDB/OpenFGA-backed plugin issues one
+`CheckBulkPermissions`/`BatchCheck` over the documents for the facets `required` names (ydoc `r`
+→ `ydoc_read`).
 
 #### Contracts
 
-* **Determinism**: `authorize` must answer deterministically per `(type, resourceId, user)`
+* **Determinism**: the permissions must be deterministic per `(scope, resource, authInfo)`
   between a websocket upgrade and its re-checks — a wall-clock-relative grant
   (`from: Date.now() - 30d`) makes every [`recheckAuth`](#yhubrecheckauthdocref-opts) compare
   unequal and flap connections. Compute such bounds when the grant is *stored*.
-* **Revocation**: a plugin deriving permissions purely from the frozen `user` object (token
+* **Revocation**: a plugin deriving permissions purely from the frozen `authInfo` object (token
   claims) re-derives the same answer on every re-check — revoke via
   `recheckAuth({ forceDisconnect: true })` plus short token lifetimes, or consult a revocation
-  list inside `authorize`.
+  list inside `getDocumentPermissions`.
 * **Failure**: every answer is checked against its scope's permission schema — an invalid or
-  wrong-scope object is a loud error (rest `500`, logged), an unknown future `type` version is
-  denied with a warning, and an unbranded throw from any hook is an infrastructure failure —
+  wrong-scope object, or a list answer that skips, reorders or names another resource, is a loud
+  error (rest `500`, logged), an unknown future `type` version is denied with a warning, and an
+  unbranded throw from any function is an infrastructure failure —
   `503` on rest requests and the websocket upgrade, `1013` on a websocket re-check — never
   throw to deny. A branded `apiError` passes its status through: `apiError(401, ...)` from
-  `authenticate` rejects a credential, `apiError(503, ...)` from any hook signals an outage.
-* **Cost**: yhub treats `authorize` as cheap and calls it liberally — once per rest request and
-  websocket upgrade, and on every re-check. Answer from memory where you can: a server token with
-  root access should resolve to a constant, and a plugin that consults a remote authority should
-  cache per `(scope, resourceId, user)` for the lifetime of its grants. Questions about many
-  resources go to `filterAuthorized` instead, once per request (see
-  [Batch checks](#batch-checks-filterauthorized)).
+  `authenticate` rejects a credential, `apiError(503, ...)` from any function signals an outage.
+* **Cost**: yhub treats the permissions getters as cheap and calls them liberally — once per rest
+  request and websocket upgrade, and on every re-check, each with a one-resource list. Answer from
+  memory where you can: a server token with root access should resolve to a constant, and a
+  plugin that consults a remote authority should cache per `(scope, resource, authInfo)` for the
+  lifetime of its grants. Requirement questions about many resources go to the filters, once per
+  request (see [Batch checks](#batch-checks-filterauthorizeddocuments)).
 * **Anonymous callers**: `authenticate` answering `null` is not a rejection — it is an anonymous
-  caller, and `authorize` is asked with `user: null` like for anyone else (public documents are a
-  `document` handler that grants on `null`). yhub itself never answers `401` for missing
-  credentials; a custom handler that needs an identity checks `req.authInfo` and throws its own
-  `apiError(401, ...)`. The one built-in exception: **writing the document needs an identity**,
-  because attributions carry the userid — an anonymous caller *holding* ydoc `u` gets
+  caller, and the permissions are asked with `authInfo: null` like for anyone else (public
+  documents are a `getDocumentPermissions` that grants on `null`). yhub itself never answers `401`
+  for missing credentials; a custom handler that needs an identity checks `req.authInfo` and
+  throws its own `apiError(401, ...)`. The one built-in exception: **writing the document needs an
+  identity**, because attributions carry the userid — an anonymous caller *holding* ydoc `u` gets
   `401 { code: 'unauthenticated' }` from `PATCH /ydoc` (with an `update`), `POST /rollback`, and
   at the websocket upgrade, always *after* the permission check (without `u` it is the ordinary
   `403`). Named versions are attributed the same way: `POST`/`PUT`/`PATCH /version` answer `401`
@@ -1066,7 +1132,7 @@ names (ydoc `r` → `ydoc_read`).
 #### Migrating from `AccessType`
 
 The retired `'r' | 'rw' | null` vocabulary maps directly onto permission objects — write the
-mapping where `authorize` replaces `getAccessType`:
+mapping where `getDocumentPermissions` (and the other getters) replace `getAccessType`:
 
 | Old answer | Document scope | Branch/org/global scope |
 |---|---|---|
@@ -1324,6 +1390,7 @@ const yhub = await createYHub(config)
 | `postgres` | `string` | yes | PostgreSQL connection string |
 | `postgresOptions` | `object` | no | Options passed to the [postgres.js](https://github.com/porsager/postgres#connection-details) client, spread over yhub's `{ connect_timeout: 60 }`. Without a statement timeout, a query stuck on a wedged database holds a rest request or a websocket's initial sync forever — bound it with `connection: { statement_timeout: 30000 }` (milliseconds, a server-side parameter set on every connection; a statement that exceeds it fails with `57014`). It applies to every query, the worker's included, so keep it above the slowest legitimate one. `max` sizes the connection pool per process (default: `10`), `idle_timeout` closes connections idle for that many seconds (default: never). |
 | `persistence` | `PersistencePlugin[]` | yes | One or more storage plugins (e.g. `S3PersistenceV1`). At least one is required. |
+| `auth` | `new (yhub) => AuthPlugin` | with `server` | The auth plugin: a subclass of `AuthPlugin`, built by `createAuthPlugin(def, { timeout })` (or [written by hand](#extending-authplugin), without its guards). yhub instantiates it with itself at startup as `yhub.auth` — see [Permissions](#permissions). Required with `server`: `createYHub` throws without it. Without a server it defaults to the bare `AuthPlugin`: anonymous callers, no permissions getters |
 | `computePool` | `object` | no | The pool of worker threads that runs CPU-intensive Yjs work: merging, pruning, state vectors, changesets, activity and rollback. `yhub.computePool.stats()` returns `{ queued, busy, workers }`: tasks waiting for a thread, threads computing, live threads. |
 | `computePool.maxThreads` | `number` | no | Worker threads in the pool. Set this explicitly when the process is restricted to a subset of cores — `os.cpus().length` does not reflect `taskset` or cgroup limits. Default: number of cpus - 1 |
 | `computePool.maxQueue` | `number` | no | Tasks that may wait for a free thread. A queued task holds its documents in memory, so an unbounded queue grows with the load. A task beyond the limit is rejected with an error whose `code` is `'COMPUTE_QUEUE_FULL'`: rest requests answer `503` with `code: 'compute-queue-full'`, and a websocket's initial sync closes with `1013`. Both are transient, so clients retry. A compaction task rejected this way is retried by the worker later. Default: unlimited |
@@ -1331,12 +1398,10 @@ const yhub = await createYHub(config)
 | `computePool.resourceLimits` | `object` | no | Node's [`resourceLimits`](https://nodejs.org/api/worker_threads.html#new-workerfilename-options) of each thread: `maxOldGenerationSizeMb`, `maxYoungGenerationSizeMb`, `codeRangeSizeMb`, `stackSizeMb`. A thread that exceeds them dies, which rejects its task, and the pool replaces it. Without them, each thread may grow to the main thread's heap limit, so a few large merges at once can push the process past the memory of its container, and the OOM killer ends the whole process. `maxOldGenerationSizeMb` has no effect when the process runs with `--max-old-space-size` or `--max-heap-size`, including through `NODE_OPTIONS`: V8 applies these flags to every thread, the compute threads included, and yhub logs a warning at startup. Default: none (Node's defaults) |
 | `server` | `object \| null` | no | HTTP/WebSocket server config. Set to `null` to run without a server (worker/script mode). |
 | `server.port` | `number` | yes* | Port to listen on |
-| `server.auth` | `AuthPlugin` | yes* | Auth plugin created with `createAuthPlugin`: `authenticate(req)` establishes identity, `authorize(scope, resourceId, user)` answers a typed permission object per scope, and `filterAuthorized` (one handler per scope) answers which of many resources hold one requirement — see [Permissions](#permissions). |
 | `server.api` | `ApiSpec[]` | no | Custom rest endpoints served under `/{apiPrefix}/{name}/{version}/...`, next to the built-in ones. See [Custom API endpoints](#custom-api-endpoints). |
 | `server.apiPrefix` | `string` | no | First path segment under which all endpoints are served — built-in and custom rest endpoints plus the websocket route `/{apiPrefix}/ws/v1/...` — e.g. `'collaboration'` → `/collaboration/{name}/{version}/...`. A single path segment. Default: `'api'` |
 | `server.maxDocSize` | `number` | no | Maximum Ydoc size in bytes, used for WebSocket payload limits (`maxPayloadLength`, and `maxBackpressure` at 1.2x). Updates are never split across frames, so this must exceed the largest document — a client that sends a bigger frame is disconnected without a close frame (the client reports `1006`). One whose sync step 1 carries a state vector of 10% of it or more is closed with the permanent `1009`. Default: 500 MB |
 | `server.wsKeepAliveInterval` | `number \| null` | no | Milliseconds without a message to a client after which the server sends it an empty awareness message (zero entries — it carries no presence, so every connection gets it regardless of the awareness facet). Clients reconnect when they receive nothing for a while (`@y/websocket`: `socketTimeout`, 45 s), and websocket pings don't reach client code, so an idle document would reconnect-loop without it. `null` disables. Default: `20000` |
-| `server.authTimeout` | `number` | no | Milliseconds the auth plugin's `authenticate`, `authorize` and `filterAuthorized` may take. A hook that doesn't settle in time is abandoned: rest requests answer `503 { error: 'auth timeout', code: 'auth-timeout' }`, the websocket upgrade `503`, and a [re-check](#yhubrecheckauthdocref-opts) closes the live socket with `1013`. All three are transient, so clients retry. The timeout applies per call — a request that issues several can take several ([`GET /updated`](#updated-documents) calls `authenticate`, `authorize` and `filterAuthorized` once each), and a `filterAuthorized` call covers its whole batch. Must be finite: Node runs a delay above 2³¹−1 ms (about 24.8 days) after 1 ms, so `Infinity` would time out every call. Default: `10000` |
 | `server.maxVersionSize` | `number` | no | Maximum size of the client's part of a [named version](#versions) — the characters of its `name` plus the bytes of its lib0-any encoded `custom` data; larger writes answer `413`. Versions ride along in activity responses. Default: 64 KB |
 | `server.cors` | `object \| null` | no | Cross-origin resource sharing — see [CORS](#cors). **While this is unset, cross-origin browser access is closed**: no `Access-Control-*` header is sent, and cross-origin WebSocket upgrades and api requests are denied. Same-origin pages and non-browser clients are unaffected. |
 | `server.cors.origin` | `string \| string[]` | yes* | `'*'` for every origin, one origin, or an allowlist. An allowlist echoes back the request's `Origin` when it matches and sends `Vary: Origin`; a request from a non-matching origin is denied. An entry may start its host with `*.` — `https://*.example.com` matches every host under `example.com` but never the apex, and ports must be spelled out. Only wildcard a domain you own outright: `https://*.co.uk`-style public-suffix wildcards are accepted but allowlist every site under the suffix. |
@@ -1355,8 +1420,7 @@ const yhub = await createYHub(config)
 **Example: full server setup**
 
 ```js
-import { createYHub, createAuthPlugin, createAuthorize, createDocumentPermissions } from '@y/hub'
-import { hasPermissions, normalizeDocumentPermissions } from '@y/hub/permissions'
+import { createYHub, createAuthPlugin, createDocumentPermissions } from '@y/hub'
 import { S3PersistenceV1 } from '@y/hub/plugins/s3'
 
 const grant = createDocumentPermissions({ ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } })
@@ -1376,16 +1440,13 @@ const yhub = await createYHub({
   persistence: [
     new S3PersistenceV1({ bucket: 'my-bucket', /* ... */ })
   ],
+  auth: createAuthPlugin({
+    authenticate: async (yhub, req) => ({ userid: req.getHeader('x-user-id') }),
+    // the batch check (filterAuthorizedDocuments) defaults to asking this getter
+    getDocumentPermissions: async (yhub, docRefs) => docRefs.map(docRef => ({ resource: docRef, permissions: grant }))
+  }),
   server: {
-    port: 8080,
-    auth: createAuthPlugin({
-      async authenticate (req) { return { userid: req.getHeader('x-user-id') } },
-      authorize: createAuthorize({ document: async () => grant }),
-      // every document has the same grant: either all of them hold the requirement or none does
-      filterAuthorized: {
-        document: async (docRefs, required) => hasPermissions(normalizeDocumentPermissions(grant), required) ? docRefs : []
-      }
-    })
+    port: 8080
   },
   worker: { taskConcurrency: 10 }
 })
@@ -1609,12 +1670,12 @@ await yhub.pruneDoc(docRef, { from: 0, to: Number.MAX_SAFE_INTEGER })
 Force a permission re-check for the WebSocket connections of a document — use it when permissions
 changed and connected clients should be affected immediately, not just on their next connect. The
 directive is distributed via the Redis stream, so it reaches connections on **all** servers. Each
-matching connection re-evaluates `auth.authorize('document', docRef, user)` and is disconnected
-with close code `4401` (`'permission revoked'`) when the permissions the socket consumes changed:
-the `ydoc` mask, the `awareness` mask, the effective `ws` endpoint mask, or — on `gc=false`
-connections — whether full history is still granted. Downgrades and upgrades alike bounce (the
-client reconnects, re-authenticates, and resyncs at its new access level; a still-revoked client
-is rejected with `403 Forbidden` at upgrade), while REST-only facets (`delete`,
+matching connection re-evaluates `yhub.auth.getDocumentPermissions([docRef], authInfo)` and is
+disconnected with close code `4401` (`'permission revoked'`) when the permissions the socket
+consumes changed: the `ydoc` mask, the `awareness` mask, the effective `ws` endpoint mask, or — on
+`gc=false` connections — whether full history is still granted. Downgrades and upgrades alike
+bounce (the client reconnects, re-authenticates, and resyncs at its new access level; a
+still-revoked client is rejected with `403 Forbidden` at upgrade), while REST-only facets (`delete`,
 `history.rollback`/`prune`/`version`/`publish`, the other `endpoint` entries) never bounce a live connection. A failing auth plugin fails closed: the connection is disconnected, but with the
 transient close code `1013` (`'auth recheck failed'`) — clients keep reconnecting and recover once
 the auth backend does.
@@ -1651,12 +1712,12 @@ once.
 without that handler a kicked, still-revoked client retries every ≤2.5s, hitting your auth backend
 with a `403` each time.
 
-**Auth plugin contract.** The re-check reuses the `user` object captured at connect
-(`authenticate` cannot be re-run — the original HTTP request is gone). `authorize` must consult a
-live authority (database, permission service) for the re-check to be meaningful; if permissions
-are derived from claims embedded in the user object itself (e.g. permission objects listed in a
-JWT payload), a re-check recomputes the same stale answer — rely on `forceDisconnect` plus short
-token TTLs, or a revocation list inside `authorize`, instead.
+**Auth plugin contract.** The re-check reuses the `authInfo` captured at connect
+(`authenticate` cannot be re-run — the original HTTP request is gone). `getDocumentPermissions`
+must consult a live authority (database, permission service) for the re-check to be meaningful;
+if permissions are derived from claims embedded in the authInfo itself (e.g. permission objects
+listed in a JWT payload), a re-check recomputes the same stale answer — rely on `forceDisconnect`
+plus short token TTLs, or a revocation list inside `getDocumentPermissions`, instead.
 
 There is deliberately no built-in REST route: expose it as a [custom API endpoint](#custom-api-endpoints)
 gated by a named `endpoint` grant if you need HTTP access:

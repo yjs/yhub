@@ -5,15 +5,14 @@ import { WebsocketProvider } from '@y/websocket'
 import * as t from 'lib0/testing' // eslint-disable-line
 import * as promise from 'lib0/promise'
 import * as s from 'lib0/schema'
-import { createYHub, apiError, createApiEndpoint, encodedAny } from '@y/hub'
+import { createYHub, createAuthPlugin, apiError, createApiEndpoint, encodedAny } from '@y/hub'
 import * as buffer from 'lib0/buffer'
 import * as number from 'lib0/number'
 import { S3PersistenceV1 } from '@y/hub/plugins/s3'
 import postgres from 'postgres'
 import * as object from 'lib0/object'
-import * as types from '../src/types.js'
 import { encodeRoomName } from '../src/stream.js'
-import { hasPermissions, normalizeDocumentPermissions } from '../src/permissions.js'
+import { createBranchPermissions, createOrgPermissions, createGlobalPermissions } from '../src/permissions.js'
 import * as protocol from '../src/protocol.js'
 
 // Clean up test data. Nothing here creates the schema - the databases are expected to be
@@ -45,7 +44,7 @@ export const apiTestState = { slowAborted: null }
 /**
  * Custom api endpoints served by the shared test hub (see customApi.tests.js).
  *
- * @type {Array<types.ApiEndpoint>}
+ * @type {Array<import('../src/types.js').ApiEndpoint>}
  */
 const testApiSpecs = [
   {
@@ -163,7 +162,10 @@ const documentGrant = {
   delete: ['soft', 'hard'],
   endpoint: { '*': 'crud' }
 }
-const normalizedDocumentGrant = normalizeDocumentPermissions(documentGrant)
+// ..and on every branch, org and the global scope
+const branchGrant = createBranchPermissions({ endpoint: { '*': 'crud' } })
+const orgGrant = createOrgPermissions({ endpoint: { '*': 'crud' } })
+const globalGrant = createGlobalPermissions({ endpoint: { '*': 'crud' } })
 
 export const yhub = await createYHub({
   redis: {
@@ -173,6 +175,17 @@ export const yhub = await createYHub({
     minMessageLifetime: 3000
   },
   postgres: env.ensureConf('postgres-testing'),
+  auth: createAuthPlugin({
+    // pick a "unique" userid
+    authenticate: async () => ({ userid: 'user1' }),
+    // the suite's shared hub grants everything at every scope - restrictive behavior is
+    // exercised on dedicated hubs (auth.tests.js, permissionsEnforcement.tests.js)
+    getGlobalPermissions: async () => globalGrant,
+    getOrgPermissions: async (_yhub, orgs) => orgs.map(resource => ({ resource, permissions: orgGrant })),
+    getBranchPermissions: async (_yhub, branches) => branches.map(resource => ({ resource, permissions: branchGrant })),
+    // the filters default to asking these getters
+    getDocumentPermissions: async (_yhub, docRefs) => docRefs.map(resource => ({ resource, permissions: documentGrant }))
+  }),
   persistence: [
     new S3PersistenceV1({
       bucket: env.ensureConf('S3_YHUB_TEST_BUCKET'),
@@ -189,24 +202,6 @@ export const yhub = await createYHub({
     port: yhubPort,
     // relies on the allowHeaders/maxAge defaults, so the suite exercises them
     cors: { origin: '*' },
-    auth: types.createAuthPlugin({
-      // pick a "unique" userid
-      async authenticate (req) {
-        return { userid: 'user1' }
-      },
-      // the suite's shared hub grants everything at every scope - restrictive behavior is
-      // exercised on dedicated hubs (auth.tests.js, permissionsEnforcement.tests.js)
-      authorize: types.createAuthorize({
-        document: async () => documentGrant,
-        branch: async () => ({ type: 'permissions:branch:v1', endpoint: { '*': 'crud' } }),
-        org: async () => ({ type: 'permissions:org:v1', endpoint: { '*': 'crud' } }),
-        global: async () => ({ type: 'permissions:global:v1', endpoint: { '*': 'crud' } })
-      }),
-      // agrees with `authorize`: every document has the same grant
-      filterAuthorized: {
-        document: async (docRefs, required) => hasPermissions(normalizedDocumentGrant, required) ? docRefs : []
-      }
-    }),
     api: testApiSpecs
   },
   worker: {

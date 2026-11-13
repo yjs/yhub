@@ -3,8 +3,8 @@
 Status: accepted; schemas and merges are implemented (`src/permissions.js`, importable as
 `@y/hub/permissions`), enforcement is wired through the server. Replaces `AccessType`
 (`'r'|'rw'|null`), `readAuthInfo` / `getAccessType` / `getOrgAccessType` / `getGlobalAccessType`
-(the plugin is now `{ authenticate, authorize, filterAuthorized }`), and the advisory
-`accessPurpose` mechanism.
+(the plugin is now `createAuthPlugin({ authenticate, get[Scope]Permissions,
+filterAuthorized[Scope] })`), and the advisory `accessPurpose` mechanism.
 Breaking; no compatibility layer — the migration mapping is documented in §12.
 
 Companions: [permissions-prior-art.md](./permissions-prior-art.md) — the research this proposal
@@ -22,8 +22,8 @@ V1 implements a sound, self-contained framework for **what a subject can do on a
 extensible without breaking changes. In: the four typed permission objects (doc permissions
 with the full facet vocabulary; branch/org/global as *endpoint-only* objects), positional CRUD
 masks, the normalized view + implication normalization, the merge algebra (union + intersect),
-the `authorize` plugin hook with its batch form `filterAuthorized` (§7), and the enforcement
-invariants (§9).
+the per-scope `get[Scope]Permissions` plugin functions with their batch form
+`filterAuthorized[Scope]` (§7), and the enforcement invariants (§9).
 
 Deliberately **deferred** (each reserved as a purely additive extension): scope floors and any
 permission inheritance between scopes — an org- or branch-level answer never implies anything
@@ -38,8 +38,8 @@ ydoc `r` or a history ray (a separate grant, never a widened `history.version` `
 A **permission object** describes everything a subject may do with one resource. Permissions are
 tied to the resource's facets (ydoc, awareness, history, …), never to transport routes — REST and
 websocket gates both *consume* the same permission object. The auth plugin answers each
-`authorize(scope, resourceId, user)` question with one; yhub normalizes it into a canonical form,
-caches it per connection, and enforces every gate from it.
+`get[Scope]Permissions(yhub, resourceIds, authInfo)` question with one per resource; yhub
+normalizes it into a canonical form, caches it per connection, and enforces every gate from it.
 
 yhub has **five permission levels**:
 
@@ -195,7 +195,7 @@ endpoint name), and json-derived maps may carry an own `__proto__` key. The merg
 In v1 the coarser scopes are **endpoint-only**: they gate custom endpoints registered at their
 scope, nothing more. There is no floor and no inheritance — holding a branch- or org-level
 permission implies nothing about any document, and vice versa; every scope is answered by its own
-`authorize(scope, resourceId, user)` call. Cross-scope relations are a deferred extension:
+`get[Scope]Permissions` function. Cross-scope relations are a deferred extension:
 adding a floor key (e.g. `branch.docs`) later is purely additive and changes no v1 shape.
 
 ```js
@@ -262,69 +262,94 @@ answering `null` denies the subject outright.
  * @typedef {'global'|'org'|'branch'|'document'} PermissionScope
  */
 /**
- * The resource an `authorize` call addresses - the shape follows the scope:
+ * The resource a permissions getter is asked about - the shape follows the scope:
  * 'document' → { org, docid, branch }, 'branch' → { org, branch }, 'org' → { org },
- * 'global' → {}.
+ * 'global' → {} (a single resource, so the global getter takes no list).
  *
  * @template {PermissionScope} S
  * @typedef {...} PermissionResourceId
  */
 /**
+ * What `createAuthPlugin(def, { timeout })` takes. Every member is optional and async, and
+ * receives the yhub instance first; a missing one falls through to the `AuthPlugin` default
+ * (anonymous; a getter throws `Method unimplemented` ⇒ 500; a filter asks its getter), an unknown
+ * one (a typo) throws. Never called with an empty list.
+ *
  * @template {UserAuthInfo} AuthInfo
- * @typedef {object} AuthPlugin
- * @property {(req) => Promise<AuthInfo|null>} authenticate
- *   was readAuthInfo. null ⇒ an anonymous caller (not a rejection: `authorize` is asked with
- *   user null). A branded apiError(401) rejects a presented credential; any other throw is an
- *   infrastructure failure ⇒ 503.
- * @property {<S extends PermissionScope>(scope: S, resourceId: PermissionResourceId<S>, user: AuthInfo|null) => Promise<ToPermissionType<S>|null>} authorize
- *   Input form of the scope named by `scope` - the answer's own `type` literal must match it.
- *   null ⇒ deny. Deny is a value, never a throw. A throw is an infrastructure failure: REST
- *   and the ws upgrade answer 503 (a branded apiError passes its status through), a ws recheck
- *   disconnects 1013 (transient), never 4401. A plugin composed of layers (inferred baseline +
- *   refinement queries) MUST throw when any layer fails - never return a partial composition.
- * @property {{ [S in PermissionScope]?: (resourceIds: Array<PermissionResourceId<S>>, required: ToPermissionType<S>, user: AuthInfo|null) => Promise<Array<PermissionResourceId<S>>> }} filterAuthorized
- *   The batch check, one handler per scope: the resources of `resourceIds` that hold
- *   `required`, compared by value, in any order. Must agree with `authorize` - a resource is listed iff
- *   hasPermissions(normalize(authorize(scope, resource, user)), required). Scopes without a
- *   handler hold nothing. Required: there is no framework fallback.
+ * @typedef {object} AuthPluginDef
+ * @property {(yhub, req) => Promise<AuthInfo|null>} [authenticate]
+ *   was readAuthInfo. null ⇒ an anonymous caller (not a rejection: the permissions are asked
+ *   with authInfo null). A branded apiError(401) rejects a presented credential; any other throw
+ *   is an infrastructure failure ⇒ 503.
+ * @property {(yhub, authInfo) => Promise<GlobalPermissionsV1|null>} [getGlobalPermissions]
+ * @property {(yhub, resourceIds: Array<PermissionResourceId<S>>, authInfo) => Promise<Array<{ resource, permissions: ToPermissionType<S>|null }>|null>} [getOrgPermissions]
+ *   likewise getBranchPermissions, getDocumentPermissions: `{ resource, permissions }` for each
+ *   resource, in the order given, none skipped - entry i names resourceIds[i] (yhub checks it),
+ *   and its permissions are the input form of the scope, whose own `type` literal must match it.
+ *   null ⇒ deny (a resource's permissions, or the whole list). Deny is a value, never a throw. A
+ *   throw is an infrastructure failure: REST and the ws upgrade answer 503 (a branded apiError
+ *   passes its status through), a ws recheck disconnects 1013 (transient), never 4401. A plugin
+ *   composed of layers (inferred baseline + refinement queries) MUST throw when any layer fails -
+ *   never return a partial composition.
+ * @property {(yhub, resourceIds: Array<PermissionResourceId<S>>, required: ToPermissionType<S>, authInfo) => Promise<Array<PermissionResourceId<S>>|null>} [filterAuthorizedDocuments]
+ *   likewise filterAuthorizedOrgs, filterAuthorizedBranches - the batch check: the resources of
+ *   `resourceIds` that hold `required`, compared by value, in any order (null: none). Must agree
+ *   with the getter - a resource is listed iff
+ *   hasPermissions(normalize(getDocumentPermissions([resource])[0].permissions), required) -
+ *   which is the `AuthPlugin` default, asking the getter about the whole list at once.
  */
 // deferred (§10): the enumeration hook `listDocuments`
 ```
 
-**Batch checks.** `filterAuthorized` answers a question about many resources at once — "which of
-these documents may the caller read?" — with the subset that holds one requirement, never the
+The plugin is a subclass of the exported class **`AuthPlugin`**, configured as `conf.auth` and
+instantiated at startup with the yhub instance as **`yhub.auth`**: the same functions without the
+`yhub` argument (`this.yhub` instead). yhub's gates call it directly, and so do custom endpoints
+and plugins. `AuthPlugin` carries the defaults — `authenticate` answers anonymous, every getter
+throws `Method unimplemented` (a deployment answers the scopes it serves; a route of another
+scope is a 500), every filter asks its getter. `createAuthPlugin` builds the subclass from a
+definition, defining a method only for each member given (the rest fall through to the
+defaults), each bounded by the timeout, checking every answer and resolving to **normalized**
+permissions. It is the recommended way, and the only one yhub's own code uses. Extending
+`AuthPlugin` by hand (`class Auth extends AuthPlugin { async getDocumentPermissions (docRefs,
+authInfo) { … } }`) is the documented alternative, and it skips those guards: the override is
+called as written, so it answers normalized permissions itself.
+
+**Batch checks.** The filters answer a question about many resources at once — "which of these
+documents may the caller read?" — with the subset that holds one requirement, never the
 per-resource permission objects (the bulk refinement of §10, narrowed to one requirement: a
 backend can then answer it with one query, translating the requirement into it). The answer is
 compared by value, so a plugin may build it from its query's rows; an entry yhub did not ask
-about is ignored. The definition doubles as the naive
-implementation — one `authorize` per resource plus `hasPermissions` — correct, but one lookup
-per resource. It is a required member with no framework fallback, so yhub carries no
-per-resource loop; a scope without a handler holds nothing, as in `createAuthorize`. The
-consumer so far is `GET /updated/v1/{org}`, which asks once per page for ydoc `r` of every
-candidate.
+about is ignored. The definition doubles as the default (`AuthPlugin`'s) — the plugin's own
+getter over the whole list plus `hasPermissions` — which costs what that getter costs: one call,
+so a getter answering its list from one query makes it fast. A plugin defines a filter only for a
+cheaper check than the permission objects. The consumer so far is `GET /updated/v1/{org}`,
+which asks `filterAuthorizedDocuments` once per page for ydoc `r` of every candidate.
 
-The return type is *forced* per scope (`ToPermissionType<S>`). TypeScript cannot correlate a
-runtime check of `type` with the return type inside a single function body, so the blessed
-implementation shape is **`createAuthorize`** — one handler per scope, each fully checked
-(per-scope resourceId parameter, per-scope return type), scopes without a handler denying:
+One function per question and scope: each is fully typed by its scope (resource parameter,
+*forced* answer type `ToPermissionType<S>`) — a single `(scope, resourceId, user)` function
+couldn't be, since TypeScript cannot correlate a runtime check of `scope` with the return type
+inside one body. We believe a concrete function per scope avoids mistakes: a document grant can't
+answer an org question, and a scope is answered only where it is defined. A getter takes a list
+of resources and answers `{ resource, permissions }` per resource, in order, none skipped — each
+permission object visibly tied to its resource — so a plugin answers a batched question from one
+backend query; yhub asks for one resource per REST request / ws upgrade / recheck today:
 
 ```js
-authorize: createAuthorize({
-  document: async (docRef, user) => await lookupDocPermissions(user, docRef)
-})
+getDocumentPermissions: async (yhub, docRefs, authInfo) => {
+  const grants = await lookupDocPermissions(authInfo, docRefs) // aligned with docRefs
+  return docRefs.map((docRef, i) => ({ resource: docRef, permissions: grants[i] }))
+}
 ```
 
-A hand-rolled `authorize (type, resourceId, user)` stays possible but needs one cast at the
-return — the deliberate cost of the forced signature.
-
-yhub core computes, per REST request / ws upgrade / recheck, through one funnel
-(`resolvePermissions` → `normalizeAuthorizeAnswer` in `src/api.js`): an answer whose `type` is a
-well-formed but unknown literal (a future version) is denied whole with a warning
-(`isKnownPermissionsType`); every other non-null answer is validated against its scope's
-permission schema — an invalid or wrong-scope object throws a loud, descriptive error (REST 500,
-logged), never a silent denial — and `null` **stays `null`**: nothing fabricates a permission
-object. `req.permissions` and a connection's view are therefore nullable, and
-`hasPermissions(null, ..)` is false, so every gate answers the same `missing-permission` 403.
+Every answer passes the class `createAuthPlugin` builds (`src/auth.js`): a list answer whose
+length differs from the list's, or whose entry names another resource than the one at its
+position, throws (REST 500); a permissions object whose `type` is a well-formed but unknown
+literal (a future version) is denied whole with a warning (`isKnownPermissionsType`); every
+other non-null answer is validated against its scope's permission schema — an invalid or
+wrong-scope object throws a loud, descriptive error (REST 500, logged), never a silent denial —
+and `null` **stays `null`**: nothing fabricates a permission object. `req.permissions` and a
+connection's view are therefore nullable, and `hasPermissions(null, ..)` is false, so every gate
+answers the same `missing-permission` 403.
 
 **Anonymous callers.** `authenticate` → `null` is an identity ("nobody"), not a rejection; yhub
 never answers 401 for a missing credential — a plugin rejects a *presented* credential with a
@@ -338,13 +363,13 @@ the invariant since a newly granted `u` differs from the stored mask). Reads, pr
 prune, and delete (`by: null`) work anonymously when granted. Named versions are attributed too:
 writing one (`POST`/`PUT`/`PATCH /version`) answers 401 to an anonymous caller, deleting one doesn't.
 
-Determinism contract: `authorize` must be deterministic per `(type, resourceId, user)` between
+Determinism contract: the getters must be deterministic per `(scope, resource, authInfo)` between
 upgrade and recheck — a plugin computing wall-clock-relative bounds (`from: now - 30d`) at call
 time makes every recheck compare unequal and flap connections. Compute such bounds when the
 assignment is *stored*, not when it is read. Note the flip side: permissions derived purely from
-the frozen `user` object (e.g. token claims) re-derive identically forever, so plain rechecks
+the frozen `authInfo` object (e.g. token claims) re-derive identically forever, so plain rechecks
 cannot revoke them — revoke via `recheckAuth({ forceDisconnect: true })` plus short token
-lifetimes, or consult a revocation list inside `authorize`.
+lifetimes, or consult a revocation list inside `getDocumentPermissions`.
 
 The module (`src/permissions.js`, importable as `@y/hub/permissions`) exports: the creators
 `createPermissions(scope, facets)` / `createDocumentPermissions` / `createBranchPermissions` /
@@ -394,7 +419,7 @@ An entry is a plain CRUD mask:
 
 Endpoint scopes follow the tiers: `scope: 'document'` (the default; routes carry `?branch=` and
 address a document on a branch, gated by the doc permissions' `endpoint` facet — one spelling
-with `authorize('document', ..)`, see naming.md); `'org'` and `'global'` exist as today; a
+with `getDocumentPermissions`, see naming.md); `'org'` and `'global'` exist as today; a
 `'branch'` scope (docless routes spanning the branch's documents) is deferred until its route
 shape is decided — branch is a query parameter, so a branch route would collide with the org
 route.
@@ -506,11 +531,11 @@ branch*, which is exactly a branch-floor question):
    doc facets`). A v2 connection (`/ws/v2/{org}?branch=`) fetches it once at upgrade; documents
    whose required facets the floor grants attach with zero further calls. (Floors are the
    additive extension deliberately absent from v1, §4.)
-2. **Bulk refinement** — shipped as `filterAuthorized` (§7). Documents not covered by the floor
-   go through one `filterAuthorized.document(docRefs, required, user)` call for the whole
-   subscribe list, `required` being the facets a synced document needs (backed by one SQL query
-   in the tag store, or one `CheckBulkPermissions` in a SpiceDB-backed plugin). It answers the
-   subset, not per-document permissions: should the attach need the documents' views (the
+2. **Bulk refinement** — shipped as `filterAuthorizedDocuments` (§7). Documents not covered by
+   the floor go through one `filterAuthorizedDocuments(docRefs, required, authInfo)` call for the
+   whole subscribe list, `required` being the facets a synced document needs (backed by one SQL
+   query in the tag store, or one `CheckBulkPermissions` in a SpiceDB-backed plugin). It answers
+   the subset, not per-document permissions: should the attach need the documents' views (the
    recheck compares them), that is one more hook.
 3. **Enumeration.** `listDocuments(authInfo, org, cursor)` answers "which documents at all" —
    paginated, because 100k-doc orgs are real. The tag store implements it with a single indexed
@@ -561,13 +586,13 @@ Model:
   never match a row and the zero-match rule would deny every global-scoped endpoint outright. A
   doc check merges, per layer, the org row's `branches.docs` floor below the branch row's `docs`
   floor below doc rows.
-- **Check** (`authorize(scope, resourceId, user)`): fetch the resource's own and its ancestors'
-  assignments whose `tag ∈ authInfo.tags` — one indexed query, redis-cached per `(org, docid)`
-  with `cacheTtl` + explicit invalidation — then merge: union within each layer (tombstone wins
-  ties), refine `grant → restrict → override`, coarser scope below finer scope within a layer.
-  O(few) cached lookups per check, no external calls. **Zero matching assignments ⇒ `null`**
-  (deny outright, defaults never applied — the §6 null-guard); `{}` is what an assignment with an
-  empty perms object produces, and *that* receives defaults.
+- **Check** (`get[Scope]Permissions(yhub, resourceIds, authInfo)`): fetch the resource's own and
+  its ancestors' assignments whose `tag ∈ authInfo.tags` — one indexed query, redis-cached per
+  `(org, docid)` with `cacheTtl` + explicit invalidation — then merge: union within each layer
+  (tombstone wins ties), refine `grant → restrict → override`, coarser scope below finer scope
+  within a layer. O(few) cached lookups per check, no external calls. **Zero matching
+  assignments ⇒ `null`** (deny outright, defaults never applied — the §6 null-guard); `{}` is what
+  an assignment with an empty perms object produces, and *that* receives defaults.
 - **Enumeration** (`listDocuments`): `SELECT DISTINCT docid FROM ... WHERE org = $1 AND
   tag = ANY($2) AND docid IS NOT NULL` (keyset-paginated over the `(org, tag, docid)`
   index), short-circuited by an org-level row granting `ydoc ⊇ 'r'` in its floor — then
@@ -603,7 +628,7 @@ plugin interface is the same.
 ## 12. Migration
 
 - The old `AccessType` world maps directly onto masks. The mapping is documentation — no compat
-  helper ships; migrating plugins write the objects literally where `authorize` replaces
+  helper ships; migrating plugins write the objects literally where the getters replace
   `getAccessType`. Doc scope: `'rw'` → `{ type: 'permissions:document:v1', ydoc: 'cru-',
   awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } }`, `'r'` → the same with
   `ydoc: '-r--'` **and `endpoint: { '*': '-r--' }`**, `null` → `null`. Branch/org/global scopes
@@ -616,8 +641,8 @@ plugin interface is the same.
   `documentPermissionsUnion`).
 - Deleted: `$accessType`, `hasReadAccess`/`hasWriteAccess`, `getAccessType`,
   `getOrgAccessType`, `getGlobalAccessType`, `accessPurpose`, `req.accessType`. Renamed:
-  `readAuthInfo` → `authenticate` (unchanged semantics) — the plugin reads
-  `{ authenticate, authorize, filterAuthorized }` (the batch check was added later, §7).
+  `readAuthInfo` → `authenticate` (unchanged semantics) — the plugin reads `authenticate`,
+  `get[Scope]Permissions` and `filterAuthorized[Scope]` (the batch checks were added later, §7).
 - Renamed throughout code and docs per naming.md: the `Room` triple → `DocRef` addressing
   (`docid` and `branch` stay), `reqToRoom` → `reqToDocRef`, `req.room` → `req.docRef`, log
   fields. **Deferred**: the stream-key spelling `{prefix}:room:` → `{prefix}:doc:` (and with it
@@ -631,17 +656,17 @@ plugin interface is the same.
 ## 13. Zanzibar interop
 
 The plugin route is unchanged by the tag store: a SpiceDB/OpenFGA-backed plugin implements
-`authorize` as one `CheckBulkPermissions`/`BatchCheck` over the facet-permission vocabulary
-on `doc` objects (`ydoc_read`, `ydoc_write`, `awareness_read`, `awareness_write`,
+`getDocumentPermissions` as one `CheckBulkPermissions`/`BatchCheck` over the facet-permission
+vocabulary on `doc` objects (`ydoc_read`, `ydoc_write`, `awareness_read`, `awareness_write`,
 `history_read` (+ caveat for the window), `rollback_doc`, `prune_doc`, `delete_soft`,
 `delete_hard`, `endpoint_call` with `{name}` condition context) and, once the deferred extensions
 land, creation/branch-wide permissions on `branch` objects with `doc#branch@branch` /
 `branch#org@org` parent relations carrying the floors; it assembles the permission object and
 keeps ZedToken/`at_least_as_fresh` handling internal; `Watch`/`ReadChanges` drives `recheckAuth`.
-`filterAuthorized` is the same bulk RPC over the docs for the facets `required` names; `listDocuments` is
-`LookupResources`/`Streamed ListObjects` per facet — with the documented caveat that reverse
-lookup is the expensive direction there, which is exactly why the tag store exists for deployments
-without a Zanzibar.
+`filterAuthorizedDocuments` is the same bulk RPC over the docs for the facets `required` names;
+`listDocuments` is `LookupResources`/`Streamed ListObjects` per facet — with the documented caveat
+that reverse lookup is the expensive direction there, which is exactly why the tag store exists
+for deployments without a Zanzibar.
 
 ## 14. Open questions
 

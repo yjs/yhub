@@ -9,11 +9,20 @@ import * as math from 'lib0/math'
 import * as protocol from './protocol.js'
 import * as server from './server.js'
 import { createComputePool } from './compute.js'
+import { AuthPlugin } from './auth.js'
 import { agentTask } from './agents.js'
 import { logger, describeUrl } from './logger.js'
 import * as time from 'lib0/time'
 
-export { createAuthPlugin, createAuthorize, createApiEndpoint, DocDeletedError } from './types.js'
+export { createApiEndpoint, DocDeletedError } from './types.js'
+export { AuthPlugin, createAuthPlugin } from './auth.js'
+
+/**
+ * The definition `createAuthPlugin` takes.
+ *
+ * @template {t.UserAuthInfo} AuthInfo
+ * @typedef {t.AuthPluginDef<AuthInfo>} AuthPluginDef
+ */
 export { apiError, checkPermissions, encodedAny } from './api.js'
 export { createPermissions, createDocumentPermissions, createBranchPermissions, createOrgPermissions, createGlobalPermissions } from './permissions.js'
 export { wsCloseAuthRevoked, wsCloseDocDeleted, wsCloseDraining } from './server.js'
@@ -79,6 +88,14 @@ export class YHub {
     this.conf = conf
     this.stream = str
     this.persistence = pers
+    /**
+     * The auth plugin - call it to check permissions, e.g.
+     * `yhub.auth.getDocumentPermissions([docRef], authInfo)` (see `AuthPlugin`). A hub without a
+     * server may omit `conf.auth`; it then gets the `AuthPlugin` defaults.
+     *
+     * @type {AuthPlugin<any>}
+     */
+    this.auth = new (conf.auth ?? AuthPlugin)(this)
     /**
      * @type {Conf['server'] extends null ? null : server.YHubServer}
      */
@@ -426,7 +443,7 @@ export class YHub {
   /**
    * Force a permission re-check for the websocket connections of `docRef`, distributed via the
    * redis stream to all servers. Each matching connection re-evaluates
-   * `auth.authorize('document', docRef, user)` and is disconnected (close code 4401
+   * `yhub.auth.getDocumentPermissions([docRef], authInfo)` and is disconnected (close code 4401
    * 'permission revoked') when the permissions the socket consumes changed - the `ydoc` mask,
    * the `awareness` mask, the effective `ws` endpoint mask, or (on `gc=false` connections)
    * whether full history is still granted; REST-only facets (`delete`,
@@ -438,7 +455,8 @@ export class YHub {
    * keep users out: reconnects are re-authenticated at upgrade, so revoke access in the auth
    * plugin's authority first - a plugin deriving permissions purely from the authInfo (token
    * claims) re-derives the same answer on every re-check, so revocation there needs
-   * `forceDisconnect` plus short token lifetimes, or a revocation list inside `authorize`.
+   * `forceDisconnect` plus short token lifetimes, or a revocation list inside
+   * `getDocumentPermissions`.
    *
    * `users` is an array of matchers; `null` matches every connection in the document. A string
    * matcher matches connections with that `userid`. A plain-object matcher matches a
@@ -592,6 +610,9 @@ export class YHub {
  */
 export const createYHub = async conf => {
   t.$config.expect(conf)
+  // with the bare AuthPlugin, a server would treat every caller as anonymous and answer every
+  // route with a 500 - it's a missing setting
+  if (conf.server != null && conf.auth == null) throw new Error('conf.server requires conf.auth - build it with createAuthPlugin')
   // parsed here, before the redis client sees the url: node's ERR_INVALID_URL carries the
   // offending string - password included - in `err.input`, which pino copies onto the log record
   const postgres = describeUrl(conf.postgres)
@@ -602,7 +623,6 @@ export const createYHub = async conf => {
     conf.server.maxVersionSize ??= 64 * 1024
     // `null` disables the keep-alive, so `??=` won't do
     if (conf.server.wsKeepAliveInterval === undefined) conf.server.wsKeepAliveInterval = 20000
-    conf.server.authTimeout ??= 10000
   }
   const stream = await strm.createStream(conf)
   const pers = await p.createPersistence(conf.postgres, conf.persistence, conf.postgresOptions)

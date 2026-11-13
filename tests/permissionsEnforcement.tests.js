@@ -3,9 +3,8 @@ import * as t from 'lib0/testing'
 import * as buffer from 'lib0/buffer'
 import * as encoding from 'lib0/encoding'
 import * as promise from 'lib0/promise'
-import * as types from '../src/types.js'
 import * as utils from './utils.js'
-import { checkPermissions, createDocumentPermissions, wsCloseAuthRevoked } from '../src/index.js'
+import { checkPermissions, createAuthPlugin, createDocumentPermissions, wsCloseAuthRevoked } from '../src/index.js'
 
 /**
  * End-to-end enforcement of the permission facets (proposals/permissions.md §9): per-facet ws
@@ -20,7 +19,8 @@ const enfHost = `localhost:${enfPort}`
 /**
  * Mutable fail-closed permission table: userid -> per-scope answer, anonymous callers under
  * `'anonymous'`. An unlisted user/scope is denied (`null` answer); `'throw'` makes the plugin fail
- * for that user. Each test resets the table up front (see auth.tests.js for the rationale) and
+ * for that user, `'short'` makes it answer one entry too few, `'misaligned'` an entry naming
+ * another resource. Each test resets the table up front (see auth.tests.js for the rationale) and
  * seeds exactly the grants it needs.
  *
  * @type {{ [userid: string]: { [scope: string]: any } }}
@@ -28,25 +28,47 @@ const enfHost = `localhost:${enfPort}`
 const permTable = {}
 const resetPermTable = () => { for (const userid in permTable) delete permTable[userid] }
 
+/**
+ * The table entry of `authInfo` for `scope`.
+ *
+ * @param {{ userid: string } | null} authInfo
+ * @param {string} scope
+ * @return {any}
+ */
+const tableEntry = (authInfo, scope) => {
+  const entry = permTable[authInfo?.userid ?? 'anonymous']?.[scope]
+  if (entry === 'throw') throw new Error('permission backend down')
+  return entry === undefined ? null : entry
+}
+
+/**
+ * A `get[Scope]Permissions` function answered from the table - the any-typed table satisfies
+ * every scope's answer type.
+ *
+ * @param {'org'|'document'} scope
+ * @return {(yhub: any, resourceIds: Array<any>, authInfo: { userid: string } | null) => Promise<Array<{ resource: any, permissions: any }>>}
+ */
+const tableGetter = scope => async (_yhub, resourceIds, authInfo) => {
+  const entry = tableEntry(authInfo, scope)
+  if (entry === 'short') return resourceIds.slice(1).map(resource => ({ resource, permissions: null }))
+  if (entry === 'misaligned') return resourceIds.map(resource => ({ resource: { ...resource, docid: `${resource.docid}-other` }, permissions: null }))
+  return resourceIds.map(resource => ({ resource, permissions: entry }))
+}
+
 await utils.createTestHub({
   worker: null,
+  auth: createAuthPlugin({
+    authenticate: async (_yhub, req) => {
+      // no `?user` / `x-user`: an anonymous caller
+      const userid = req.getQuery('user') || req.getHeader('x-user') || null
+      return userid === null ? null : { userid }
+    },
+    getGlobalPermissions: async (_yhub, authInfo) => tableEntry(authInfo, 'global'),
+    getOrgPermissions: tableGetter('org'),
+    getDocumentPermissions: tableGetter('document')
+  }),
   server: {
     port: enfPort,
-    auth: types.createAuthPlugin({
-      async authenticate (req) {
-        // no `?user` / `x-user`: an anonymous caller
-        const userid = req.getQuery('user') || req.getHeader('x-user') || null
-        return userid === null ? null : { userid }
-      },
-      // deliberately hand-rolled (not createAuthorize): exercises the raw dispatch form - the
-      // any-typed table satisfies the forced signature without a cast
-      async authorize (scope, _resourceId, user) {
-        const entry = permTable[user?.userid ?? 'anonymous']?.[scope]
-        if (entry === 'throw') throw new Error('permission backend down')
-        return entry === undefined ? null : entry
-      },
-      filterAuthorized: {}
-    }),
     api: [
       { name: 'gated', get: { handler: async () => ({ ok: 1 }) }, post: { handler: async () => ({ ok: 1 }) } },
       // demonstrates handler-side facet validation - the framework checks only the endpoint facet
@@ -722,6 +744,12 @@ export const testEndpointFacetAndHandlerChecks = async tc => {
     // schema validation of the answer: 'rw' is not a crud mask
     permTable.broken = { document: docPerms(/** @type {any} */ ({ ydoc: 'rw' })) }
     t.assert((await enfFetch(`/ydoc/v1/${org}/${tc.testName}-doc`, 'broken')).status === 500)
+    // an answer that doesn't align with the resources asked about
+    permTable.short = { document: 'short' }
+    t.assert((await enfFetch(`/ydoc/v1/${org}/${tc.testName}-doc`, 'short')).status === 500)
+    // an entry naming another resource than the one at its position
+    permTable.misaligned = { document: 'misaligned' }
+    t.assert((await enfFetch(`/ydoc/v1/${org}/${tc.testName}-doc`, 'misaligned')).status === 500)
   })
   await t.groupAsync('the endpoint facet gates builtins and custom endpoints alike', async () => {
     permTable.ydocOnly = { document: docPerms({ ydoc: 'crud', history: { from: 0 } }) }

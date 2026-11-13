@@ -79,13 +79,14 @@ to run at least one worker, so that the data is eventually persisted. The worker
 components coordinate which document needs to be persisted using a separate
 worker-queue (see `y:worker` stream in redis).
 
-Authorization runs in-process: you pass an auth plugin (an object with
-`authenticate`, `authorize` and `filterAuthorized`, built with
-`createAuthPlugin`) to the server configuration. `authenticate` establishes who
-is asking — e.g. by verifying a JWT your app issued — `authorize` answers what
-that user may do with a specific document, and `filterAuthorized` which of many
-documents hold one requirement, in one call. See
-[GETTING-STARTED.md](./GETTING-STARTED.md) for examples.
+Authorization runs in-process: you pass an auth plugin (built by
+`createAuthPlugin` from your functions) as `auth` to the configuration, and
+yhub calls it as `yhub.auth`. `authenticate` establishes who is asking — e.g.
+by verifying a JWT your app issued — `getDocumentPermissions` (and its org,
+branch and global siblings) answers what that user may do with specific
+documents, and `filterAuthorizedDocuments` which of many documents hold one
+requirement, in one call (by default answered from `getDocumentPermissions`).
+See [GETTING-STARTED.md](./GETTING-STARTED.md) for examples.
 
 ## How Documents Are Stored
 
@@ -249,22 +250,29 @@ itself does not read them.
 ### 3. Implement the auth plugin
 
 Authorization runs in-process. Build an auth plugin with `createAuthPlugin` and
-pass it as `server.auth` to `createYHub()`. `authenticate` establishes who is
-asking — return anything identifying the user, or `null` for an anonymous
-caller (throw a branded `apiError(401, ...)` to reject a credential).
-`authorize` answers what that user — `null` when anonymous — may do in a given
-scope: return a permission object, or `null` to deny. Denial is a value, never a
-throw — a throw signals an infrastructure failure. Writing a document needs an
+pass it as `auth` to `createYHub()`; yhub instantiates it as `yhub.auth`. Every
+function receives the yhub instance first, and every one is optional — one you
+leave out keeps the `AuthPlugin` default: an anonymous caller, a permissions
+getter that throws (the routes of its scope answer 500), a batch check that asks
+its getter. `authenticate` establishes who is asking — return anything
+identifying the user, or `null` for an anonymous caller (throw a branded
+`apiError(401, ...)` to reject a credential). One function per scope answers
+what that user — `null` when anonymous — may do: `getDocumentPermissions`
+receives a list of documents and answers `{ resource, permissions }` for each
+— the permission object, or `null` to deny — in the same order, none skipped
+(likewise `getOrgPermissions` and `getBranchPermissions`;
+`getGlobalPermissions` answers one object). Denial is a value, never a throw —
+a throw signals an infrastructure failure. Writing a document needs an
 identity (attributions carry the userid); everything else works anonymously
-when granted. `filterAuthorized` is the batch form for requests about many
-documents (`GET /updated` lists only the documents the caller may read): given
-the documents and one requirement, return the ones that hold it — the same
-decision `authorize` makes, answered from one query (see
-[Batch checks](./API.md#batch-checks-filterauthorized)).
+when granted. `filterAuthorizedDocuments` is the batch check for requests
+about many documents (`GET /updated` lists only the documents the caller may
+read): given the documents and one requirement, it returns the ones that hold
+it. By default it asks `getDocumentPermissions` about all of them at once;
+define it only for a cheaper check (see
+[Batch checks](./API.md#batch-checks-filterauthorizeddocuments)).
 
 ```javascript
-import { createAuthPlugin, createAuthorize } from '@y/hub'
-import { hasPermissions, normalizeDocumentPermissions } from '@y/hub/permissions'
+import { createYHub, createAuthPlugin } from '@y/hub'
 import * as jwt from 'lib0/crypto/jwt'
 import * as ecdsa from 'lib0/crypto/ecdsa'
 
@@ -288,31 +296,33 @@ const docPermissions = {
   }
 }
 
-const auth = createAuthPlugin({
-  async authenticate (req) {
-    // Verify the JWT your app issued (step 4).
+// The permissions of `authInfo` on each of docRefs - { org, docid, branch } triples - in one query.
+const documentPermissions = async (docRefs, authInfo) => {
+  // Check your database / business logic here.
+  const access = await checkUserAccessMany(authInfo.userid, docRefs) // 'rw' | 'r' | null per docRef, positionally aligned
+  return docRefs.map((docRef, i) => ({ resource: docRef, permissions: access[i] === null ? null : docPermissions[access[i]] }))
+}
+
+const Auth = createAuthPlugin({
+  authenticate: async (yhub, req) => {
+    // Verify the JWT your app issued (step 4). Read the request before the first await.
     const token = req.getQuery('yauth')
     const { payload } = await jwt.verifyJwt(authPublicKey, token)
     return { userid: payload.yuserid }
   },
-  // One handler per scope - scopes without a handler deny, and the handler's return type is
-  // forced to match its scope. docRef is the { org, docid, branch } triple.
-  authorize: createAuthorize({
-    document: async (docRef, user) => {
-      // Check your database / business logic here.
-      const access = await checkUserAccess(user.userid, docRef) // 'rw' | 'r' | null
-      return access === null ? null : docPermissions[access]
-    }
-  }),
-  // The batch check: which of docRefs hold `required`, in any order (compared by value).
-  filterAuthorized: {
-    document: async (docRefs, required, user) => {
-      const access = await checkUserAccessMany(user.userid, docRefs) // one query: 'rw' | 'r' | null per docRef, positionally aligned
-      return docRefs.filter((_docRef, i) => access[i] !== null && hasPermissions(normalizeDocumentPermissions(docPermissions[access[i]]), required))
-    }
-  }
+  // { resource, permissions } for every document it is given, in order - the permission type is
+  // forced to match the scope. No grants beyond documents here: the other getters are left out.
+  // The batch check (filterAuthorizedDocuments) defaults to asking this getter.
+  getDocumentPermissions: async (yhub, docRefs, authInfo) => await documentPermissions(docRefs, authInfo)
 })
+
+const yhub = await createYHub({ auth: Auth, /* redis, postgres, persistence, server, ... */ })
 ```
+
+`createAuthPlugin` builds a subclass of `AuthPlugin` whose methods bound every
+call by the timeout, check every answer and normalize the permissions — safety
+guards you usually want. You can also extend `AuthPlugin` by hand, without them
+(see [Extending AuthPlugin](./API.md#extending-authplugin)).
 
 Destructive rights (`delete`, `history.rollback`, `history.prune`) are granted
 by name and deliberately absent from a plain read/write mapping. The schemas and

@@ -10,7 +10,7 @@ import * as time from 'lib0/time'
 import * as promise from 'lib0/promise'
 import * as buffer from 'lib0/buffer'
 import WebSocket from 'ws'
-import { apiError, wsCloseAuthRevoked } from '../src/index.js'
+import { apiError, createAuthPlugin, wsCloseAuthRevoked } from '../src/index.js'
 import { matchesAuthInfo } from '../src/server.js'
 
 const authPrivateKey = await ecdsa.importKeyJwk({ key_ops: ['sign'], ext: true, kty: 'EC', x: '96pShK8Z3iJ8UZpN4tuyv9CuPuzwWgC_I72N6ZUNWOSBDflVxwYPtL3PcCgCF2aE', y: 'Q39u2jtATgoBd9D8Tx744v6KljwE3iOZr30Rf8yuVT3UgGEi0bcKufUGVSeKls8s', crv: 'P-384', d: 'BS_hqq6UMpuqS10oIWzEyTUt7RRQrysUMUdlwUyVimV_CTTNEpxXFW9_D0NA9rHt' })
@@ -27,37 +27,30 @@ const authHubPort = utils.testHubPort(1)
  */
 await utils.createTestHub({
   worker: null,
+  auth: createAuthPlugin({
+    authenticate: async (_yhub, req) => {
+      const authJwt = req.getQuery('auth')
+      // no token: an anonymous caller (getDocumentPermissions below answers it null)
+      if (authJwt == null || authJwt.length === 0) return null
+      let auth
+      try {
+        auth = await jwt.verifyJwt(authPublicKey, authJwt)
+      } catch (_err) {
+        // a presented credential that fails verification is rejected with a branded 401 - an
+        // unbranded throw would be read as an auth-backend outage (503)
+        throw apiError(401, 'invalid token')
+      }
+      const payload = s.$object({ docRefs: s.$array(s.$object({ docRef: types.$docRef, permissions: p.$documentPermissionsV1 })), userid: s.$string }).expect(auth.payload)
+      // token payloads are external json - sanitize each permission object once, at this
+      // boundary, so prototype-member endpoint names stay inert own keys downstream
+      return { userid: payload.userid, docRefs: payload.docRefs.map(r => ({ docRef: r.docRef, permissions: /** @type {import('../src/permissions.js').DocumentPermissionsV1} */ (p.sanitizePermissions(r.permissions)) })) }
+    },
+    // capability-token pattern: the answer is a lookup in the sanitized claims - deterministic
+    // per (scope, resource, authInfo), so the recheck contract holds trivially
+    getDocumentPermissions: async (_yhub, docRefs, authInfo) => docRefs.map(docRef => ({ resource: docRef, permissions: authInfo?.docRefs.find(r => f.equalityDeep(docRef, r.docRef))?.permissions ?? null }))
+  }),
   server: {
-    port: authHubPort,
-    auth: types.createAuthPlugin({
-      async authenticate (req) {
-        const authJwt = req.getQuery('auth')
-        // no token: an anonymous caller (the document handler below answers it null)
-        if (authJwt == null || authJwt.length === 0) return null
-        let auth
-        try {
-          auth = await jwt.verifyJwt(authPublicKey, authJwt)
-        } catch (_err) {
-          // a presented credential that fails verification is rejected with a branded 401 - an
-          // unbranded throw would be read as an auth-backend outage (503)
-          throw apiError(401, 'invalid token')
-        }
-        const payload = s.$object({ docRefs: s.$array(s.$object({ docRef: types.$docRef, permissions: p.$documentPermissionsV1 })), userid: s.$string }).expect(auth.payload)
-        // token payloads are external json - sanitize each permission object once, at this
-        // boundary, so prototype-member endpoint names stay inert own keys downstream
-        return { userid: payload.userid, docRefs: payload.docRefs.map(r => ({ docRef: r.docRef, permissions: /** @type {import('../src/permissions.js').DocumentPermissionsV1} */ (p.sanitizePermissions(r.permissions)) })) }
-      },
-      // capability-token pattern: the answer is a lookup in the sanitized claims - deterministic
-      // per (type, resourceId, user), so the recheck contract holds trivially
-      authorize: types.createAuthorize({
-        /**
-         * @param {types.DocRef} docRef
-         * @param {{ userid: string, docRefs: Array<{ docRef: types.DocRef, permissions: import('../src/permissions.js').DocumentPermissionsV1 }> } | null} user
-         */
-        document: async (docRef, user) => user?.docRefs.find(r => f.equalityDeep(docRef, r.docRef))?.permissions ?? null
-      }),
-      filterAuthorized: {}
-    })
+    port: authHubPort
   }
 })
 
@@ -94,54 +87,45 @@ const resetKickPerms = () => { for (const userid in kickPerms) delete kickPerms[
 let kickPermChecks = 0
 await utils.createTestHub({
   worker: null,
+  auth: createAuthPlugin({
+    // the extra `group` property makes connection authInfos proper supersets of the
+    // `{ userid }` matchers used in the recheckAuth tests
+    authenticate: async (_yhub, req) => ({ userid: req.getQuery('user') ?? 'user1', group: 'g0' }),
+    getDocumentPermissions: async (_yhub, docRefs, authInfo) => {
+      kickPermChecks++
+      const entry = kickPerms[/** @type {{ userid: string }} */ (authInfo).userid]
+      if (entry === 'throw') throw new Error('auth backend down')
+      if (entry === 'throw503') throw apiError(503, 'auth backend unavailable')
+      return docRefs.map(resource => ({ resource, permissions: entry === undefined ? docPermissionsPreset('rw') : entry }))
+    }
+  }),
   server: {
-    port: kickHubPort,
-    auth: types.createAuthPlugin({
-      async authenticate (req) {
-        // the extra `group` property makes connection authInfos proper supersets of the
-        // `{ userid }` matchers used in the recheckAuth tests
-        return { userid: req.getQuery('user') ?? 'user1', group: 'g0' }
-      },
-      authorize: types.createAuthorize({
-        document: async (_docRef, user) => {
-          kickPermChecks++
-          const entry = kickPerms[user.userid]
-          if (entry === 'throw') throw new Error('auth backend down')
-          if (entry === 'throw503') throw apiError(503, 'auth backend unavailable')
-          return entry === undefined ? docPermissionsPreset('rw') : entry
-        }
-      }),
-      filterAuthorized: {}
-    })
+    port: kickHubPort
   }
 })
 
 const hangHubPort = utils.testHubPort(11)
 const hangAuthTimeout = 300
 /**
- * The auth hook that never settles - null: both answer at once.
+ * The auth plugin function that never settles - null: both answer at once.
  *
- * @type {'authenticate'|'authorize'|null}
+ * @type {'authenticate'|'getDocumentPermissions'|null}
  */
 let hangHook = null
 await utils.createTestHub({
   worker: null,
+  auth: createAuthPlugin({
+    authenticate: async () => {
+      if (hangHook === 'authenticate') await promise.create(() => {})
+      return { userid: 'user1' }
+    },
+    getDocumentPermissions: async (_yhub, docRefs) => {
+      if (hangHook === 'getDocumentPermissions') await promise.create(() => {})
+      return docRefs.map(resource => ({ resource, permissions: docPermissionsPreset('rw') }))
+    }
+  }, { timeout: hangAuthTimeout }),
   server: {
-    port: hangHubPort,
-    authTimeout: hangAuthTimeout,
-    auth: types.createAuthPlugin({
-      async authenticate () {
-        if (hangHook === 'authenticate') await promise.create(() => {})
-        return { userid: 'user1' }
-      },
-      authorize: types.createAuthorize({
-        document: async () => {
-          if (hangHook === 'authorize') await promise.create(() => {})
-          return docPermissionsPreset('rw')
-        }
-      }),
-      filterAuthorized: {}
-    })
+    port: hangHubPort
   }
 })
 
@@ -397,8 +381,8 @@ export const testAuthPluginErrorClasses = async _tc => {
   t.compare(buffer.decodeAny(new Uint8Array(await res503.arrayBuffer())), { error: 'auth backend unavailable' })
   kickPerms.eve = 'throw'
   const resThrow = await fetch(url)
-  t.assert(resThrow.status === 503, 'an unbranded authorize error is a transient 503')
-  t.compare(buffer.decodeAny(new Uint8Array(await resThrow.arrayBuffer())), { error: 'authorize unavailable', code: 'auth-unavailable' })
+  t.assert(resThrow.status === 503, 'an unbranded getDocumentPermissions error is a transient 503')
+  t.compare(buffer.decodeAny(new Uint8Array(await resThrow.arrayBuffer())), { error: 'getDocumentPermissions unavailable', code: 'auth-unavailable' })
   // the jwt hub: a bad credential is rejected by the plugin's own branded 401, no credential is
   // an anonymous caller without a grant - 403
   const authUrl = `http://localhost:${authHubPort}/api/ydoc/v1/testOrg/anyDoc`
@@ -411,16 +395,16 @@ export const testAuthPluginErrorClasses = async _tc => {
 }
 
 /**
- * A hung auth plugin is abandoned after `server.authTimeout`: rest requests and the websocket
- * upgrade answer 503 `auth timeout`, a recheck closes a live socket with the transient 1013 - and
- * the client recovers once the plugin answers again.
+ * A hung auth plugin is abandoned after its timeout (`createAuthPlugin(def, { timeout })`): rest
+ * requests and the websocket upgrade answer 503 `auth timeout`, a recheck closes a live socket
+ * with the transient 1013 - and the client recovers once the plugin answers again.
  *
  * @param {t.TestCase} tc
  */
 export const testAuthTimeout = async tc => {
   hangHook = null
   const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
-  for (const hook of /** @type {const} */ (['authenticate', 'authorize'])) {
+  for (const hook of /** @type {const} */ (['authenticate', 'getDocumentPermissions'])) {
     hangHook = hook
     const start = time.getUnixTime()
     const res = await fetch(`http://localhost:${hangHubPort}/api/ydoc/v1/testOrg/anyDoc`)
@@ -434,13 +418,13 @@ export const testAuthTimeout = async tc => {
     ws.on('unexpected-response', (_req, res) => { ws.terminate(); resolve(`${res.statusCode}`) })
     ws.on('error', () => resolve('error'))
   })
-  t.assert(upgradeStatus === '503', 'a hung authorize answers the upgrade with 503')
+  t.assert(upgradeStatus === '503', 'a hung getDocumentPermissions answers the upgrade with 503')
   hangHook = null
   const client = await createWsClient({ waitForSync: true, wsUrl: utils.wsUrlFromPort(hangHubPort) })
   /** @type {Array<number>} */
   const closeCodes = []
   recordCloseCodes(client.provider, closeCodes)
-  hangHook = 'authorize'
+  hangHook = 'getDocumentPermissions'
   await yhub.recheckAuth(defaultDocRef)
   await promise.until(hangAuthTimeout + 5000, () => closeCodes.includes(1013))
   t.assert(!closeCodes.includes(wsCloseAuthRevoked), 'a hung auth plugin must not look like a revoke')

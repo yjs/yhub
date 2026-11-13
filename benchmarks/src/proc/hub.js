@@ -1,7 +1,6 @@
 import { createYHub, logger } from '../../../src/index.js'
 import { S3PersistenceV1 } from '../../../src/plugins/s3.js'
-import { createAuthPlugin, createAuthorize } from '../../../src/types.js'
-import { hasPermissions, normalizeDocumentPermissions } from '../../../src/permissions.js'
+import { createAuthPlugin } from '../../../src/auth.js'
 import { createChildMetrics, createS3Counters, countS3Ops } from '../metrics.js'
 
 /**
@@ -26,7 +25,6 @@ const settings = JSON.parse(process.argv[2])
  * @type {import('../../../src/permissions.js').DocumentPermissionsV1}
  */
 const documentGrant = { type: 'permissions:document:v1', ydoc: 'cru-', awareness: '-ru-', history: { from: 0 }, endpoint: { '*': 'crud' } }
-const normalizedDocumentGrant = normalizeDocumentPermissions(documentGrant)
 
 logger.level = process.env.BENCH_DEBUG ? 'debug' : 'silent'
 
@@ -49,17 +47,13 @@ const yhub = await createYHub({
   postgres: settings.dbs.postgres,
   persistence: [persistence],
   computePool: { maxThreads: settings.hub.computePoolSize ?? undefined },
+  auth: createAuthPlugin({
+    authenticate: async () => ({ userid: 'bench' }),
+    getDocumentPermissions: async (_yhub, docRefs) => docRefs.map(resource => ({ resource, permissions: documentGrant }))
+  }),
   server: settings.role === 'server'
     ? {
-        port: settings.port,
-        auth: createAuthPlugin({
-          async authenticate () { return { userid: 'bench' } },
-          authorize: createAuthorize({ document: async () => documentGrant }),
-          // agrees with `authorize`: every document has the same grant
-          filterAuthorized: {
-            document: async (docRefs, required) => hasPermissions(normalizedDocumentGrant, required) ? docRefs : []
-          }
-        })
+        port: settings.port
       }
     : null,
   worker: settings.role === 'worker'

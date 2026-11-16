@@ -5,7 +5,7 @@
   "sideEffects": false,
   "type": "module",
   "funding": {
-    "type": "GitHub Sponsors \u2764",
+    "type": "GitHub Sponsors ❤",
     "url": "https://github.com/sponsors/dmonad"
   },
   "scripts": {
@@ -76,7 +76,7 @@
     "@y-crdt/yn": "^0.1.4",
     "@y/protocols": "^1.0.6-rc.1",
     "@y/y": "^14.0.0-rc.29",
-    "lib0": "^1.0.0-rc.36",
+    "lib0": "^1.0.0-rc.37",
     "minio": "^8.0.7",
     "pino": "^10.3.1",
     "postgres": "^3.4.3",

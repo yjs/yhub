@@ -1,3 +1,4 @@
+import * as promise from 'lib0/promise'
 import config from './config.js'
 import { Reporter, freeDiskGiB } from './report.js'
 import { stopCluster, reclaimStorage, takeTaskFailures } from './cluster.js'
@@ -41,7 +42,7 @@ const benchSelected = benchId => filters.length === 0 || filters.some(f => f.len
  * @param {number} ms
  * @param {string} label
  */
-const withTimeout = (p, ms, label) => Promise.race([
+const withTimeout = (p, ms, label) => promise.race([
   p,
   new Promise((_resolve, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms).unref())
 ])

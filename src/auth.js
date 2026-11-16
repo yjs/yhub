@@ -177,7 +177,7 @@ const withAuthTimeout = async (method, timeout, p) => {
    */
   let timer
   try {
-    return await Promise.race([p, promise.create((_resolve, reject) => {
+    return await promise.race([p, promise.create((_resolve, reject) => {
       timer = setTimeout(() => {
         log.warn({ method, timeout }, 'auth plugin timed out')
         reject(apiError(503, 'auth timeout', { code: 'auth-timeout' }))

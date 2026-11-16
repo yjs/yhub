@@ -980,7 +980,7 @@ export class Stream {
   async destroy () {
     /** @type {any} */
     let timeout
-    await Promise.race([(async () => {
+    await promise.race([(async () => {
       // replies arrive in order, so once the ping's reply has arrived, every write sent before it
       // has been answered - and a timer later their org marks (a few promise hops behind each
       // reply) have run, in time for the flush below. Sent while redis is reconnecting too: the writes queued meanwhile get

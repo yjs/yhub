@@ -89,6 +89,31 @@ export const testSubLoopRestartsAfterConnectFailure = async tc => {
 }
 
 /**
+ * A redis that stays connected but stops answering must not hold `destroy`: the commands sent
+ * before the call get `closeTimeout` to be answered, then both connections are dropped.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testDestroyUnresponsiveRedis = async tc => {
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
+  const st = await stream.createStream(yhub.conf)
+  st.closeTimeout = 100
+  st.subscribe(defaultDocRef, { lastReceivedClock: '0', onStreamMessage: () => {}, destroy: () => {}, closeWithError: () => {} })
+  await promise.until(5000, () => st.redisSubscriptions != null)
+  // the flush has a write to make
+  stream.markOrgUpdated(st, defaultDocRef.org, 1)
+  const pauseMs = 1500
+  await yhub.stream.redis.sendCommand(['CLIENT', 'PAUSE', String(pauseMs), 'ALL'])
+  const start = Date.now()
+  await st.destroy()
+  t.assert(Date.now() - start < pauseMs / 2, 'not held by the paused redis')
+  t.assert(!st.redis.isOpen && !st.redisSubscriptions?.isOpen, 'both connections dropped')
+  await promise.until(5000, () => !st._subRunning)
+  // the pause ends before the next test reads redis
+  await promise.wait(pauseMs)
+}
+
+/**
  * Subscribers at the same clock are handed the same messages array, which is what lets `WSUser`
  * encode a batch once for all of them.
  *

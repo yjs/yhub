@@ -1527,9 +1527,11 @@ yhub.destroy(opts?: { drainMs?: number }): Promise<void>
    websocket with `4503` `'server shutting down'` (exported as `wsCloseDraining`) and waits up to
    `drainMs` for the clients to acknowledge. Whatever is left is then terminated without a close
    frame, and in-flight REST requests are dropped.
-3. Closes the compute pool, both redis clients and the postgres pool. Commands already sent are
-   answered first, so the departures of the closing connections still reach redis. A task still
-   running at this point fails, and another worker reclaims it after `redis.taskDebounce`.
+3. Closes the compute pool, both redis clients and the postgres pool. Commands already sent get
+   up to 10 seconds to be answered, so the departures of the closing connections still reach
+   redis. Then the redis connections are dropped, so a redis that stopped answering can't hold
+   the shutdown. A task still running at this point fails, and another worker reclaims it after
+   `redis.taskDebounce`.
 
 `4503` is transient: clients reconnect, and land on another instance behind the load balancer.
 Idempotent: later calls return the first call's promise, whatever their `drainMs`.

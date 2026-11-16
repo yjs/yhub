@@ -286,7 +286,7 @@ export const markOrgUpdated = (stream, org, ms) => {
  * Write the orgs collected by `markOrgUpdated` in one request. A failed write is merged back and
  * retried with the next flush (dropped after `destroy`, like any mark). While redis is unreachable
  * the write is not sent at all and fails the same way: node-redis would queue it until redis is
- * back, and hold `destroy` with it - its graceful close waits for every queued command.
+ * back, and each flush meanwhile would queue another.
  *
  * @internal - not part of the public api
  * @param {Stream} stream
@@ -329,6 +329,11 @@ export class Stream {
      * Ms between flushes of the orgs this process changed to `encodeOrgUpdatedKey`. (default: 1000)
      */
     this.orgUpdatedFlushInterval = config.redis.orgUpdatedFlushInterval ?? 1000
+    /**
+     * Ms `destroy` waits for redis to answer the commands already sent, before it drops the
+     * connections.
+     */
+    this.closeTimeout = 10000
     this.orgUpdatedKey = encodeOrgUpdatedKey(this.prefix)
     this.orgLastChangeKey = encodeOrgLastChangeKey(this.prefix)
     /**
@@ -703,6 +708,8 @@ export class Stream {
           }
           ms.length > 0 && log.debug({ messageCount: ms.length, subscriberCount: nsubCounter }, 'pulled messages and notified subscribers')
         } catch (e) {
+          // `destroy` rejected the read
+          if (this._destroyed) break
           log.error({ err: e }, 'error in subscription loop')
           await promise.wait(3000)
         }
@@ -964,29 +971,35 @@ export class Stream {
   }
 
   /**
-   * Close both redis clients. Commands in flight are answered first, so the messages the closing
-   * connections just added still reach redis. The subscription loop exits after its current read.
+   * Close both redis clients. The commands sent before the call get up to `closeTimeout` to be
+   * answered, so the messages the closing connections just added still reach redis. Then whatever
+   * is still unanswered is rejected and both connections are dropped: neither an unresponsive nor
+   * an unreachable redis can hold `destroy`. The subscription loop exits when its current read is
+   * rejected.
    */
   async destroy () {
-    // best effort: replies arrive in order, so once the ping's has, every write sent before it has
-    // answered - and a timer later their org marks (a few promise hops behind each reply) have run,
-    // in time for the flush below. A failed ping, a write that had to retry (NOSCRIPT) or one sent
-    // after this leaves its mark to the worker's repair. Not sent while redis is not ready:
-    // node-redis would queue it and hold `destroy` until redis is back. The ping is given at most
-    // 10s, so an unresponsive redis cannot hold `destroy` either
-    if (this.redis.isReady) {
-      /** @type {any} */
-      let timeout
-      await Promise.race([this.redis.ping().catch(() => {}), new Promise(resolve => { timeout = setTimeout(resolve, 10000) })])
-      clearTimeout(timeout)
+    /** @type {any} */
+    let timeout
+    await Promise.race([(async () => {
+      // replies arrive in order, so once the ping's reply has arrived, every write sent before it
+      // has been answered - and a timer later their org marks (a few promise hops behind each
+      // reply) have run, in time for the flush below. Sent while redis is reconnecting too: the writes queued meanwhile get
+      // their chance. A failed ping, a write that had to retry (NOSCRIPT) or one sent after this
+      // leaves its mark to the worker's repair.
+      await this.redis.ping().catch(() => {})
       await promise.wait(0)
-    }
+      this._destroyed = true
+      // the orgs changed since the last flush
+      if (this._orgUpdatesTimeout != null) clearTimeout(this._orgUpdatesTimeout)
+      this._orgUpdatesTimeout = null
+      await flushOrgUpdates(this)
+    })(), promise.create(resolve => { timeout = setTimeout(resolve, this.closeTimeout) })])
+    clearTimeout(timeout)
     this._destroyed = true
-    // the orgs changed since the last flush
-    if (this._orgUpdatesTimeout != null) clearTimeout(this._orgUpdatesTimeout)
-    this._orgUpdatesTimeout = null
-    await flushOrgUpdates(this)
-    await promise.all([this.redis.close(), this.redisSubscriptions?.close()])
+    // `close()` would wait for every queued reply, and can't be aborted once called. `destroy()`
+    // rejects the pending commands, which also ends the drain above if it ran out of time
+    this.redis.destroy()
+    this.redisSubscriptions?.destroy()
   }
 
   /**

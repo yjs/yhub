@@ -32,7 +32,7 @@ const request = (child, msg, expect) => promise.create((resolve, reject) => {
   const cleanup = () => { child.off('message', onMessage); child.off('exit', onExit) }
   child.on('message', onMessage)
   child.on('exit', onExit)
-  child.send(msg)
+  child.send(msg, (/** @type {Error|null} */ err) => { if (err) { cleanup(); reject(err) } })
 })
 
 export class Cluster {

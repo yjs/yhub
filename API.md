@@ -441,7 +441,7 @@ document (`yhub.restoreDoc`) is not listed until its next edit.
 attributed to the time of the stream id of the message that brought it, never to a server's own
 clock. An update appended after your stored `t` therefore never carries a timestamp below it, and
 `from = t` misses nothing (it may return a change of `t`'s own millisecond again). History recorded
-before this release carries the clock of the server that accepted the write; mind the skew there.
+before 0.11.0 carries the clock of the server that accepted the write; mind the skew there.
 
 The cursor is a change clock, so it assumes that the redis time does not step back (a failover to
 a replica whose clock is behind, an NTP step): a document first written after such a step can get

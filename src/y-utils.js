@@ -1,5 +1,4 @@
 import * as env from 'lib0/environment'
-import * as time from 'lib0/time'
 import * as Y from '@y/y'
 import { applyUpdates } from '@y-crdt/yn'
 import { logger } from './logger.js'
@@ -68,19 +67,38 @@ export const computeSyncSteps = (update, clientSv, withSv) => ({
 })
 
 /**
- * The contentmap of an update: every id it inserts or deletes, attributed to `userid` now plus the
- * caller's custom attributions. The map may cover a whole-document body - `getDoc` keeps only the
- * ids it has not accepted before.
+ * The contentmap of an update: every id it inserts or deletes, attributed to `userid` (none for
+ * `null`) plus the caller's custom attributions. It says who, never when - `getDoc` stamps the time
+ * when it reads the message from the stream (`stampContentMap`). The map may cover a
+ * whole-document body - `getDoc` keeps only the ids it has not accepted before.
  *
  * @param {Y.ContentIds} contentids
- * @param {string} userid
+ * @param {string|null} userid
  * @param {Array<{ k: string, v: string }>} customAttributions
  */
-export const createContentMap = (contentids, userid, customAttributions) => {
-  const now = time.getUnixTime()
-  return Y.encodeContentMap(Y.createContentMapFromContentIds(
-    contentids,
-    [Y.createContentAttribute('insert', userid), Y.createContentAttribute('insertAt', now), ...customAttributions.map(attr => Y.createContentAttribute('insert:' + attr.k, attr.v))],
-    [Y.createContentAttribute('delete', userid), Y.createContentAttribute('deleteAt', now), ...customAttributions.map(attr => Y.createContentAttribute('delete:' + attr.k, attr.v))]
-  ))
+export const createContentMap = (contentids, userid, customAttributions) => Y.encodeContentMap(Y.createContentMapFromContentIds(
+  contentids,
+  [...(userid == null ? [] : [Y.createContentAttribute('insert', userid)]), ...customAttributions.map(attr => Y.createContentAttribute('insert:' + attr.k, attr.v))],
+  [...(userid == null ? [] : [Y.createContentAttribute('delete', userid)]), ...customAttributions.map(attr => Y.createContentAttribute('delete:' + attr.k, attr.v))]
+))
+
+/**
+ * The attributions of a message read from the stream: its contentmap, every id stamped with `ms` -
+ * the time of the message's stream id. Attribution times are stream time, never a server's clock.
+ *
+ * @param {Y.ContentMap} contentmap
+ * @param {number} ms
+ * @return {Y.ContentMap}
+ */
+export const stampContentMap = (contentmap, ms) => {
+  /**
+   * @param {Y.IdMap<any>} idmap
+   * @param {Y.ContentAttribute<number>} at
+   */
+  const stamp = (idmap, at) => {
+    const res = Y.createIdMap()
+    idmap.forEach((r, client) => res.add(client, r.clock, r.len, r.attrs.filter(a => a.name !== at.name).concat(at)))
+    return res
+  }
+  return Y.createContentMap(stamp(contentmap.inserts, Y.createContentAttribute('insertAt', ms)), stamp(contentmap.deletes, Y.createContentAttribute('deleteAt', ms)))
 }

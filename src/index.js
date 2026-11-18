@@ -9,6 +9,7 @@ import * as math from 'lib0/math'
 import * as protocol from './protocol.js'
 import * as server from './server.js'
 import { createComputePool } from './compute.js'
+import { stampContentMap } from './y-utils.js'
 import { AuthPlugin } from './auth.js'
 import { agentTask } from './agents.js'
 import { logger, describeUrl } from './logger.js'
@@ -380,7 +381,9 @@ export class YHub {
         Y.insertIntoIdSet(mergedContentIds.deletes, mcontentids.deletes)
         gcDoc?.push(update)
         nongcDoc?.push(update)
-        contentmap?.push(mcontentmap)
+        // the message says who, the stream says when: an id is attributed to the time of the
+        // message that brought it first
+        contentmap?.push(stampContentMap(mcontentmap, strm.redisClockToMs(m.redisClock)))
         contentids.push(mcontentids)
       }
     })

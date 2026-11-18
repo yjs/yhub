@@ -1099,6 +1099,62 @@ export const testPatchWholeDocAttributesOnlyNewContent = async tc => {
 }
 
 /**
+ * Writers send who, the stream says when: an update message carries no `insertAt`/`deleteAt`, and
+ * `getDoc` attributes every id to the time of the stream id of the message that brought it - while
+ * the message is on the stream and after compaction. A time that an older release's writer still
+ * sends is replaced, and content without any attribution (an agent without `author`) is stamped too.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testAttributionsUseStreamTime = async tc => {
+  const { yhub, createWsClient, defaultDocRef } = await utils.createTestCase(tc)
+  // the messages stay on the stream until the first check is done
+  await yhub.stream.disableCompaction(defaultDocRef)
+  const { ydoc, provider } = await createWsClient({ waitForSync: true, wsParams: { customAttributions: 'source:ws' } })
+  ydoc.get().applyDelta(delta.create().insert('hello').done())
+  await promise.wait(200)
+  ydoc.get().applyDelta(delta.create().retain(1).delete(2).done())
+  await promise.wait(200)
+  provider.destroy()
+  const legacyDoc = new Y.Doc()
+  legacyDoc.get('legacy').insert(0, 'old')
+  legacyDoc.get('legacy').delete(0, 1)
+  const legacyUpdate = Y.encodeStateAsUpdate(legacyDoc)
+  const legacyClock = await yhub.stream.addMessage(defaultDocRef, {
+    type: 'ydoc:update:v1',
+    update: legacyUpdate,
+    contentmap: Y.encodeContentMap(Y.createContentMapFromContentIds(Y.createContentIdsFromUpdate(legacyUpdate), [Y.createContentAttribute('insert', 'old'), Y.createContentAttribute('insertAt', 1)], [Y.createContentAttribute('delete', 'old'), Y.createContentAttribute('deleteAt', 1)]))
+  })
+  await yhub.agentTask(defaultDocRef, {}, agentDoc => { agentDoc.get('agent').insert(0, 'bot') })
+  const updates = (await yhub.stream.getMessages([{ docRef: defaultDocRef, clock: '0' }]))[0].messages.flatMap(m => m.type === 'ydoc:update:v1' ? [m] : [])
+  t.assert(updates.length >= 4, 'the ws insert, the ws delete, the legacy message and the agent update are on the stream')
+  updates.forEach(m => {
+    if (m.redisClock === legacyClock) return
+    const sent = Y.decodeContentMap(m.contentmap)
+    sent.inserts.forEach(r => t.assert(r.attrs.every(a => a.name !== 'insertAt'), 'a writer sends no insert time'))
+    sent.deletes.forEach(r => t.assert(r.attrs.every(a => a.name !== 'deleteAt'), 'a writer sends no delete time'))
+  })
+  const check = async () => {
+    const contentmap = Y.decodeContentMap(/** @type {Uint8Array<ArrayBuffer>} */ ((await yhub.getDoc(defaultDocRef, { contentmap: true })).contentmap))
+    updates.forEach(m => {
+      const ms = stream.redisClockToMs(m.redisClock)
+      const attributed = Y.intersectContentMap(contentmap, Y.createContentIdsFromContentMap(Y.decodeContentMap(m.contentmap)))
+      t.assert(!attributed.inserts.isEmpty() || !attributed.deletes.isEmpty(), 'every update message is attributed')
+      attributed.inserts.forEach(r => t.compare(r.attrs.filter(a => a.name === 'insertAt').map(a => a.val), [ms], 'inserted at the time of the stream id'))
+      attributed.deletes.forEach(r => t.compare(r.attrs.filter(a => a.name === 'deleteAt').map(a => a.val), [ms], 'deleted at the time of the stream id'))
+    })
+    // who is kept
+    const ws = Y.intersectContentMap(contentmap, Y.createContentIdsFromContentMap(Y.decodeContentMap(updates[0].contentmap)))
+    ws.inserts.forEach(r => t.assert(r.attrs.some(a => a.name === 'insert' && a.val === 'user1') && r.attrs.some(a => a.name === 'insert:source' && a.val === 'ws')))
+  }
+  await check() // the messages are still on the stream
+  await yhub.stream.enableCompaction(defaultDocRef)
+  await utils.waitTasksProcessed(yhub) // compaction persists the stamped contentmap
+  await check()
+  legacyDoc.destroy()
+}
+
+/**
  * GET the (gc'd) document, edit, PATCH the whole state: the body carries a stub for every deleted
  * id. A rollback of a deletion made before the PATCH must still restore the text after the body
  * was compacted into the persisted nongc doc.

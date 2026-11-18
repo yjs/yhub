@@ -1,8 +1,8 @@
 import * as Y from '@y/y'
 import * as awarenessProtocol from '@y/protocols/awareness'
-import * as time from 'lib0/time'
 import * as promise from 'lib0/promise'
 import * as protocol from './protocol.js'
+import { createContentMap } from './y-utils.js'
 import { DocDeletedError } from './types.js'
 import { logger } from './logger.js'
 
@@ -82,20 +82,7 @@ export const agentTask = async (
    */
   const onUpdate = (update) => {
     if (update.byteLength <= 3) return
-    const now = time.getUnixTime()
-    const insertAttrs = [Y.createContentAttribute('insertAt', now),
-      ...mergedAttrs.map(a => Y.createContentAttribute('insert:' + a.k, a.v))]
-    const deleteAttrs = [Y.createContentAttribute('deleteAt', now),
-      ...mergedAttrs.map(a => Y.createContentAttribute('delete:' + a.k, a.v))]
-    if (author != null) {
-      insertAttrs.unshift(Y.createContentAttribute('insert', author))
-      deleteAttrs.unshift(Y.createContentAttribute('delete', author))
-    }
-    const contentmap = Y.encodeContentMap(Y.createContentMapFromContentIds(
-      Y.createContentIdsFromUpdate(update),
-      insertAttrs,
-      deleteAttrs
-    ))
+    const contentmap = createContentMap(Y.createContentIdsFromUpdate(update), author ?? null, mergedAttrs)
     yhub.stream.addMessage(docRef, { type: 'ydoc:update:v1', update, contentmap })
       .catch(err => captureErr(err, 'failed to forward agent ydoc update'))
   }

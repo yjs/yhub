@@ -437,11 +437,11 @@ fetch answers `404 { code: 'doc-deleted' }` — that is how a poller learns of a
 document (`yhub.restoreDoc`) is not listed until its next edit.
 
 **Clocks.** `t` and `since` are stream clocks (redis time). The changeset and activity filters
-`from`/`to` compare against the attribution timestamps, which the server that accepted a write
-stamps with its *own* clock just before appending it. An update appended after your stored `t`
-can therefore carry a timestamp slightly below it — clock skew between servers, or the moment
-between stamping and appending — and `from = t` would leave it out. Subtract an allowance from
-`from` (a second plus your servers' skew) when a missed change is worse than seeing one twice.
+`from`/`to` compare against the attribution timestamps, which are the same clock: a change is
+attributed to the time of the stream id of the message that brought it, never to a server's own
+clock. An update appended after your stored `t` therefore never carries a timestamp below it, and
+`from = t` misses nothing (it may return a change of `t`'s own millisecond again). History recorded
+before this release carries the clock of the server that accepted the write; mind the skew there.
 
 The cursor is a change clock, so it assumes that the redis time does not step back (a failover to
 a replica whose clock is behind, an NTP step): a document first written after such a step can get
@@ -586,8 +586,7 @@ grant, so `version` `r` grants keep their meaning.
   * `t`: the point to name — pass an activity entry's `to`. It is taken as is; nothing checks that
     it matches a change. Omitted, it is the last update of the document: the time of the last
     update on the redis stream, else the time the document was last persisted (both are redis
-    stream ids, so this may lie a few milliseconds after the last change's attribution time —
-    the version still captures the same state). A document without any history answers
+    stream ids, the clock attributions are stamped with). A document without any history answers
     `400 { code: 'no-history' }`, as does `t: 0`.
   * Returns the `Version`; `409 { code: 'version-exists' }` when `t` is already named.
 * `PATCH /api/version/v1/{org}/{docid}` body: `{ type: 'version:v1', t: number, updatedAt: number, name: string, custom?: any, published?: boolean }` — replace the `name`, `custom` and `published` of the version at `t`, **only if it is still the state the client read**: `updatedAt` must be the version's current `updatedAt`. Requires `history.version` `u`. **This is the recommended way to change a version** — two clients editing the same version can't silently overwrite each other.
